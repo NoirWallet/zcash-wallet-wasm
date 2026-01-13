@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zcash Message Signing Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        h2 {
+            margin-top: 0;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .result {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 3px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .error {
+            background-color: #ffeeee;
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <h1>Zcash Transparent Address Message Signing Test</h1>
+
+    <div class="section">
+        <h2>1. Generate Mnemonic & USK</h2>
+        <button onclick="generateMnemonic()">Generate New Mnemonic</button>
+        <div>
+            <label>Or enter mnemonic manually:</label>
+            <textarea id="mnemonic" rows="2" placeholder="24-word mnemonic phrase"></textarea>
+        </div>
+        <button onclick="createUSK()">Create USK from Mnemonic</button>
+        <div class="result" id="mnemonicResult"></div>
+    </div>
+
+    <div class="section">
+        <h2>2. Sign Message</h2>
+        <div>
+            <label>Network:</label>
+            <select id="network">
+                <option value="main">Mainnet</option>
+                <option value="test">Testnet</option>
+            </select>
+        </div>
+        <div>
+            <label>Message to sign:</label>
+            <textarea id="message" rows="3" placeholder="Enter message to sign">Hello Zcash!</textarea>
+        </div>
+        <button onclick="signMessage()">Sign Message</button>
+        <div class="result" id="signResult"></div>
+    </div>
+
+    <script type="module">
+        import init, {
+            generate_mnemonic,
+            validate_mnemonic,
+            mnemonic_to_spending_key,
+            sign_message_with_transparent,
+            mnemonic_to_seed_fingerprint
+        } from './pkg/zcash_wallet_wasm.js';
+
+        let usk = null;
+        let currentMnemonic = null;
+
+        // Define all functions first
+        window.generateMnemonic = async function() {
+            try {
+                const mnemonic = generate_mnemonic(24); // Generate 24-word mnemonic
+                document.getElementById('mnemonic').value = mnemonic;
+                currentMnemonic = mnemonic;
+                document.getElementById('mnemonicResult').textContent = 'Mnemonic generated successfully!\n' + mnemonic;
+                document.getElementById('mnemonicResult').className = 'result';
+            } catch (e) {
+                document.getElementById('mnemonicResult').textContent = 'Error: ' + e;
+                document.getElementById('mnemonicResult').className = 'result error';
+            }
+        };
+
+        window.createUSK = async function() {
+            try {
+                const mnemonicText = document.getElementById('mnemonic').value.trim();
+                if (!mnemonicText) {
+                    throw new Error('Please enter or generate a mnemonic first');
+                }
+
+                // Validate mnemonic
+                try {
+                    validate_mnemonic(mnemonicText);
+                } catch (e) {
+                    throw new Error('Invalid mnemonic: ' + e);
+                }
+
+                const network = document.getElementById('network').value;
+                const accountId = 0; // Use account 0
+
+                // mnemonic_to_spending_key(network, phrase, passphrase, account_index)
+                usk = mnemonic_to_spending_key(network, mnemonicText, "", accountId);
+                currentMnemonic = mnemonicText;
+
+                // Get seed fingerprint
+                const seedFp = mnemonic_to_seed_fingerprint(mnemonicText, "");
+
+                document.getElementById('mnemonicResult').textContent =
+                    'USK created successfully!\n' +
+                    'Account: ' + accountId + '\n' +
+                    'Seed Fingerprint: ' + JSON.stringify(seedFp);
+                document.getElementById('mnemonicResult').className = 'result';
+            } catch (e) {
+                document.getElementById('mnemonicResult').textContent = 'Error: ' + e;
+                document.getElementById('mnemonicResult').className = 'result error';
+                usk = null;
+            }
+        };
+
+        window.signMessage = async function() {
+            try {
+                if (!usk) {
+                    throw new Error('Please create USK first');
+                }
+
+                const network = document.getElementById('network').value;
+                const message = document.getElementById('message').value;
+
+                if (!message) {
+                    throw new Error('Please enter a message to sign');
+                }
+
+                const result = sign_message_with_transparent(network, usk, message);
+
+                document.getElementById('signResult').textContent =
+                    'Message signed successfully!\n\n' +
+                    'Message: ' + message + '\n\n' +
+                    'Signature (hex, 65 bytes):\n' + result.signature + '\n\n' +
+                    'Public Key (uncompressed hex, 65 bytes):\n' + result.pubkey + '\n\n' +
+                    'Transparent Address:\n' + result.address + '\n\n' +
+                    'Full Result:\n' + JSON.stringify(result, null, 2);
+                document.getElementById('signResult').className = 'result';
+            } catch (e) {
+                document.getElementById('signResult').textContent = 'Error: ' + e;
+                document.getElementById('signResult').className = 'result error';
+            }
+        };
+
+        // Initialize WASM module
+        (async () => {
+            try {
+                await init();
+                console.log('WASM module initialized successfully');
+            } catch (err) {
+                console.error('Failed to initialize WASM module:', err);
+                alert('Failed to initialize WASM module: ' + err);
+            }
+        })();
+    </script>
+</body>
+</html>

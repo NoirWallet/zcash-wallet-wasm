@@ -1,0 +1,9 @@
+# Enable atomics and bulk-memory for wasm-bindgen-rayon
+# Enable SIMD for performance (simd128 + relaxed-simd)
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128,+relaxed-simd",
+]
+
+[build]
+target = "wasm32-unknown-unknown"

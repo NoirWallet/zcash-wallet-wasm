@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Age Encryption Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1000px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        h2 {
+            margin-top: 0;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            box-sizing: border-box;
+            font-family: monospace;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .result {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 3px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-family: monospace;
+        }
+        .error {
+            background-color: #ffeeee;
+            color: red;
+        }
+        .success {
+            background-color: #eeffee;
+        }
+    </style>
+</head>
+<body>
+    <h1>Age Encryption/Decryption Test</h1>
+
+    <div class="section">
+        <h2>1. Encrypt String</h2>
+        <div>
+            <label>Plaintext:</label>
+            <textarea id="plaintext" rows="4" placeholder="Enter text to encrypt">Hello, Zcash!</textarea>
+        </div>
+        <div>
+            <label>Password:</label>
+            <input type="password" id="encryptPassword" placeholder="Enter password" value="my-secret-password">
+        </div>
+        <button onclick="encryptText()">Encrypt</button>
+        <div class="result" id="encryptResult"></div>
+    </div>
+
+    <div class="section">
+        <h2>2. Decrypt String</h2>
+        <div>
+            <label>Ciphertext (Base64):</label>
+            <textarea id="ciphertext" rows="4" placeholder="Paste encrypted text here"></textarea>
+        </div>
+        <div>
+            <label>Password:</label>
+            <input type="password" id="decryptPassword" placeholder="Enter password" value="my-secret-password">
+        </div>
+        <button onclick="decryptText()">Decrypt</button>
+        <div class="result" id="decryptResult"></div>
+    </div>
+
+    <div class="section">
+        <h2>3. Round-trip Test</h2>
+        <p>This will encrypt and then decrypt the same message to verify it works correctly.</p>
+        <div>
+            <label>Test Message:</label>
+            <textarea id="testMessage" rows="2">This is a test message for round-trip encryption!</textarea>
+        </div>
+        <div>
+            <label>Test Password:</label>
+            <input type="password" id="testPassword" value="test-password-123">
+        </div>
+        <button onclick="roundTripTest()">Run Round-trip Test</button>
+        <div class="result" id="roundTripResult"></div>
+    </div>
+
+    <script type="module">
+        import init, {
+            encrypt_string,
+            decrypt_string
+        } from './pkg/zcash_wallet_wasm.js';
+
+        window.encryptText = async function() {
+            try {
+                const plaintext = document.getElementById('plaintext').value;
+                const password = document.getElementById('encryptPassword').value;
+
+                if (!plaintext) {
+                    throw new Error('Please enter plaintext to encrypt');
+                }
+                if (!password) {
+                    throw new Error('Please enter a password');
+                }
+
+                const encrypted = encrypt_string(plaintext, password);
+
+                // Also copy to decrypt section for convenience
+                document.getElementById('ciphertext').value = encrypted;
+                document.getElementById('decryptPassword').value = password;
+
+                document.getElementById('encryptResult').textContent =
+                    'Encryption successful!\n\n' +
+                    'Ciphertext (Base64):\n' + encrypted + '\n\n' +
+                    'Length: ' + encrypted.length + ' characters\n' +
+                    '(Copied to decrypt section)';
+                document.getElementById('encryptResult').className = 'result success';
+            } catch (e) {
+                document.getElementById('encryptResult').textContent = 'Error: ' + e;
+                document.getElementById('encryptResult').className = 'result error';
+            }
+        };
+
+        window.decryptText = async function() {
+            try {
+                const ciphertext = document.getElementById('ciphertext').value.trim();
+                const password = document.getElementById('decryptPassword').value;
+
+                if (!ciphertext) {
+                    throw new Error('Please enter ciphertext to decrypt');
+                }
+                if (!password) {
+                    throw new Error('Please enter a password');
+                }
+
+                const decrypted = decrypt_string(ciphertext, password);
+
+                document.getElementById('decryptResult').textContent =
+                    'Decryption successful!\n\n' +
+                    'Plaintext:\n' + decrypted;
+                document.getElementById('decryptResult').className = 'result success';
+            } catch (e) {
+                document.getElementById('decryptResult').textContent = 'Error: ' + e;
+                document.getElementById('decryptResult').className = 'result error';
+            }
+        };
+
+        window.roundTripTest = async function() {
+            try {
+                const message = document.getElementById('testMessage').value;
+                const password = document.getElementById('testPassword').value;
+
+                if (!message) {
+                    throw new Error('Please enter a test message');
+                }
+                if (!password) {
+                    throw new Error('Please enter a password');
+                }
+
+                // Step 1: Encrypt
+                const encrypted = encrypt_string(message, password);
+
+                // Step 2: Decrypt
+                const decrypted = decrypt_string(encrypted, password);
+
+                // Step 3: Verify
+                const success = message === decrypted;
+
+                let result = 'Round-trip Test Results:\n\n' +
+                    'Original message:\n' + message + '\n\n' +
+                    'Encrypted (Base64):\n' + encrypted + '\n\n' +
+                    'Decrypted message:\n' + decrypted + '\n\n' +
+                    'Match: ' + (success ? '✓ SUCCESS' : '✗ FAILED');
+
+                if (!success) {
+                    result += '\n\nERROR: Decrypted message does not match original!';
+                }
+
+                document.getElementById('roundTripResult').textContent = result;
+                document.getElementById('roundTripResult').className = success ? 'result success' : 'result error';
+            } catch (e) {
+                document.getElementById('roundTripResult').textContent = 'Error: ' + e;
+                document.getElementById('roundTripResult').className = 'result error';
+            }
+        };
+
+        // Initialize WASM module
+        (async () => {
+            try {
+                await init();
+                console.log('WASM module initialized successfully');
+            } catch (err) {
+                console.error('Failed to initialize WASM module:', err);
+                alert('Failed to initialize WASM module: ' + err);
+            }
+        })();
+    </script>
+</body>
+</html>

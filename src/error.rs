@@ -1,0 +1,117 @@
+use std::fmt::Display;
+
+use wasm_bindgen::JsValue;
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("Invalid account id")]
+    AccountIdConversion(#[from] zcash_primitives::zip32::TryFromIntError),
+    #[error("Failed to derive key from seed")]
+    // doesn't implement std::error. Should probably fix this upstream
+    Derivation(#[from] zcash_keys::keys::DerivationError),
+    #[error("Failed to derive key")]
+    KeyDerivation,
+    #[error("Javascript error")]
+    Js(JsValue),
+    #[error("DomException {name} ({code}): {message}")]
+    DomException {
+        name: String,
+        message: String,
+        code: u16,
+    },
+    #[error("Address generation error")]
+    AddressGeneration(#[from] zcash_keys::keys::AddressGenerationError),
+    #[error("Error attempting to decode address: {0}")]
+    AddressDecoding(#[from] zcash_address::ParseError),
+    #[error("Invalid address")]
+    InvalidAddress,
+    #[error("Error attempting to decode key: {0}")]
+    KeyDecoding(String),
+    #[error("Invalid network string given: {0}")]
+    InvalidNetwork(String),
+    #[error("Error returned from GRPC server: {0}")]
+    Grpc(#[from] tonic::Status),
+    #[error("Error handling wallet birthday")]
+    Birthday,
+    #[error("Memory client error: {0}")]
+    MemoryClient(#[from] zcash_client_memory::Error),
+    #[error("Error scanning: {0}")]
+    Scan(zcash_client_backend::scanning::ScanError),
+    #[error("IO Error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(
+        "Error parsing min_confirmations argument {0}. Must be an integer > 0 (e.g. at least 1)"
+    )]
+    InvalidMinConformations(u32),
+    #[error("Error parsing zatoshi amount: {0}")]
+    InvalidAmount(#[from] zcash_protocol::value::BalanceError),
+    #[error("Failed to send transaction")]
+    SendFailed { code: i32, reason: String },
+    #[error("Failed to parse key: {0}")]
+    KeyParse(String),
+
+    #[error("Syncing Error: {0}")]
+    Sync(String),
+
+    #[error(
+        "Attempted to create a transaction with a memo to an unsupported recipient. Only shielded addresses are supported."
+    )]
+    UnsupportedMemoRecipient,
+    #[error("Error decoding memo: {0}")]
+    MemoDecoding(#[from] zcash_primitives::memo::Error),
+
+    #[error("Invalid seed phrase")]
+    InvalidSeedPhrase,
+    #[error("Failed when creating transaction")]
+    FailedToCreateTransaction,
+    #[error("Account with given id not found: {0}")]
+    AccountNotFound(u32),
+    #[error("Account with given name not found")]
+    AccountNameNotFound,
+    #[error("Account with name '{0}' already exists")]
+    AccountExists(String),
+    #[error("Transaction with given txid not found: {0}")]
+    TransactionNotFound(zcash_primitives::transaction::TxId),
+    #[error("Error constructing ZIP321 transaction request: {0}")]
+    Zip321(#[from] zcash_client_backend::zip321::Zip321Error),
+    #[error("serde wasm-bindgen error")]
+    SerdeWasmBindgen(#[from] serde_wasm_bindgen::Error),
+    #[error("Fail to parse TxIds")]
+    TxIdParse,
+    #[error("Failed to create Pczt")]
+    PcztCreate,
+    #[error("Failed to prove Pczt: {0}")]
+    PcztProve(String),
+    #[error("Failed to send Pczt: {0}")]
+    PcztSend(String),
+    #[error("Failed to combine Pczt: {0}")]
+    PcztCombine(String),
+    #[error("An generic error occurred: {0}")]
+    Generic(String),
+
+    #[error("Failed to sign Pczt: {0}")]
+    PcztSign(String),
+    #[error("Error attempting to get seed fingerprint.")]
+    SeedFingerprint,
+    #[error("Encryption error: {0}")]
+    Encryption(String),
+    #[error("Decryption error: {0}")]
+    Decryption(String),
+}
+
+impl From<Error> for JsValue {
+    fn from(e: Error) -> Self {
+        js_sys::Error::new(&e.to_string()).into()
+    }
+}
+
+impl<A, B, C> From<zcash_client_backend::sync::Error<A, B, C>> for Error
+where
+    A: Display,
+    B: Display,
+    C: Display,
+{
+    fn from(e: zcash_client_backend::sync::Error<A, B, C>) -> Self {
+        Self::Sync(e.to_string())
+    }
+}
