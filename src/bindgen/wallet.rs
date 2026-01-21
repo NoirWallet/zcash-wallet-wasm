@@ -184,7 +184,7 @@ impl WebWallet {
     // }
 
     pub async fn sync(&self) -> Result<(), Error> {
-        assert!(!thread::is_web_worker_thread());
+        // assert!(!thread::is_web_worker_thread());
 
         let db = self.inner.clone();
 
@@ -330,7 +330,7 @@ impl WebWallet {
         seed_phrase: &str,
         account_hd_index: u32,
     ) -> Result<Vec<u8>, Error> {
-        assert!(!thread::is_web_worker_thread());
+        // assert!(!thread::is_web_worker_thread());
 
         let (usk, _) = usk_from_seed_str(seed_phrase, account_hd_index, &self.inner.network)?;
         let db = self.inner.clone();
@@ -609,7 +609,7 @@ impl WebWallet {
         pczt: Pczt,
         sapling_proof_gen_key: Option<ProofGenerationKey>,
     ) -> Result<Pczt, Error> {
-        assert!(!thread::is_web_worker_thread());
+        // assert!(!thread::is_web_worker_thread());
 
         let db = self.inner.clone();
         let pczt_inner = pczt.into();
