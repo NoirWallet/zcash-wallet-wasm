@@ -590,7 +590,7 @@ impl WebWallet {
         Ok(result_pczt.into())
     }
 
-    pub async fn pczt_send(&self, pczt: Pczt) -> Result<(), Error> {
+    pub async fn pczt_send(&self, pczt: Pczt) -> Result<String, Error> {
         self.inner.pczt_send(pczt.into()).await
     }
 

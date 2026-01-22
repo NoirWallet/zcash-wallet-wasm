@@ -342,7 +342,7 @@ export class WebWallet {
   shield_funds(account_id: number, usk: UnifiedSpendingKey): Promise<any>;
   pczt_create(account_id: number, to_address: string, value: bigint): Promise<Pczt>;
   pczt_prove(pczt: Pczt, sapling_proof_gen_key?: ProofGenerationKey | null): Promise<Pczt>;
-  pczt_send(pczt: Pczt): Promise<void>;
+  pczt_send(pczt: Pczt): Promise<string>;
   pczt_combine(pczts: Pczt[]): Pczt;
   get_current_address_transparent(account_id: number): Promise<string>;
   get_latest_block(): Promise<bigint>;

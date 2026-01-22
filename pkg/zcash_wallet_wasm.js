@@ -1660,7 +1660,7 @@ export class WebWallet {
     }
     /**
      * @param {Pczt} pczt
-     * @returns {Promise<void>}
+     * @returns {Promise<string>}
      */
     pczt_send(pczt) {
         _assertClass(pczt, Pczt);

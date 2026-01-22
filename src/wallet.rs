@@ -1018,7 +1018,7 @@ where
         Ok(pczt)
     }
 
-    pub async fn pczt_send(&self, pczt: Pczt) -> Result<(), Error> {
+    pub async fn pczt_send(&self, pczt: Pczt) -> Result<String, Error> {
         let prover = get_prover();
         let (spend_vk, output_vk) = prover.verifying_keys();
         let mut db = self.db.write().await;
@@ -1052,7 +1052,7 @@ where
             .await?;
 
         tracing::info!("🎉 Transaction broadcast successfully!");
-        Ok(())
+        Ok(txid.to_string())
     }
 
     pub fn pczt_combine(&self, pczts: Vec<Pczt>) -> Result<Pczt, Error> {
