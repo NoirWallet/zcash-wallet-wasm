@@ -671,11 +671,6 @@ export function start(): void;
  */
 export function validate_mnemonic(phrase: string): void;
 
-/**
- * Entry point for web workers
- */
-export function wasm_thread_entry_point(ptr: number): void;
-
 export class wbg_rayon_PoolBuilder {
   private constructor();
   free(): void;
@@ -792,7 +787,6 @@ export interface InitOutput {
   readonly wbg_rayon_poolbuilder_build: (a: number) => void;
   readonly initThreadPool: (a: number) => number;
   readonly wbg_rayon_start_worker: (a: number) => void;
-  readonly wasm_thread_entry_point: (a: number) => void;
   readonly __wbg_intounderlyingbytesource_free: (a: number, b: number) => void;
   readonly intounderlyingbytesource_type: (a: number) => number;
   readonly intounderlyingbytesource_autoAllocateChunkSize: (a: number) => number;
@@ -810,11 +804,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_4532: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_4531: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_4820: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_4819: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_9252: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_4696: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_4695: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_9090: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

@@ -7,7 +7,6 @@ use nonempty::NonEmpty;
 use serde::{Deserialize, Serialize};
 use tonic_web_wasm_client::Client;
 use wasm_bindgen::prelude::*;
-use wasm_thread as thread;
 use zcash_address::ZcashAddress;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::proto::service::ChainSpec;
@@ -184,28 +183,10 @@ impl WebWallet {
     // }
 
     pub async fn sync(&self) -> Result<(), Error> {
-        // assert!(!thread::is_web_worker_thread());
-
-        let db = self.inner.clone();
-
         // Record start time
         let start_time = js_sys::Date::now();
 
-        let sync_handler = thread::Builder::new()
-            .name("sync".to_string())
-            .spawn_async(|| async {
-                assert!(thread::is_web_worker_thread());
-                tracing::info!(
-                    "Current num threads (wasm_thread) {}",
-                    rayon::current_num_threads()
-                );
-
-                let db = db;
-                db.sync().await.unwrap_throw();
-            })
-            .unwrap_throw()
-            .join_async();
-        sync_handler.await.unwrap();
+        self.inner.sync().await?;
 
         // Calculate elapsed time in seconds
         let end_time = js_sys::Date::now();
@@ -330,32 +311,15 @@ impl WebWallet {
         seed_phrase: &str,
         account_hd_index: u32,
     ) -> Result<Vec<u8>, Error> {
-        // assert!(!thread::is_web_worker_thread());
-
         let (usk, _) = usk_from_seed_str(seed_phrase, account_hd_index, &self.inner.network)?;
-        let db = self.inner.clone();
 
         // Record start time
         let start_time = js_sys::Date::now();
 
-        let create_proposed_transaction_handler = thread::Builder::new()
-            .name("create_proposed_transaction".to_string())
-            .spawn_async(|| async move {
-                assert!(thread::is_web_worker_thread());
-                tracing::info!(
-                    "Current num threads (wasm_thread) {}",
-                    rayon::current_num_threads()
-                );
-
-                let db = db;
-
-                db.create_proposed_transactions(proposal.into(), &usk)
-                    .await
-                    .unwrap_throw()
-            })
-            .unwrap_throw()
-            .join_async();
-        let txids = create_proposed_transaction_handler.await.unwrap();
+        let txids = self
+            .inner
+            .create_proposed_transactions(proposal.into(), &usk)
+            .await?;
 
         // Calculate elapsed time in seconds
         let end_time = js_sys::Date::now();
@@ -609,33 +573,13 @@ impl WebWallet {
         pczt: Pczt,
         sapling_proof_gen_key: Option<ProofGenerationKey>,
     ) -> Result<Pczt, Error> {
-        // assert!(!thread::is_web_worker_thread());
-
-        let db = self.inner.clone();
         let pczt_inner = pczt.into();
         let proof_gen_key = sapling_proof_gen_key.map(Into::into);
 
         // Record start time
         let start_time = js_sys::Date::now();
 
-        let pczt_prove_handler = thread::Builder::new()
-            .name("pczt_prove".to_string())
-            .spawn_async(|| async move {
-                assert!(thread::is_web_worker_thread());
-                tracing::info!(
-                    "Current num threads (wasm_thread) {}",
-                    rayon::current_num_threads()
-                );
-
-                let db = db;
-
-                db.pczt_prove(pczt_inner, proof_gen_key)
-                    .await
-                    .unwrap_throw()
-            })
-            .unwrap_throw()
-            .join_async();
-        let result_pczt = pczt_prove_handler.await.unwrap();
+        let result_pczt = self.inner.pczt_prove(pczt_inner, proof_gen_key).await?;
 
         // Calculate elapsed time in seconds
         let end_time = js_sys::Date::now();

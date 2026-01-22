@@ -23,7 +23,6 @@ serde-wasm-bindgen = "0.6.5"
 
 wasm-bindgen-futures = "0.4.43"
 wasm-bindgen-rayon = { version = "1.3", optional = true }
-wasm_thread = { git = "https://github.com/ec2/wasm_thread", rev = "9e432077948d927d49373d1d039c23447d3648df", default-features = false, features = ["keep_worker_alive", "es_modules"] }
 rayon = { version = "1.8", features = ["web_spin_lock"] }
 
 tracing-web = { version = "0.1.3" }
