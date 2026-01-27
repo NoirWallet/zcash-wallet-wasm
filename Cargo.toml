@@ -73,6 +73,8 @@ tonic = { version = "0.13", default-features = false, features = [
     "codegen",
 ] }
 
+gloo-net = "0.6.0"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

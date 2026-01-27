@@ -316,6 +316,43 @@
             <div class="result" id="pcztSendResult"></div>
         </div>
 
+        <!-- One-Click PCZT Transfer -->
+        <div class="section full-width">
+            <h2>6c. One-Click PCZT Transfer (Fastest)</h2>
+            <div class="info" style="margin-bottom: 15px; padding: 10px; background-color: #d4edda; border-left: 4px solid #28a745;">
+                <strong>🚀 Fastest Method - All in One!</strong><br>
+                Combines all PCZT steps (Create → Sign → Prove → Send) into a single call.<br>
+                Optionally uses a remote proving server for faster proving.<br>
+                <strong>Note:</strong> Requires mnemonic for signing.
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div>
+                    <label>From Account ID:</label>
+                    <input type="number" id="oneclickAccountId" value="0" min="0">
+                    <label>To Address:</label>
+                    <input type="text" id="oneclickToAddress" placeholder="Recipient Zcash address">
+                    <label>Amount (zatoshi):</label>
+                    <input type="number" id="oneclickAmount" value="10000" min="1" placeholder="Amount in zatoshi (1 ZEC = 100,000,000 zatoshi)">
+                    <label>Mnemonic for signing:</label>
+                    <textarea id="oneclickMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
+                    <label style="margin-top: 10px;">
+                        <input type="checkbox" id="useProveServer" checked>
+                        Use remote proving server (faster)
+                    </label>
+                </div>
+                <div>
+                    <h3>Status:</h3>
+                    <div style="background-color: #f8f9fa; padding: 10px; border-radius: 4px; margin-bottom: 10px; min-height: 100px;">
+                        <div id="oneclickStatus">Ready to send...</div>
+                    </div>
+                    <button onclick="oneclickPcztTransfer()" style="background-color: #28a745; font-size: 16px; padding: 12px 24px;">
+                        ⚡ Send Now (One-Click)
+                    </button>
+                </div>
+            </div>
+            <div class="result" id="oneclickResult"></div>
+        </div>
+
         <!-- Save/Load Wallet -->
         <div class="section">
             <h2>7. Save/Load Wallet</h2>
@@ -1148,6 +1185,100 @@
                         );
                     }
                 }
+            }
+        };
+
+        // 6c. One-Click PCZT Transfer
+        window.oneclickPcztTransfer = async function() {
+            try {
+                if (!wallet) {
+                    throw new Error('Please initialize wallet first');
+                }
+
+                const accountId = parseInt(document.getElementById('oneclickAccountId').value);
+                const toAddress = document.getElementById('oneclickToAddress').value.trim();
+                const amount = BigInt(document.getElementById('oneclickAmount').value);
+                const mnemonic = document.getElementById('oneclickMnemonic').value.trim();
+                const useProveServer = document.getElementById('useProveServer').checked;
+
+                if (!toAddress) {
+                    throw new Error('Please enter recipient address');
+                }
+                if (!mnemonic) {
+                    throw new Error('Please enter mnemonic for signing');
+                }
+
+                // Update status
+                const statusDiv = document.getElementById('oneclickStatus');
+                statusDiv.innerHTML = '⏳ Starting one-click transfer...';
+                showResult('oneclickResult', '⏳ Processing...', 'info');
+
+                const totalStartTime = performance.now();
+                const network = document.getElementById('network').value;
+
+                // Get HD index
+                statusDiv.innerHTML += '<br>📋 Getting account HD index...';
+                const hdIndex = await wallet.get_account_hd_index(accountId);
+                if (hdIndex === null) {
+                    throw new Error('This account was imported and cannot be signed with a mnemonic. HD index not available.');
+                }
+
+                // Get spending key and seed fingerprint
+                statusDiv.innerHTML += '<br>🔑 Generating spending key and seed fingerprint...';
+                const usk = mnemonic_to_spending_key(
+                    network,
+                    mnemonic,
+                    "",  // passphrase
+                    hdIndex
+                );
+                const seedFp = mnemonic_to_seed_fingerprint(
+                    mnemonic,
+                    ""  // passphrase
+                );
+
+                // Get Sapling proof generation key
+                statusDiv.innerHTML += '<br>🌱 Getting Sapling proof generation key...';
+
+                // Call one-click transfer
+                statusDiv.innerHTML += '<br>🚀 Executing one-click transfer...';
+                if (useProveServer) {
+                    statusDiv.innerHTML += '<br>🌐 Using remote proving server (faster)...';
+                } else {
+                    statusDiv.innerHTML += '<br>💻 Using local proving (slower, ~70-80s)...';
+                }
+
+                const txid = await wallet.oneclick_pczt_transfer(
+                    accountId,
+                    toAddress,
+                    amount,
+                    usk,
+                    seedFp,
+                    null,
+                    useProveServer
+                );
+
+                const totalElapsed = ((performance.now() - totalStartTime) / 1000).toFixed(2);
+
+                statusDiv.innerHTML = `✅ Success!<br>Transaction ID: ${txid}<br>Total time: ${totalElapsed}s`;
+                showResult('oneclickResult',
+                    `🎉 One-Click Transfer Complete!\n\n` +
+                    `Transaction ID: ${txid}\n` +
+                    `Total Time: ${totalElapsed}s\n` +
+                    `From Account: ${accountId}\n` +
+                    `To Address: ${toAddress}\n` +
+                    `Amount: ${amount} zatoshi\n` +
+                    `Prove Server: ${useProveServer ? 'Remote (faster)' : 'Local'}\n\n` +
+                    `✅ Transaction created, signed, proven, and sent in a single call!`,
+                    'success'
+                );
+
+                console.log('✅ One-click transfer completed:', txid);
+
+            } catch (e) {
+                const statusDiv = document.getElementById('oneclickStatus');
+                statusDiv.innerHTML = `❌ Error: ${e.message || e}`;
+                showResult('oneclickResult', '❌ Error: ' + e, 'error');
+                console.error('One-click transfer error:', e);
             }
         };
 
