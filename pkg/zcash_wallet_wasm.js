@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_4843(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4843(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4735(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4735(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_9459(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_9459(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_8841(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_8841(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -676,12 +676,6 @@ export class Pczt {
         PcztFinalization.register(obj, obj.__wbg_ptr, obj);
         return obj;
     }
-    static __unwrap(jsValue) {
-        if (!(jsValue instanceof Pczt)) {
-            return 0;
-        }
-        return jsValue.__destroy_into_raw();
-    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -762,13 +756,6 @@ export class ProofGenerationKey {
 if (Symbol.dispose) ProofGenerationKey.prototype[Symbol.dispose] = ProofGenerationKey.prototype.free;
 
 export class Proposal {
-    static __wrap(ptr) {
-        ptr = ptr >>> 0;
-        const obj = Object.create(Proposal.prototype);
-        obj.__wbg_ptr = ptr;
-        ProposalFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -1135,43 +1122,6 @@ export class UnifiedSpendingKey {
         const ret = wasm.unifiedspendingkey_to_sapling_proof_generation_key(this.__wbg_ptr);
         return ProofGenerationKey.__wrap(ret);
     }
-    /**
-     * Encode the Sapling Extended Spending Key to Bech32 format
-     *
-     * # Arguments
-     * * `network` - Must be either "main" or "test"
-     *
-     * # Returns
-     * String in format "secret-extended-key-main..." or "secret-extended-key-test..."
-     * @param {string} network
-     * @returns {string}
-     */
-    encode_sapling_extended_spending_key(network) {
-        let deferred3_0;
-        let deferred3_1;
-        try {
-            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(network, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len0 = WASM_VECTOR_LEN;
-            wasm.unifiedspendingkey_encode_sapling_extended_spending_key(retptr, this.__wbg_ptr, ptr0, len0);
-            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-            var ptr2 = r0;
-            var len2 = r1;
-            if (r3) {
-                ptr2 = 0; len2 = 0;
-                throw takeObject(r2);
-            }
-            deferred3_0 = ptr2;
-            deferred3_1 = len2;
-            return getStringFromWasm0(ptr2, len2);
-        } finally {
-            wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
-        }
-    }
 }
 if (Symbol.dispose) UnifiedSpendingKey.prototype[Symbol.dispose] = UnifiedSpendingKey.prototype.free;
 
@@ -1323,38 +1273,6 @@ export class WebWallet {
         return takeObject(ret);
     }
     /**
-     * @param {string} account_name
-     * @param {string} encoded_ufvk
-     * @param {SeedFingerprint} seed_fingerprint
-     * @param {number} account_hd_index
-     * @param {number | null} [birthday_height]
-     * @returns {Promise<number>}
-     */
-    create_account_ufvk(account_name, encoded_ufvk, seed_fingerprint, account_hd_index, birthday_height) {
-        const ptr0 = passStringToWasm0(account_name, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(encoded_ufvk, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len1 = WASM_VECTOR_LEN;
-        _assertClass(seed_fingerprint, SeedFingerprint);
-        var ptr2 = seed_fingerprint.__destroy_into_raw();
-        const ret = wasm.webwallet_create_account_ufvk(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, account_hd_index, isLikeNone(birthday_height) ? 0x100000001 : (birthday_height) >>> 0);
-        return takeObject(ret);
-    }
-    /**
-     * @param {string} account_name
-     * @param {string} encoded_ufvk
-     * @param {number | null} [birthday_height]
-     * @returns {Promise<number>}
-     */
-    create_account_view_ufvk(account_name, encoded_ufvk, birthday_height) {
-        const ptr0 = passStringToWasm0(account_name, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(encoded_ufvk, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.webwallet_create_account_view_ufvk(this.__wbg_ptr, ptr0, len0, ptr1, len1, isLikeNone(birthday_height) ? 0x100000001 : (birthday_height) >>> 0);
-        return takeObject(ret);
-    }
-    /**
      * @returns {Promise<void>}
      */
     sync() {
@@ -1473,32 +1391,6 @@ export class WebWallet {
         return takeObject(ret);
     }
     /**
-     * @param {number} account_id
-     * @param {string} to_address
-     * @param {bigint} value
-     * @returns {Promise<Proposal>}
-     */
-    propose_transfer(account_id, to_address, value) {
-        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.webwallet_propose_transfer(this.__wbg_ptr, account_id, ptr0, len0, value);
-        return takeObject(ret);
-    }
-    /**
-     * @param {Proposal} proposal
-     * @param {string} seed_phrase
-     * @param {number} account_hd_index
-     * @returns {Promise<Uint8Array>}
-     */
-    create_proposed_transactions(proposal, seed_phrase, account_hd_index) {
-        _assertClass(proposal, Proposal);
-        var ptr0 = proposal.__destroy_into_raw();
-        const ptr1 = passStringToWasm0(seed_phrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.webwallet_create_proposed_transactions(this.__wbg_ptr, ptr0, ptr1, len1, account_hd_index);
-        return takeObject(ret);
-    }
-    /**
      * @returns {Promise<Uint8Array>}
      */
     db_to_bytes() {
@@ -1513,14 +1405,6 @@ export class WebWallet {
         const ptr0 = passArray8ToWasm0(txids, wasm.__wbindgen_export);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.webwallet_send_authorized_transactions(this.__wbg_ptr, ptr0, len0);
-        return takeObject(ret);
-    }
-    /**
-     * @param {number} account_id
-     * @returns {Promise<string>}
-     */
-    get_current_address(account_id) {
-        const ret = wasm.webwallet_get_current_address(this.__wbg_ptr, account_id);
         return takeObject(ret);
     }
     /**
@@ -1598,14 +1482,6 @@ export class WebWallet {
      */
     get_unified_addresses(account_id) {
         const ret = wasm.webwallet_get_unified_addresses(this.__wbg_ptr, account_id);
-        return takeObject(ret);
-    }
-    /**
-     * @param {number} account_id
-     * @returns {Promise<Pczt>}
-     */
-    pczt_shield(account_id) {
-        const ret = wasm.webwallet_pczt_shield(this.__wbg_ptr, account_id);
         return takeObject(ret);
     }
     /**
@@ -1694,35 +1570,6 @@ export class WebWallet {
         return takeObject(ret);
     }
     /**
-     * @param {Pczt[]} pczts
-     * @returns {Pczt}
-     */
-    pczt_combine(pczts) {
-        try {
-            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passArrayJsValueToWasm0(pczts, wasm.__wbindgen_export);
-            const len0 = WASM_VECTOR_LEN;
-            wasm.webwallet_pczt_combine(retptr, this.__wbg_ptr, ptr0, len0);
-            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-            if (r2) {
-                throw takeObject(r1);
-            }
-            return Pczt.__wrap(r0);
-        } finally {
-            wasm.__wbindgen_add_to_stack_pointer(16);
-        }
-    }
-    /**
-     * @param {number} account_id
-     * @returns {Promise<string>}
-     */
-    get_current_address_transparent(account_id) {
-        const ret = wasm.webwallet_get_current_address_transparent(this.__wbg_ptr, account_id);
-        return takeObject(ret);
-    }
-    /**
      * @returns {Promise<bigint>}
      */
     get_latest_block() {
@@ -1731,157 +1578,6 @@ export class WebWallet {
     }
 }
 if (Symbol.dispose) WebWallet.prototype[Symbol.dispose] = WebWallet.prototype.free;
-
-/**
- * Decrypt a string using age with a passphrase
- *
- * # Arguments
- *
- * * `ciphertext` - Base64-encoded encrypted data
- * * `passphrase` - The passphrase to use for decryption
- *
- * # Returns
- *
- * The decrypted plaintext string
- *
- * # Example
- *
- * ```javascript
- * const decrypted = decrypt_string(encrypted, "my-secret-password");
- * console.log(decrypted); // "Hello, World!"
- * ```
- * @param {string} ciphertext
- * @param {string} passphrase
- * @returns {string}
- */
-export function decrypt_string(ciphertext, passphrase) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(ciphertext, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.decrypt_string(retptr, ptr0, len0, ptr1, len1);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-        var ptr3 = r0;
-        var len3 = r1;
-        if (r3) {
-            ptr3 = 0; len3 = 0;
-            throw takeObject(r2);
-        }
-        deferred4_0 = ptr3;
-        deferred4_1 = len3;
-        return getStringFromWasm0(ptr3, len3);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Encrypt a string using age with a passphrase
- *
- * # Arguments
- *
- * * `plaintext` - The string to encrypt
- * * `passphrase` - The passphrase to use for encryption
- *
- * # Returns
- *
- * Base64-encoded encrypted data
- *
- * # Example
- *
- * ```javascript
- * const encrypted = encrypt_string("Hello, World!", "my-secret-password");
- * console.log(encrypted); // Base64-encoded ciphertext
- * ```
- * @param {string} plaintext
- * @param {string} passphrase
- * @returns {string}
- */
-export function encrypt_string(plaintext, passphrase) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(plaintext, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.encrypt_string(retptr, ptr0, len0, ptr1, len1);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-        var ptr3 = r0;
-        var len3 = r1;
-        if (r3) {
-            ptr3 = 0; len3 = 0;
-            throw takeObject(r2);
-        }
-        deferred4_0 = ptr3;
-        deferred4_1 = len3;
-        return getStringFromWasm0(ptr3, len3);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Convert entropy bytes to a mnemonic phrase.
- *
- * # Arguments
- *
- * * `entropy` - The entropy bytes (16, 20, 24, 28, or 32 bytes)
- *
- * # Returns
- *
- * A string containing the mnemonic phrase
- *
- * # Example
- *
- * ```javascript
- * const entropy = new Uint8Array(32); // 32 bytes for 24 words
- * crypto.getRandomValues(entropy);
- * const mnemonic = entropy_to_mnemonic(entropy);
- * console.log(mnemonic);
- * ```
- * @param {Uint8Array} entropy
- * @returns {string}
- */
-export function entropy_to_mnemonic(entropy) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passArray8ToWasm0(entropy, wasm.__wbindgen_export);
-        const len0 = WASM_VECTOR_LEN;
-        wasm.entropy_to_mnemonic(retptr, ptr0, len0);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-        var ptr2 = r0;
-        var len2 = r1;
-        if (r3) {
-            ptr2 = 0; len2 = 0;
-            throw takeObject(r2);
-        }
-        deferred3_0 = ptr2;
-        deferred3_1 = len2;
-        return getStringFromWasm0(ptr2, len2);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
-    }
-}
 
 /**
  * Generate a new BIP-39 mnemonic phrase with the specified word count.
@@ -1989,47 +1685,6 @@ export function mnemonic_to_addresses(network, phrase, passphrase, account_index
             throw takeObject(r1);
         }
         return takeObject(r0);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-    }
-}
-
-/**
- * Convert a mnemonic phrase to its entropy bytes.
- *
- * # Arguments
- *
- * * `phrase` - The mnemonic phrase
- *
- * # Returns
- *
- * A vector of bytes representing the entropy
- *
- * # Example
- *
- * ```javascript
- * const entropy = mnemonic_to_entropy("abandon abandon abandon ... art");
- * console.log(entropy); // Uint8Array
- * ```
- * @param {string} phrase
- * @returns {Uint8Array}
- */
-export function mnemonic_to_entropy(phrase) {
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(phrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        wasm.mnemonic_to_entropy(retptr, ptr0, len0);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-        if (r3) {
-            throw takeObject(r2);
-        }
-        var v2 = getArrayU8FromWasm0(r0, r1).slice();
-        wasm.__wbindgen_export4(r0, r1 * 1, 1);
-        return v2;
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
@@ -2173,59 +1828,6 @@ export function mnemonic_to_spending_key(network, phrase, passphrase, account_in
             throw takeObject(r1);
         }
         return UnifiedSpendingKey.__wrap(r0);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-    }
-}
-
-/**
- * Generate a UnifiedFullViewingKey from a mnemonic phrase.
- *
- * # Arguments
- *
- * * `network` - Network name ("main" or "test")
- * * `phrase` - The mnemonic phrase
- * * `passphrase` - Optional passphrase (use empty string "" if none)
- * * `account_index` - The account index for HD derivation (usually 0)
- *
- * # Returns
- *
- * A UnifiedFullViewingKey that can be used for viewing transactions
- *
- * # Example
- *
- * ```javascript
- * const mnemonic = generate_mnemonic(24);
- * const ufvk = mnemonic_to_viewing_key(
- *     "main",
- *     mnemonic,
- *     "",  // no passphrase
- *     0    // first account
- * );
- * ```
- * @param {string} network
- * @param {string} phrase
- * @param {string} passphrase
- * @param {number} account_index
- * @returns {UnifiedFullViewingKey}
- */
-export function mnemonic_to_viewing_key(network, phrase, passphrase, account_index) {
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(network, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(phrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(passphrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.mnemonic_to_viewing_key(retptr, ptr0, len0, ptr1, len1, ptr2, len2, account_index);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-        if (r2) {
-            throw takeObject(r1);
-        }
-        return UnifiedFullViewingKey.__wrap(r0);
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
@@ -2874,7 +2476,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_9459(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_8841(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2941,10 +2543,6 @@ function __wbg_get_imports(memory) {
         const ret = Pczt.__wrap(arg0);
         return addHeapObject(ret);
     };
-    imports.wbg.__wbg_pczt_unwrap = function(arg0) {
-        const ret = Pczt.__unwrap(getObject(arg0));
-        return ret;
-    };
     imports.wbg.__wbg_performance_121b9855d716e029 = function() {
         const ret = globalThis.performance;
         return addHeapObject(ret);
@@ -2954,10 +2552,6 @@ function __wbg_get_imports(memory) {
     }, arguments) };
     imports.wbg.__wbg_process_dc0fbacc7c1c06f7 = function(arg0) {
         const ret = getObject(arg0).process;
-        return addHeapObject(ret);
-    };
-    imports.wbg.__wbg_proposal_new = function(arg0) {
-        const ret = Proposal.__wrap(arg0);
         return addHeapObject(ret);
     };
     imports.wbg.__wbg_prototypesetcall_dfe9b766cdc1f1fd = function(arg0, arg1, arg2) {
@@ -3150,11 +2744,6 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_warn_6e567d0d926ff881 = function(arg0) {
         console.warn(getObject(arg0));
     };
-    imports.wbg.__wbindgen_cast_14672e9abb29ca57 = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1901, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1902, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4842, __wasm_bindgen_func_elem_4843);
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
         // Cast intrinsic for `Ref(String) -> Externref`.
         const ret = getStringFromWasm0(arg0, arg1);
@@ -3177,14 +2766,19 @@ function __wbg_get_imports(memory) {
         const ret = v0;
         return addHeapObject(ret);
     };
+    imports.wbg.__wbindgen_cast_78d7b3c7ad74d3ea = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1861, function: Function { arguments: [Externref], shim_idx: 1862, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4734, __wasm_bindgen_func_elem_4735);
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbindgen_cast_8ad1134b92788bf2 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1861, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1862, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4734, __wasm_bindgen_func_elem_4735);
+        return addHeapObject(ret);
+    };
     imports.wbg.__wbindgen_cast_9ae0607507abb057 = function(arg0) {
         // Cast intrinsic for `I64 -> Externref`.
         const ret = arg0;
-        return addHeapObject(ret);
-    };
-    imports.wbg.__wbindgen_cast_c0c23368475c5dc1 = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1901, function: Function { arguments: [Externref], shim_idx: 1902, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4842, __wasm_bindgen_func_elem_4843);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_cb9088102bce6b30 = function(arg0, arg1) {
@@ -3218,7 +2812,7 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbindgen_object_drop_ref = function(arg0) {
         takeObject(arg0);
     };
-    imports.wbg.memory = memory || new WebAssembly.Memory({initial:836,maximum:16384,shared:true});
+    imports.wbg.memory = memory || new WebAssembly.Memory({initial:835,maximum:16384,shared:true});
 
     return imports;
 }

@@ -1,5 +1,5 @@
 use crate::Error;
-use crate::bindgen::{SeedFingerprint, UnifiedFullViewingKey, UnifiedSpendingKey};
+use crate::bindgen::{SeedFingerprint, UnifiedSpendingKey};
 use bip0039::{Count, English, Mnemonic};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -75,55 +75,55 @@ pub fn validate_mnemonic(phrase: &str) -> Result<(), Error> {
     Mnemonic::<English>::validate(phrase).map_err(|_| Error::InvalidSeedPhrase)
 }
 
-/// Convert a mnemonic phrase to its entropy bytes.
-///
-/// # Arguments
-///
-/// * `phrase` - The mnemonic phrase
-///
-/// # Returns
-///
-/// A vector of bytes representing the entropy
-///
-/// # Example
-///
-/// ```javascript
-/// const entropy = mnemonic_to_entropy("abandon abandon abandon ... art");
-/// console.log(entropy); // Uint8Array
-/// ```
-#[wasm_bindgen]
-pub fn mnemonic_to_entropy(phrase: &str) -> Result<Vec<u8>, Error> {
-    let mnemonic: Mnemonic<English> =
-        Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
+// /// Convert a mnemonic phrase to its entropy bytes.
+// ///
+// /// # Arguments
+// ///
+// /// * `phrase` - The mnemonic phrase
+// ///
+// /// # Returns
+// ///
+// /// A vector of bytes representing the entropy
+// ///
+// /// # Example
+// ///
+// /// ```javascript
+// /// const entropy = mnemonic_to_entropy("abandon abandon abandon ... art");
+// /// console.log(entropy); // Uint8Array
+// /// ```
+// #[wasm_bindgen]
+// pub fn mnemonic_to_entropy(phrase: &str) -> Result<Vec<u8>, Error> {
+//     let mnemonic: Mnemonic<English> =
+//         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    Ok(mnemonic.entropy().to_vec())
-}
+//     Ok(mnemonic.entropy().to_vec())
+// }
 
-/// Convert entropy bytes to a mnemonic phrase.
-///
-/// # Arguments
-///
-/// * `entropy` - The entropy bytes (16, 20, 24, 28, or 32 bytes)
-///
-/// # Returns
-///
-/// A string containing the mnemonic phrase
-///
-/// # Example
-///
-/// ```javascript
-/// const entropy = new Uint8Array(32); // 32 bytes for 24 words
-/// crypto.getRandomValues(entropy);
-/// const mnemonic = entropy_to_mnemonic(entropy);
-/// console.log(mnemonic);
-/// ```
-#[wasm_bindgen]
-pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, Error> {
-    let mnemonic: Mnemonic<English> =
-        Mnemonic::from_entropy(entropy).map_err(|_| Error::InvalidSeedPhrase)?;
+// /// Convert entropy bytes to a mnemonic phrase.
+// ///
+// /// # Arguments
+// ///
+// /// * `entropy` - The entropy bytes (16, 20, 24, 28, or 32 bytes)
+// ///
+// /// # Returns
+// ///
+// /// A string containing the mnemonic phrase
+// ///
+// /// # Example
+// ///
+// /// ```javascript
+// /// const entropy = new Uint8Array(32); // 32 bytes for 24 words
+// /// crypto.getRandomValues(entropy);
+// /// const mnemonic = entropy_to_mnemonic(entropy);
+// /// console.log(mnemonic);
+// /// ```
+// #[wasm_bindgen]
+// pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, Error> {
+//     let mnemonic: Mnemonic<English> =
+//         Mnemonic::from_entropy(entropy).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    Ok(mnemonic.phrase().to_string())
-}
+//     Ok(mnemonic.phrase().to_string())
+// }
 
 /// Convert a mnemonic phrase to a seed with an optional passphrase.
 ///
@@ -227,49 +227,49 @@ pub fn mnemonic_to_seed_fingerprint(
     SeedFingerprint::new(seed.to_vec().into_boxed_slice())
 }
 
-/// Generate a UnifiedFullViewingKey from a mnemonic phrase.
-///
-/// # Arguments
-///
-/// * `network` - Network name ("main" or "test")
-/// * `phrase` - The mnemonic phrase
-/// * `passphrase` - Optional passphrase (use empty string "" if none)
-/// * `account_index` - The account index for HD derivation (usually 0)
-///
-/// # Returns
-///
-/// A UnifiedFullViewingKey that can be used for viewing transactions
-///
-/// # Example
-///
-/// ```javascript
-/// const mnemonic = generate_mnemonic(24);
-/// const ufvk = mnemonic_to_viewing_key(
-///     "main",
-///     mnemonic,
-///     "",  // no passphrase
-///     0    // first account
-/// );
-/// ```
-#[wasm_bindgen]
-pub fn mnemonic_to_viewing_key(
-    network: &str,
-    phrase: &str,
-    passphrase: &str,
-    account_index: u32,
-) -> Result<UnifiedFullViewingKey, Error> {
-    // Convert mnemonic to seed
-    let mnemonic: Mnemonic<English> =
-        Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
+// /// Generate a UnifiedFullViewingKey from a mnemonic phrase.
+// ///
+// /// # Arguments
+// ///
+// /// * `network` - Network name ("main" or "test")
+// /// * `phrase` - The mnemonic phrase
+// /// * `passphrase` - Optional passphrase (use empty string "" if none)
+// /// * `account_index` - The account index for HD derivation (usually 0)
+// ///
+// /// # Returns
+// ///
+// /// A UnifiedFullViewingKey that can be used for viewing transactions
+// ///
+// /// # Example
+// ///
+// /// ```javascript
+// /// const mnemonic = generate_mnemonic(24);
+// /// const ufvk = mnemonic_to_viewing_key(
+// ///     "main",
+// ///     mnemonic,
+// ///     "",  // no passphrase
+// ///     0    // first account
+// /// );
+// /// ```
+// #[wasm_bindgen]
+// pub fn mnemonic_to_viewing_key(
+//     network: &str,
+//     phrase: &str,
+//     passphrase: &str,
+//     account_index: u32,
+// ) -> Result<UnifiedFullViewingKey, Error> {
+//     // Convert mnemonic to seed
+//     let mnemonic: Mnemonic<English> =
+//         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+//     let seed = mnemonic.to_seed(passphrase);
 
-    // Create UnifiedSpendingKey from seed
-    let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)?;
+//     // Create UnifiedSpendingKey from seed
+//     let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)?;
 
-    // Derive UnifiedFullViewingKey from spending key
-    Ok(usk.to_unified_full_viewing_key())
-}
+//     // Derive UnifiedFullViewingKey from spending key
+//     Ok(usk.to_unified_full_viewing_key())
+// }
 
 /// Get all addresses (unified, orchard, sapling, transparent) from a mnemonic phrase.
 ///

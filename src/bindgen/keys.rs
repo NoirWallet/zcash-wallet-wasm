@@ -100,24 +100,24 @@ impl UnifiedSpendingKey {
         }
     }
 
-    /// Encode the Sapling Extended Spending Key to Bech32 format
-    ///
-    /// # Arguments
-    /// * `network` - Must be either "main" or "test"
-    ///
-    /// # Returns
-    /// String in format "secret-extended-key-main..." or "secret-extended-key-test..."
-    pub fn encode_sapling_extended_spending_key(&self, network: &str) -> Result<String, Error> {
-        let network = Network::from_str(network)?;
-        let hrp = match network {
-            Network::MainNetwork => "secret-extended-key-main",
-            Network::TestNetwork => "secret-extended-key-test",
-        };
-        Ok(zcash_keys::encoding::encode_extended_spending_key(
-            hrp,
-            self.inner.sapling(),
-        ))
-    }
+    // /// Encode the Sapling Extended Spending Key to Bech32 format
+    // ///
+    // /// # Arguments
+    // /// * `network` - Must be either "main" or "test"
+    // ///
+    // /// # Returns
+    // /// String in format "secret-extended-key-main..." or "secret-extended-key-test..."
+    // pub fn encode_sapling_extended_spending_key(&self, network: &str) -> Result<String, Error> {
+    //     let network = Network::from_str(network)?;
+    //     let hrp = match network {
+    //         Network::MainNetwork => "secret-extended-key-main",
+    //         Network::TestNetwork => "secret-extended-key-test",
+    //     };
+    //     Ok(zcash_keys::encoding::encode_extended_spending_key(
+    //         hrp,
+    //         self.inner.sapling(),
+    //     ))
+    // }
 
     // /// Encode the Sapling Extended Full Viewing Key to Bech32 format
     // ///

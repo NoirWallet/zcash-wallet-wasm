@@ -2,7 +2,7 @@ use std::{num::NonZeroU32, str::FromStr};
 
 use crate::bindgen::sign::pczt_sign_inner;
 use crate::bindgen::{Pczt, ProofGenerationKey, SeedFingerprint};
-use crate::{Error, Network, PRUNING_DEPTH, Wallet, usk_from_seed_str};
+use crate::{Error, Network, PRUNING_DEPTH, Wallet};
 
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
@@ -14,11 +14,10 @@ use zcash_address::ZcashAddress;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::proto::service::ChainSpec;
 use zcash_client_backend::{
-    data_api::{AccountPurpose, InputSource, WalletRead, Zip32Derivation},
+    data_api::{InputSource, WalletRead},
     proto::service::compact_tx_streamer_client::CompactTxStreamerClient,
 };
 use zcash_client_memory::MemoryWalletDb;
-use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::transaction::TxId;
 
 pub type MemoryWallet<T> = Wallet<MemoryWalletDb<Network>, T>;
@@ -90,52 +89,52 @@ impl WebWallet {
             .map(|id| *id)
     }
 
-    pub async fn create_account_ufvk(
-        &self,
-        account_name: &str,
-        encoded_ufvk: &str,
-        seed_fingerprint: SeedFingerprint,
-        account_hd_index: u32,
-        birthday_height: Option<u32>,
-    ) -> Result<u32, Error> {
-        let ufvk = UnifiedFullViewingKey::decode(&self.inner.network, encoded_ufvk)
-            .map_err(Error::KeyParse)?;
-        let derivation = Some(Zip32Derivation::new(
-            seed_fingerprint.into(),
-            zip32::AccountId::try_from(account_hd_index)?,
-        ));
-        self.inner
-            .import_ufvk(
-                account_name,
-                &ufvk,
-                AccountPurpose::Spending { derivation },
-                birthday_height,
-                None,
-            )
-            .await
-            .map(|id| *id)
-    }
+    // pub async fn create_account_ufvk(
+    //     &self,
+    //     account_name: &str,
+    //     encoded_ufvk: &str,
+    //     seed_fingerprint: SeedFingerprint,
+    //     account_hd_index: u32,
+    //     birthday_height: Option<u32>,
+    // ) -> Result<u32, Error> {
+    //     let ufvk = UnifiedFullViewingKey::decode(&self.inner.network, encoded_ufvk)
+    //         .map_err(Error::KeyParse)?;
+    //     let derivation = Some(Zip32Derivation::new(
+    //         seed_fingerprint.into(),
+    //         zip32::AccountId::try_from(account_hd_index)?,
+    //     ));
+    //     self.inner
+    //         .import_ufvk(
+    //             account_name,
+    //             &ufvk,
+    //             AccountPurpose::Spending { derivation },
+    //             birthday_height,
+    //             None,
+    //         )
+    //         .await
+    //         .map(|id| *id)
+    // }
 
-    pub async fn create_account_view_ufvk(
-        &self,
-        account_name: &str,
-        encoded_ufvk: &str,
-        birthday_height: Option<u32>,
-    ) -> Result<u32, Error> {
-        let ufvk = UnifiedFullViewingKey::decode(&self.inner.network, encoded_ufvk)
-            .map_err(Error::KeyParse)?;
+    // pub async fn create_account_view_ufvk(
+    //     &self,
+    //     account_name: &str,
+    //     encoded_ufvk: &str,
+    //     birthday_height: Option<u32>,
+    // ) -> Result<u32, Error> {
+    //     let ufvk = UnifiedFullViewingKey::decode(&self.inner.network, encoded_ufvk)
+    //         .map_err(Error::KeyParse)?;
 
-        self.inner
-            .import_ufvk(
-                account_name,
-                &ufvk,
-                AccountPurpose::ViewOnly,
-                birthday_height,
-                None,
-            )
-            .await
-            .map(|id| *id)
-    }
+    //     self.inner
+    //         .import_ufvk(
+    //             account_name,
+    //             &ufvk,
+    //             AccountPurpose::ViewOnly,
+    //             birthday_height,
+    //             None,
+    //         )
+    //         .await
+    //         .map(|id| *id)
+    // }
 
     // /// Import an account from a Sapling Extended Spending Key
     // ///
@@ -294,47 +293,47 @@ impl WebWallet {
         self.inner.get_block_by_time(time).await
     }
 
-    pub async fn propose_transfer(
-        &self,
-        account_id: u32,
-        to_address: String,
-        value: u64,
-    ) -> Result<Proposal, Error> {
-        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        let proposal = self
-            .inner
-            .propose_transfer(AccountId::from(account_id), to_address, value)
-            .await?;
-        Ok(proposal.into())
-    }
+    // pub async fn propose_transfer(
+    //     &self,
+    //     account_id: u32,
+    //     to_address: String,
+    //     value: u64,
+    // ) -> Result<Proposal, Error> {
+    //     let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+    //     let proposal = self
+    //         .inner
+    //         .propose_transfer(AccountId::from(account_id), to_address, value)
+    //         .await?;
+    //     Ok(proposal.into())
+    // }
 
-    pub async fn create_proposed_transactions(
-        &self,
-        proposal: Proposal,
-        seed_phrase: &str,
-        account_hd_index: u32,
-    ) -> Result<Vec<u8>, Error> {
-        let (usk, _) = usk_from_seed_str(seed_phrase, account_hd_index, &self.inner.network)?;
+    // pub async fn create_proposed_transactions(
+    //     &self,
+    //     proposal: Proposal,
+    //     seed_phrase: &str,
+    //     account_hd_index: u32,
+    // ) -> Result<Vec<u8>, Error> {
+    //     let (usk, _) = usk_from_seed_str(seed_phrase, account_hd_index, &self.inner.network)?;
 
-        // Record start time
-        let start_time = js_sys::Date::now();
+    //     // Record start time
+    //     let start_time = js_sys::Date::now();
 
-        let txids = self
-            .inner
-            .create_proposed_transactions(proposal.into(), &usk)
-            .await?;
+    //     let txids = self
+    //         .inner
+    //         .create_proposed_transactions(proposal.into(), &usk)
+    //         .await?;
 
-        // Calculate elapsed time in seconds
-        let end_time = js_sys::Date::now();
-        let elapsed_seconds = (end_time - start_time) / 1000.0;
-        tracing::info!(
-            "⏱️ create_proposed_transaction completed in {:.2} seconds",
-            elapsed_seconds
-        );
+    //     // Calculate elapsed time in seconds
+    //     let end_time = js_sys::Date::now();
+    //     let elapsed_seconds = (end_time - start_time) / 1000.0;
+    //     tracing::info!(
+    //         "⏱️ create_proposed_transaction completed in {:.2} seconds",
+    //         elapsed_seconds
+    //     );
 
-        let flattened_txid_bytes = txids.iter().flat_map(|&x| *x.as_ref()).collect();
-        Ok(flattened_txid_bytes)
-    }
+    //     let flattened_txid_bytes = txids.iter().flat_map(|&x| *x.as_ref()).collect();
+    //     Ok(flattened_txid_bytes)
+    // }
 
     pub async fn db_to_bytes(&self) -> Result<Box<[u8]>, Error> {
         let bytes = self.inner.db_to_bytes().await?;
@@ -353,23 +352,23 @@ impl WebWallet {
         self.inner.send_authorized_transactions(&txids).await
     }
 
-    pub async fn get_current_address(&self, account_id: u32) -> Result<String, Error> {
-        use zcash_client_backend::data_api::Account;
-        use zcash_keys::keys::UnifiedAddressRequest;
+    // pub async fn get_current_address(&self, account_id: u32) -> Result<String, Error> {
+    //     use zcash_client_backend::data_api::Account;
+    //     use zcash_keys::keys::UnifiedAddressRequest;
 
-        let db = self.inner.db.read().await;
-        let account = db
-            .get_account(account_id.into())?
-            .ok_or(Error::AccountNotFound(account_id))?;
+    //     let db = self.inner.db.read().await;
+    //     let account = db
+    //         .get_account(account_id.into())?
+    //         .ok_or(Error::AccountNotFound(account_id))?;
 
-        // Get the unified incoming viewing key from the account
-        let uivk = account.uivk();
+    //     // Get the unified incoming viewing key from the account
+    //     let uivk = account.uivk();
 
-        // Generate the default address (diversifier index 0) with all receivers
-        let (address, _) = uivk.default_address(UnifiedAddressRequest::ALLOW_ALL)?;
+    //     // Generate the default address (diversifier index 0) with all receivers
+    //     let (address, _) = uivk.default_address(UnifiedAddressRequest::ALLOW_ALL)?;
 
-        Ok(address.encode(&self.inner.network))
-    }
+    //     Ok(address.encode(&self.inner.network))
+    // }
 
     /// Get account ID by account name
     ///
@@ -524,12 +523,12 @@ impl WebWallet {
         Ok(serde_wasm_bindgen::to_value(&result)?)
     }
 
-    pub async fn pczt_shield(&self, account_id: u32) -> Result<Pczt, Error> {
-        self.inner
-            .pczt_shield(account_id.into())
-            .await
-            .map(Into::into)
-    }
+    // pub async fn pczt_shield(&self, account_id: u32) -> Result<Pczt, Error> {
+    //     self.inner
+    //         .pczt_shield(account_id.into())
+    //         .await
+    //         .map(Into::into)
+    // }
 
     /// Shield transparent funds by moving them to the Orchard shielded pool
     /// This is a direct method that doesn't use PCZT (works around metadata limitations)
@@ -634,35 +633,35 @@ impl WebWallet {
         self.inner.pczt_send(pczt.into()).await
     }
 
-    pub fn pczt_combine(&self, pczts: Vec<Pczt>) -> Result<Pczt, Error> {
-        self.inner
-            .pczt_combine(pczts.into_iter().map(Into::into).collect())
-            .map(Into::into)
-    }
+    // pub fn pczt_combine(&self, pczts: Vec<Pczt>) -> Result<Pczt, Error> {
+    //     self.inner
+    //         .pczt_combine(pczts.into_iter().map(Into::into).collect())
+    //         .map(Into::into)
+    // }
 
-    pub async fn get_current_address_transparent(&self, account_id: u32) -> Result<String, Error> {
-        use zcash_client_backend::data_api::Account;
-        use zcash_client_backend::encoding::AddressCodec;
-        use zcash_keys::keys::UnifiedAddressRequest;
+    // pub async fn get_current_address_transparent(&self, account_id: u32) -> Result<String, Error> {
+    //     use zcash_client_backend::data_api::Account;
+    //     use zcash_client_backend::encoding::AddressCodec;
+    //     use zcash_keys::keys::UnifiedAddressRequest;
 
-        let db = self.inner.db.read().await;
-        let account = db
-            .get_account(account_id.into())?
-            .ok_or(Error::AccountNotFound(account_id))?;
+    //     let db = self.inner.db.read().await;
+    //     let account = db
+    //         .get_account(account_id.into())?
+    //         .ok_or(Error::AccountNotFound(account_id))?;
 
-        // Get the unified incoming viewing key from the account
-        let uivk = account.uivk();
+    //     // Get the unified incoming viewing key from the account
+    //     let uivk = account.uivk();
 
-        // Generate the default address (diversifier index 0) with all receivers
-        let (address, _) = uivk.default_address(UnifiedAddressRequest::ALLOW_ALL)?;
+    //     // Generate the default address (diversifier index 0) with all receivers
+    //     let (address, _) = uivk.default_address(UnifiedAddressRequest::ALLOW_ALL)?;
 
-        // Extract the transparent receiver from the unified address
-        let transparent_addr = address.transparent().ok_or_else(|| {
-            Error::Generic("No transparent receiver in unified address".to_string())
-        })?;
+    //     // Extract the transparent receiver from the unified address
+    //     let transparent_addr = address.transparent().ok_or_else(|| {
+    //         Error::Generic("No transparent receiver in unified address".to_string())
+    //     })?;
 
-        Ok(transparent_addr.encode(&self.inner.network))
-    }
+    //     Ok(transparent_addr.encode(&self.inner.network))
+    // }
 
     pub async fn get_latest_block(&self) -> Result<u64, Error> {
         self.client()
