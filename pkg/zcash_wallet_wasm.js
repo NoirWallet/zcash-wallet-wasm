@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_4735(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4735(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4763(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4763(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_8841(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_8841(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_8869(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_8869(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -1485,6 +1485,14 @@ export class WebWallet {
         return takeObject(ret);
     }
     /**
+     * @param {number} account_id
+     * @returns {Promise<Pczt>}
+     */
+    pczt_shield(account_id) {
+        const ret = wasm.webwallet_pczt_shield(this.__wbg_ptr, account_id);
+        return takeObject(ret);
+    }
+    /**
      * Shield transparent funds by moving them to the Orchard shielded pool
      * This is a direct method that doesn't use PCZT (works around metadata limitations)
      *
@@ -1529,6 +1537,27 @@ export class WebWallet {
             ptr3 = sapling_proof_gen_key.__destroy_into_raw();
         }
         const ret = wasm.webwallet_oneclick_pczt_transfer(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, ptr2, ptr3, isLikeNone(use_prove_server) ? 0xFFFFFF : use_prove_server ? 1 : 0);
+        return takeObject(ret);
+    }
+    /**
+     * @param {number} account_id
+     * @param {UnifiedSpendingKey} usk
+     * @param {SeedFingerprint} seed_fp
+     * @param {ProofGenerationKey | null} [sapling_proof_gen_key]
+     * @param {boolean | null} [use_prove_server]
+     * @returns {Promise<string>}
+     */
+    oneclick_pczt_shield(account_id, usk, seed_fp, sapling_proof_gen_key, use_prove_server) {
+        _assertClass(usk, UnifiedSpendingKey);
+        var ptr0 = usk.__destroy_into_raw();
+        _assertClass(seed_fp, SeedFingerprint);
+        var ptr1 = seed_fp.__destroy_into_raw();
+        let ptr2 = 0;
+        if (!isLikeNone(sapling_proof_gen_key)) {
+            _assertClass(sapling_proof_gen_key, ProofGenerationKey);
+            ptr2 = sapling_proof_gen_key.__destroy_into_raw();
+        }
+        const ret = wasm.webwallet_oneclick_pczt_shield(this.__wbg_ptr, account_id, ptr0, ptr1, ptr2, isLikeNone(use_prove_server) ? 0xFFFFFF : use_prove_server ? 1 : 0);
         return takeObject(ret);
     }
     /**
@@ -2476,7 +2505,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_8841(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_8869(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2744,6 +2773,11 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_warn_6e567d0d926ff881 = function(arg0) {
         console.warn(getObject(arg0));
     };
+    imports.wbg.__wbindgen_cast_08777b1d185b1ed8 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1869, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1870, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4762, __wasm_bindgen_func_elem_4763);
+        return addHeapObject(ret);
+    };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
         // Cast intrinsic for `Ref(String) -> Externref`.
         const ret = getStringFromWasm0(arg0, arg1);
@@ -2766,16 +2800,6 @@ function __wbg_get_imports(memory) {
         const ret = v0;
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_cast_78d7b3c7ad74d3ea = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1861, function: Function { arguments: [Externref], shim_idx: 1862, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4734, __wasm_bindgen_func_elem_4735);
-        return addHeapObject(ret);
-    };
-    imports.wbg.__wbindgen_cast_8ad1134b92788bf2 = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1861, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1862, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4734, __wasm_bindgen_func_elem_4735);
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbindgen_cast_9ae0607507abb057 = function(arg0) {
         // Cast intrinsic for `I64 -> Externref`.
         const ret = arg0;
@@ -2789,6 +2813,11 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {
         // Cast intrinsic for `F64 -> Externref`.
         const ret = arg0;
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbindgen_cast_d7144b3de59ed0cd = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1869, function: Function { arguments: [Externref], shim_idx: 1870, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4762, __wasm_bindgen_func_elem_4763);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_link_203404ece0e9bab9 = function(arg0) {

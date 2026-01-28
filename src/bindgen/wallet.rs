@@ -523,12 +523,12 @@ impl WebWallet {
         Ok(serde_wasm_bindgen::to_value(&result)?)
     }
 
-    // pub async fn pczt_shield(&self, account_id: u32) -> Result<Pczt, Error> {
-    //     self.inner
-    //         .pczt_shield(account_id.into())
-    //         .await
-    //         .map(Into::into)
-    // }
+    pub async fn pczt_shield(&self, account_id: u32) -> Result<Pczt, Error> {
+        self.inner
+            .pczt_shield(account_id.into())
+            .await
+            .map(Into::into)
+    }
 
     /// Shield transparent funds by moving them to the Orchard shielded pool
     /// This is a direct method that doesn't use PCZT (works around metadata limitations)
@@ -544,7 +544,7 @@ impl WebWallet {
     pub async fn shield_funds(
         &self,
         account_id: u32,
-        usk: crate::bindgen::UnifiedSpendingKey,
+        usk: super::UnifiedSpendingKey,
     ) -> Result<JsValue, Error> {
         let txids = self
             .inner
@@ -557,6 +557,7 @@ impl WebWallet {
         serde_wasm_bindgen::to_value(&txid_strings).map_err(Error::from)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn oneclick_pczt_transfer(
         &self,
         account_id: u32,
@@ -568,13 +569,60 @@ impl WebWallet {
         use_prove_server: Option<bool>,
     ) -> Result<String, Error> {
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        let proof_gen_key = sapling_proof_gen_key.map(Into::into);
         let pczt = self
             .inner
             .pczt_create(AccountId::from(account_id), to_address, value)
             .await?;
+
+        self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key, use_prove_server)
+            .await
+    }
+
+    pub async fn oneclick_pczt_shield(
+        &self,
+        account_id: u32,
+        usk: super::UnifiedSpendingKey,
+        seed_fp: SeedFingerprint,
+        sapling_proof_gen_key: Option<ProofGenerationKey>,
+        use_prove_server: Option<bool>,
+    ) -> Result<String, Error> {
+        let pczt = self.inner.pczt_shield(account_id.into()).await?;
+
+        self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key, use_prove_server)
+            .await
+    }
+
+    /// Sign, prove (optionally using remote server), and send a PCZT transaction.
+    ///
+    /// This helper method encapsulates the common workflow of:
+    /// 1. Signing a PCZT with the provided spending key
+    /// 2. Proving the PCZT (using remote server if requested, falling back to local)
+    /// 3. Sending the proven PCZT to the network
+    ///
+    /// # Arguments
+    /// * `pczt` - The PCZT to process
+    /// * `usk` - Unified spending key for signing
+    /// * `seed_fp` - Seed fingerprint for signing
+    /// * `sapling_proof_gen_key` - Optional Sapling proof generation key
+    /// * `use_prove_server` - Whether to attempt using remote proving server
+    ///
+    /// # Returns
+    /// Transaction ID string on success
+    async fn sign_prove_and_send_pczt(
+        &self,
+        pczt: pczt::Pczt,
+        usk: super::UnifiedSpendingKey,
+        seed_fp: SeedFingerprint,
+        sapling_proof_gen_key: Option<ProofGenerationKey>,
+        use_prove_server: Option<bool>,
+    ) -> Result<String, Error> {
+        let proof_gen_key = sapling_proof_gen_key.map(Into::into);
+
+        // Sign the PCZT
         let signed_pczt =
             pczt_sign_inner(self.inner.network, pczt, usk.into(), seed_fp.into()).await?;
+
+        // Prove the PCZT (remote or local)
         let proved_pczt = if use_prove_server.unwrap_or(false) {
             let signed_pczt_string = BASE64_STANDARD.encode(signed_pczt.serialize());
             match send_pczt_to_prove_server(signed_pczt_string).await {
@@ -590,6 +638,8 @@ impl WebWallet {
         } else {
             self.inner.pczt_prove(signed_pczt, proof_gen_key).await?
         };
+
+        // Send the proven PCZT
         let txid = self.inner.pczt_send(proved_pczt).await?;
         Ok(txid)
     }
@@ -760,7 +810,7 @@ pub struct ProveResponse {
 
 pub async fn send_pczt_to_prove_server(pczt: String) -> Result<ProveResponse, gloo_net::Error> {
     use gloo_net::http::Request;
-    let resp = Request::post("")
+    let resp = Request::post("https://api.ref.finance/proxy/prove")
         .header("Content-Type", "application/json")
         .json(&ProveRequest { pczt })?
         .send()

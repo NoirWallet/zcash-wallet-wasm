@@ -705,85 +705,85 @@ where
     //     self.send_authorized_transactions(&txids).await
     // }
 
-    // pub async fn pczt_shield(&self, account_id: AccountId) -> Result<Pczt, Error> {
-    //     let change_strategy = MultiOutputChangeStrategy::new(
-    //         StandardFeeRule::Zip317,
-    //         None,
-    //         ShieldedProtocol::Orchard,
-    //         DustOutputPolicy::default(),
-    //         SplitPolicy::with_min_output_value(
-    //             NonZeroUsize::new(self.target_note_count)
-    //                 .ok_or(Error::FailedToCreateTransaction)?,
-    //             Zatoshis::from_u64(self.min_split_output_value)?,
-    //         ),
-    //     );
+    pub async fn pczt_shield(&self, account_id: AccountId) -> Result<Pczt, Error> {
+        let change_strategy = MultiOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+            SplitPolicy::with_min_output_value(
+                NonZeroUsize::new(self.target_note_count)
+                    .ok_or(Error::FailedToCreateTransaction)?,
+                Zatoshis::from_u64(self.min_split_output_value)?,
+            ),
+        );
 
-    //     let input_selector = GreedyInputSelector::new();
-    //     let mut db = self.db.write().await;
+        let input_selector = GreedyInputSelector::new();
+        let mut db = self.db.write().await;
 
-    //     // Shield all funds immediately
-    //     let max_height = match db.chain_height()? {
-    //         Some(max_height) => max_height,
-    //         // If we haven't scanned anything, there's nothing to do.
-    //         None => {
-    //             return Err(Error::Generic(
-    //                 "Havent scanned yet, cant shield".to_string(),
-    //             ));
-    //         }
-    //     };
+        // Shield all funds immediately
+        let max_height = match db.chain_height()? {
+            Some(max_height) => max_height,
+            // If we haven't scanned anything, there's nothing to do.
+            None => {
+                return Err(Error::Generic(
+                    "Havent scanned yet, cant shield".to_string(),
+                ));
+            }
+        };
 
-    //     let transparent_balances = db.get_transparent_balances(
-    //         account_id,
-    //         max_height.into(),
-    //         self.confirmations_policy(),
-    //     )?;
-    //     let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
+        let transparent_balances = db.get_transparent_balances(
+            account_id,
+            max_height.into(),
+            self.confirmations_policy(),
+        )?;
+        let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
 
-    //     // Check if we have any transparent addresses to shield
-    //     if from_addrs.is_empty() {
-    //         return Err(Error::Generic(
-    //             "No transparent addresses found for this account. Make sure the account has received funds to a transparent address.".to_string()
-    //         ));
-    //     }
+        // Check if we have any transparent addresses to shield
+        if from_addrs.is_empty() {
+            return Err(Error::Generic(
+                "No transparent addresses found for this account. Make sure the account has received funds to a transparent address.".to_string()
+            ));
+        }
 
-    //     tracing::info!("Shielding from {} transparent addresses", from_addrs.len());
-    //     for addr in &from_addrs {
-    //         tracing::info!("  Address: {:?}", addr);
-    //     }
+        tracing::info!("Shielding from {} transparent addresses", from_addrs.len());
+        for addr in &from_addrs {
+            tracing::info!("  Address: {:?}", addr);
+        }
 
-    //     let proposal = propose_shielding::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
-    //         &mut *db,
-    //         &self.network,
-    //         &input_selector,
-    //         &change_strategy,
-    //         SHIELDING_THRESHOLD, // use a shielding threshold above a marginal fee transaction plus some value like Zashi does.
-    //         &from_addrs,
-    //         account_id,
-    //         ConfirmationsPolicy::new_symmetrical(
-    //             NonZeroU32::new(1).unwrap(), // 1 is always non-zero, safe to unwrap
-    //             true,                        // allow zero-conf shielding (matches default behavior)
-    //         ), // librustzcash operates under the assumption of zero or one conf being the same but that could change.
-    //     )
-    //     .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
+        let proposal = propose_shielding::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            &input_selector,
+            &change_strategy,
+            SHIELDING_THRESHOLD, // use a shielding threshold above a marginal fee transaction plus some value like Zashi does.
+            &from_addrs,
+            account_id,
+            ConfirmationsPolicy::new_symmetrical(
+                NonZeroU32::new(1).unwrap(), // 1 is always non-zero, safe to unwrap
+                true,                        // allow zero-conf shielding (matches default behavior)
+            ), // librustzcash operates under the assumption of zero or one conf being the same but that could change.
+        )
+        .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
 
-    //     let pczt = create_pczt_from_proposal::<
-    //         _,
-    //         _,
-    //         <MemoryWalletDb<Network> as InputSource>::Error,
-    //         _,
-    //         <StandardFeeRule as FeeRule>::Error,
-    //         _,
-    //     >(
-    //         &mut *db,
-    //         &self.network,
-    //         account_id,
-    //         OvkPolicy::Sender,
-    //         &proposal,
-    //     )
-    //     .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
+        let pczt = create_pczt_from_proposal::<
+            _,
+            _,
+            <MemoryWalletDb<Network> as InputSource>::Error,
+            _,
+            <StandardFeeRule as FeeRule>::Error,
+            _,
+        >(
+            &mut *db,
+            &self.network,
+            account_id,
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
 
-    //     Ok(pczt)
-    // }
+        Ok(pczt)
+    }
 
     /// Shield transparent funds by moving them to the Orchard shielded pool
     /// This is a simplified version that doesn't use PCZT
