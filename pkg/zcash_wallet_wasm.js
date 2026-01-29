@@ -269,8 +269,8 @@ function __wasm_bindgen_func_elem_4763(arg0, arg1, arg2) {
     wasm.__wasm_bindgen_func_elem_4763(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_8869(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_8869(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_8862(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_8862(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -2505,7 +2505,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_8869(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_8862(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
