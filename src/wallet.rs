@@ -721,10 +721,9 @@ where
         let input_selector = GreedyInputSelector::new();
         let mut db = self.db.write().await;
 
-        // Shield all funds immediately
+        // Get all transparent receivers for this account to use as shielding sources
         let max_height = match db.chain_height()? {
             Some(max_height) => max_height,
-            // If we haven't scanned anything, there's nothing to do.
             None => {
                 return Err(Error::Generic(
                     "Havent scanned yet, cant shield".to_string(),
@@ -734,12 +733,11 @@ where
 
         let transparent_balances = db.get_transparent_balances(
             account_id,
-            max_height.into(),
+            (max_height + 1).into(),
             self.confirmations_policy(),
         )?;
         let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
 
-        // Check if we have any transparent addresses to shield
         if from_addrs.is_empty() {
             return Err(Error::Generic(
                 "No transparent addresses found for this account. Make sure the account has received funds to a transparent address.".to_string()
@@ -747,22 +745,16 @@ where
         }
 
         tracing::info!("Shielding from {} transparent addresses", from_addrs.len());
-        for addr in &from_addrs {
-            tracing::info!("  Address: {:?}", addr);
-        }
 
         let proposal = propose_shielding::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
             &mut *db,
             &self.network,
             &input_selector,
             &change_strategy,
-            SHIELDING_THRESHOLD, // use a shielding threshold above a marginal fee transaction plus some value like Zashi does.
+            SHIELDING_THRESHOLD,
             &from_addrs,
             account_id,
-            ConfirmationsPolicy::new_symmetrical(
-                NonZeroU32::new(1).unwrap(), // 1 is always non-zero, safe to unwrap
-                true,                        // allow zero-conf shielding (matches default behavior)
-            ), // librustzcash operates under the assumption of zero or one conf being the same but that could change.
+            self.confirmations_policy(),
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
 
@@ -819,7 +811,7 @@ where
 
         let transparent_balances = db.get_transparent_balances(
             account_id,
-            max_height.into(),
+            (max_height + 1).into(),
             self.confirmations_policy(),
         )?;
         let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
