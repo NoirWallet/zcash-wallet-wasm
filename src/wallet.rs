@@ -365,30 +365,36 @@ where
                 .id()
         };
 
-        // IMPORTANT: Generate the first address to ensure it's stored in account.addresses()
-        // This is critical for transparent address metadata to be available.
+        // IMPORTANT: Ensure that the transparent address at diversifier index 0 is stored.
         //
-        // Background: When we receive transparent funds and later try to spend them,
-        // get_transparent_address_metadata() is called to find the derivation path
-        // (scope and address_index) for the transparent address. The default implementation
-        // looks up the address in account.addresses() and derives metadata from the
-        // diversifier_index stored there.
+        // Account::new() uses AllAvailableKeys which requires ALL key types to have valid
+        // receivers. When Sapling has no valid diversifier at index 0 (which is common), it
+        // skips to a higher index (e.g., 7). This means the transparent address at index 0
+        // is never stored in account.addresses().
         //
-        // If we only use uivk.default_address() to generate addresses (as in get_current_address),
-        // those addresses are generated temporarily but never added to account.addresses().
-        // When transparent funds arrive at such an address, it will be in transparent_received_outputs
-        // but NOT in account.addresses(), causing get_transparent_address_metadata() to return None,
-        // which leads to InvalidAddress errors when trying to create transactions.
+        // External tools (exchanges, other wallets) typically derive transparent addresses
+        // starting from index 0 (BIP44 path m/44'/133'/account'/0/0). If funds were sent
+        // to the index-0 transparent address, get_transparent_receivers() won't return it,
+        // refresh_utxos() won't query lightwalletd for it, and the balance will show as 0.
         //
-        // Solution: Call get_next_available_address() which invokes account.next_available_address()
-        // to properly add the address to account.addresses() with its diversifier_index.
+        // Fix: Explicitly store the address at diversifier 0 using ALLOW_ALL (which does
+        // not require Sapling), then also generate the next available address for metadata.
         use zcash_keys::keys::UnifiedAddressRequest;
+        use zip32::DiversifierIndex;
 
-        let _ = self
-            .db
-            .write()
-            .await
-            .get_next_available_address(account_id, UnifiedAddressRequest::ALLOW_ALL)?;
+        {
+            let mut db = self.db.write().await;
+            // Store address at diversifier 0 to ensure low-index transparent addresses
+            // are discoverable by get_transparent_receivers() during sync.
+            let _ = db.get_address_for_index(
+                account_id,
+                DiversifierIndex::new(),
+                UnifiedAddressRequest::ALLOW_ALL,
+            )?;
+            // Also generate the next available address for transparent address metadata
+            // needed when spending transparent funds.
+            let _ = db.get_next_available_address(account_id, UnifiedAddressRequest::ALLOW_ALL)?;
+        }
 
         Ok(account_id)
     }
