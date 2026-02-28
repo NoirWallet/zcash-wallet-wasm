@@ -122,31 +122,70 @@ pub async fn pczt_sign_inner(
         .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {:?}", e)))?
         .finish();
 
-    // Add proof generation key for Sapling spends before signing
-    // This is required for sapling-crypto 0.5+ / pczt 0.5+
+    // Add proof generation key for Sapling spends before signing.
+    // This is required for sapling-crypto 0.5+ / pczt 0.5+.
+    //
+    // Sapling notes can be received via two scopes:
+    // - External: regular incoming payments (uses the external IVK)
+    // - Internal: change outputs from previous transactions (uses a derived internal IVK)
+    //
+    // The internal FVK has a different nullifier-deriving key (nk) than the external FVK,
+    // which means the proof_generation_key (ak, nsk) is also different. We must set the
+    // correct proof_generation_key for each spend based on whether the note was received
+    // by the external or internal key. We determine this by checking which ViewingKey
+    // can produce the spend's recipient PaymentAddress from its diversifier.
     let pczt = {
         use pczt::roles::updater::Updater;
 
-        let sapling_proof_gen_key = usk.sapling().expsk.proof_generation_key();
+        let external_proof_gen_key = usk.sapling().expsk.proof_generation_key();
+        let internal_proof_gen_key = usk.sapling().derive_internal().expsk.proof_generation_key();
+
+        let external_vk = external_proof_gen_key.to_viewing_key();
+        let internal_vk = internal_proof_gen_key.to_viewing_key();
 
         Updater::new(pczt)
             .update_sapling_with(|mut updater| {
-                // Find all spends that need proof generation key
-                let spends_needing_key: Vec<usize> = updater
+                // Collect spends that need a proof generation key, along with the
+                // correct key determined by matching the recipient address.
+                let spends_needing_key: Vec<(usize, sapling::ProofGenerationKey)> = updater
                     .bundle()
                     .spends()
                     .iter()
                     .enumerate()
                     .filter_map(|(index, spend)| {
-                        // Only add if not already set
-                        spend.proof_generation_key().is_none().then_some(index)
+                        // Only process spends that don't already have a proof generation key
+                        if spend.proof_generation_key().is_some() {
+                            return None;
+                        }
+
+                        // Determine the correct key by checking which VK matches
+                        // the spend's recipient address
+                        let key = if let Some(recipient) = spend.recipient() {
+                            let diversifier = recipient.diversifier();
+                            if external_vk.to_payment_address(*diversifier) == Some(*recipient) {
+                                external_proof_gen_key.clone()
+                            } else if internal_vk.to_payment_address(*diversifier)
+                                == Some(*recipient)
+                            {
+                                internal_proof_gen_key.clone()
+                            } else {
+                                // Neither key matches; use external as fallback.
+                                // The signer will report WrongFvkForNote if this is wrong.
+                                external_proof_gen_key.clone()
+                            }
+                        } else {
+                            // No recipient set; use external as default
+                            external_proof_gen_key.clone()
+                        };
+
+                        Some((index, key))
                     })
                     .collect();
 
-                // Add proof generation key to each spend
-                for index in spends_needing_key {
+                // Add the correct proof generation key to each spend
+                for (index, key) in spends_needing_key {
                     updater.update_spend_with(index, |mut spend_updater| {
-                        spend_updater.set_proof_generation_key(sapling_proof_gen_key.clone())
+                        spend_updater.set_proof_generation_key(key)
                     })?;
                 }
 
