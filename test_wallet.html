@@ -251,6 +251,9 @@
             <p>Synchronize wallet with the blockchain to update balance and transactions.</p>
             <button onclick="syncWallet()">Sync Wallet</button>
             <button onclick="getWalletSummary()">Get Wallet Summary</button>
+            <label>Batch Size (optional, default 10000):</label>
+            <input type="number" id="syncBatchSize" placeholder="10000">
+            <button onclick="syncBatch()">Sync Batch (single pass)</button>
             <div class="result" id="syncResult"></div>
         </div>
 
@@ -907,6 +910,32 @@
                 await wallet.sync();
 
                 showResult('syncResult', 'Wallet synced successfully!', 'success');
+
+                // Auto-refresh summary
+                await getWalletSummary();
+            } catch (e) {
+                showResult('syncResult', 'Error: ' + e, 'error');
+            }
+        };
+
+        window.syncBatch = async function() {
+            try {
+                if (!wallet) {
+                    throw new Error('Please initialize wallet first');
+                }
+
+                const batchSizeInput = document.getElementById('syncBatchSize').value;
+                const batchSize = batchSizeInput ? parseInt(batchSizeInput) : undefined;
+
+                showResult('syncResult', 'Running sync batch' + (batchSize ? ' (batch_size=' + batchSize + ')' : ' (default batch_size)') + '...', 'info');
+
+                const hasMore = await wallet.sync_next_batch(batchSize);
+
+                showResult('syncResult',
+                    'Sync batch completed!\n' +
+                    'Has more: ' + hasMore + (hasMore ? ' (call again to continue syncing)' : ' (fully synced)'),
+                    hasMore ? 'info' : 'success'
+                );
 
                 // Auto-refresh summary
                 await getWalletSummary();

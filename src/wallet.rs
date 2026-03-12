@@ -31,7 +31,7 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, SplitPolicy, StandardFeeRule};
-use zcash_client_backend::sync::run;
+use zcash_client_backend::sync::{run, run_next_batch};
 use zcash_client_backend::wallet::OvkPolicy;
 use zcash_client_backend::zip321::{Payment, TransactionRequest};
 use zcash_client_backend::{
@@ -425,6 +425,24 @@ where
             &db_cache,
             &mut *db,
             BATCH_SIZE,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Runs a single batch of the sync process without looping.
+    /// Returns `true` if there is more work to do, `false` if fully synced.
+    pub async fn sync_next_batch(&self, batch_size: Option<u32>) -> Result<bool, Error> {
+        let mut client = self.client.clone();
+        let db_cache = MemBlockCache::new();
+
+        let mut db = self.db.write().await;
+        run_next_batch(
+            &mut client,
+            &self.network.clone(),
+            &db_cache,
+            &mut *db,
+            batch_size.unwrap_or(BATCH_SIZE),
         )
         .await
         .map_err(Into::into)
