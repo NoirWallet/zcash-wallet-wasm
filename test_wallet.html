@@ -254,6 +254,8 @@
             <label>Batch Size (optional, default 10000):</label>
             <input type="number" id="syncBatchSize" placeholder="10000">
             <button onclick="syncBatch()">Sync Batch (single pass)</button>
+            <button onclick="pipelinedSync()" style="background-color: #4caf50;">Pipelined Sync</button>
+            <button onclick="parallelDownloadSync()" style="background-color: #2196f3;">Parallel Download Sync (fastest)</button>
             <div class="result" id="syncResult"></div>
         </div>
 
@@ -938,6 +940,195 @@
                 );
 
                 // Auto-refresh summary
+                await getWalletSummary();
+            } catch (e) {
+                showResult('syncResult', 'Error: ' + e, 'error');
+            }
+        };
+
+        window.pipelinedSync = async function() {
+            try {
+                if (!wallet) {
+                    throw new Error('Please initialize wallet first');
+                }
+
+                const batchSizeInput = document.getElementById('syncBatchSize').value;
+                const batchSize = batchSizeInput ? parseInt(batchSizeInput) : 10000;
+                const totalStart = performance.now();
+
+                // Phase 1: One-time preparation
+                showResult('syncResult', 'Pipelined sync: preparing (subtree roots, chain tip, UTXOs, verify ranges)...', 'info');
+                const prepStart = performance.now();
+                await wallet.sync_prepare();
+                const prepTime = ((performance.now() - prepStart) / 1000).toFixed(2);
+
+                // Phase 2: Get first range and download
+                let range = await wallet.sync_get_next_range(batchSize);
+                if (!range) {
+                    showResult('syncResult', `Pipelined sync: already fully synced (prepare took ${prepTime}s)`, 'success');
+                    await getWalletSummary();
+                    return;
+                }
+                let chainState = await wallet.sync_download(range);
+
+                // Phase 3: Pipeline loop
+                let batchNum = 0;
+                let totalScanned = 0;
+
+                while (range) {
+                    batchNum++;
+
+                    // Before scan: optimistically get next range and fire download
+                    const nextRange = await wallet.sync_get_next_range(batchSize);
+                    const nextDownload = nextRange ? wallet.sync_download(nextRange) : null;
+                    // ^ fetch fires NOW on browser IO thread, NOT awaited
+
+                    // Scan current batch (CPU-bound, blocks main thread)
+                    // Meanwhile, browser IO thread is receiving nextDownload data
+                    const scanStart = performance.now();
+                    const result = await wallet.sync_scan(range, chainState);
+                    const scanTime = ((performance.now() - scanStart) / 1000).toFixed(2);
+
+                    const blocksScanned = result.scanned_end - result.scanned_start;
+                    totalScanned += blocksScanned;
+                    const totalElapsed = ((performance.now() - totalStart) / 1000).toFixed(2);
+
+                    showResult('syncResult',
+                        `Pipelined sync batch #${batchNum}:\n` +
+                        `  Scanned: ${result.scanned_start} -> ${result.scanned_end} (${blocksScanned} blocks in ${scanTime}s)\n` +
+                        `  Sapling: +${result.received_sapling} received, -${result.spent_sapling} spent\n` +
+                        `  Orchard: +${result.received_orchard} received, -${result.spent_orchard} spent\n` +
+                        `  Ranges invalidated: ${result.ranges_invalidated}\n` +
+                        `  Total: ${totalScanned} blocks in ${totalElapsed}s (${(totalScanned / totalElapsed).toFixed(0)} blocks/s)` +
+                        (nextRange ? `\n  Next: ${nextRange.start_height} -> ${nextRange.end_height}` : '\n  No more ranges'),
+                        'info'
+                    );
+
+                    if (result.ranges_invalidated) {
+                        // Reorg or priority change — discard prefetch, start fresh
+                        range = await wallet.sync_get_next_range(batchSize);
+                        chainState = range ? await wallet.sync_download(range) : null;
+                    } else {
+                        // Await the prefetched download (data already received during scan)
+                        chainState = nextDownload ? await nextDownload : null;
+                        range = nextRange;
+                    }
+                }
+
+                const totalTime = ((performance.now() - totalStart) / 1000).toFixed(2);
+                console.log(
+                    `Pipelined sync complete!\n` +
+                    `  Prepare: ${prepTime}s\n` +
+                    `  Batches: ${batchNum}\n` +
+                    `  Total blocks: ${totalScanned}\n` +
+                    `  Total time: ${totalTime}s\n` +
+                    `  Throughput: ${(totalScanned / totalTime).toFixed(0)} blocks/s`
+                );
+
+                await getWalletSummary();
+            } catch (e) {
+                showResult('syncResult', 'Error: ' + e, 'error');
+            }
+        };
+
+        window.parallelDownloadSync = async function() {
+            try {
+                if (!wallet) {
+                    throw new Error('Please initialize wallet first');
+                }
+
+                const batchSizeInput = document.getElementById('syncBatchSize').value;
+                const batchSize = batchSizeInput ? parseInt(batchSizeInput) : 10000;
+                const totalStart = performance.now();
+
+                // Phase 1: Prepare
+                showResult('syncResult', 'Parallel download sync: preparing...', 'info');
+                const prepStart = performance.now();
+                await wallet.sync_prepare();
+                const prepTime = ((performance.now() - prepStart) / 1000).toFixed(2);
+
+                // Phase 2: Get ALL scan ranges at once
+                const ranges = await wallet.sync_get_all_ranges(batchSize);
+                if (ranges.length === 0) {
+                    showResult('syncResult', `Already fully synced (prepare took ${prepTime}s)`, 'success');
+                    await getWalletSummary();
+                    return;
+                }
+
+                showResult('syncResult',
+                    `Parallel download sync:\n` +
+                    `  Prepare: ${prepTime}s\n` +
+                    `  Ranges to sync: ${ranges.length}\n` +
+                    `  Downloading all ${ranges.length} batches in parallel...`,
+                    'info'
+                );
+
+                // Phase 3: Download ALL batches in parallel
+                const downloadStart = performance.now();
+                const downloadPromises = ranges.map(range => wallet.sync_download(range));
+                const chainStates = await Promise.all(downloadPromises);
+                const downloadTime = ((performance.now() - downloadStart) / 1000).toFixed(2);
+
+                showResult('syncResult',
+                    `Parallel download sync:\n` +
+                    `  Prepare: ${prepTime}s\n` +
+                    `  Downloaded ${ranges.length} batches in ${downloadTime}s (parallel)\n` +
+                    `  Now scanning sequentially...`,
+                    'info'
+                );
+
+                // Phase 4: Scan sequentially
+                let totalScanned = 0;
+                const scanStart = performance.now();
+
+                for (let i = 0; i < ranges.length; i++) {
+                    const batchStart = performance.now();
+                    const result = await wallet.sync_scan(ranges[i], chainStates[i]);
+                    const batchTime = ((performance.now() - batchStart) / 1000).toFixed(2);
+
+                    const blocksScanned = result.scanned_end - result.scanned_start;
+                    totalScanned += blocksScanned;
+
+                    showResult('syncResult',
+                        `Parallel download sync: scanning ${i + 1}/${ranges.length}\n` +
+                        `  Prepare: ${prepTime}s | Download: ${downloadTime}s\n` +
+                        `  Batch ${i + 1}: ${result.scanned_start} -> ${result.scanned_end} (${blocksScanned} blocks in ${batchTime}s)\n` +
+                        `  Sapling: +${result.received_sapling} / -${result.spent_sapling}  Orchard: +${result.received_orchard} / -${result.spent_orchard}\n` +
+                        `  Progress: ${totalScanned} blocks scanned`,
+                        'info'
+                    );
+
+                    if (result.ranges_invalidated) {
+                        // Reorg detected — fall back to pipelined mode for remaining work
+                        showResult('syncResult',
+                            `Ranges invalidated at batch ${i + 1}, falling back to pipelined sync for remaining batches...`,
+                            'info'
+                        );
+                        // Discard remaining prefetched data, use pipelined approach
+                        let range = await wallet.sync_get_next_range(batchSize);
+                        while (range) {
+                            const cs = await wallet.sync_download(range);
+                            const r = await wallet.sync_scan(range, cs);
+                            totalScanned += r.scanned_end - r.scanned_start;
+                            range = await wallet.sync_get_next_range(batchSize);
+                        }
+                        break;
+                    }
+                }
+
+                const scanTime = ((performance.now() - scanStart) / 1000).toFixed(2);
+                const totalTime = ((performance.now() - totalStart) / 1000).toFixed(2);
+
+                console.log(
+                    `Parallel download sync complete!\n` +
+                    `  Prepare:  ${prepTime}s\n` +
+                    `  Download: ${downloadTime}s (${ranges.length} batches in parallel)\n` +
+                    `  Scan:     ${scanTime}s (sequential)\n` +
+                    `  Total:    ${totalTime}s\n` +
+                    `  Blocks:   ${totalScanned}\n` +
+                    `  Throughput: ${(totalScanned / totalTime).toFixed(0)} blocks/s`
+                );
+
                 await getWalletSummary();
             } catch (e) {
                 showResult('syncResult', 'Error: ' + e, 'error');

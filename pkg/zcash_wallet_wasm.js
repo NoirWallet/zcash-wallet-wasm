@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_4779(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4779(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4845(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4845(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_8885(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_8885(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_8951(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_8951(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -309,6 +309,10 @@ const PcztFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_pczt_free(ptr >>> 0, 1));
 
+const PipelinedScanRangeFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_pipelinedscanrange_free(ptr >>> 0, 1));
+
 const ProofGenerationKeyFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_proofgenerationkey_free(ptr >>> 0, 1));
@@ -320,6 +324,14 @@ const ProposalFinalization = (typeof FinalizationRegistry === 'undefined')
 const SeedFingerprintFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_seedfingerprint_free(ptr >>> 0, 1));
+
+const SyncChainStateFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_syncchainstate_free(ptr >>> 0, 1));
+
+const SyncScanResultFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_syncscanresult_free(ptr >>> 0, 1));
 
 const TransactionRequestFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
@@ -734,6 +746,81 @@ export class Pczt {
 }
 if (Symbol.dispose) Pczt.prototype[Symbol.dispose] = Pczt.prototype.free;
 
+/**
+ * Opaque wrapper for a scan range, passed between pipelined sync methods.
+ */
+export class PipelinedScanRange {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(PipelinedScanRange.prototype);
+        obj.__wbg_ptr = ptr;
+        PipelinedScanRangeFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    toJSON() {
+        return {
+            start_height: this.start_height,
+            end_height: this.end_height,
+            len: this.len,
+            priority: this.priority,
+        };
+    }
+    toString() {
+        return JSON.stringify(this);
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        PipelinedScanRangeFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_pipelinedscanrange_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get start_height() {
+        const ret = wasm.pipelinedscanrange_start_height(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get end_height() {
+        const ret = wasm.pipelinedscanrange_end_height(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get len() {
+        const ret = wasm.pipelinedscanrange_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {string}
+     */
+    get priority() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.pipelinedscanrange_priority(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred1_0, deferred1_1, 1);
+        }
+    }
+}
+if (Symbol.dispose) PipelinedScanRange.prototype[Symbol.dispose] = PipelinedScanRange.prototype.free;
+
 export class ProofGenerationKey {
     static __wrap(ptr) {
         ptr = ptr >>> 0;
@@ -848,6 +935,177 @@ export class SeedFingerprint {
     }
 }
 if (Symbol.dispose) SeedFingerprint.prototype[Symbol.dispose] = SeedFingerprint.prototype.free;
+
+/**
+ * Opaque wrapper for chain state, passed from `sync_download` to `sync_scan`.
+ */
+export class SyncChainState {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(SyncChainState.prototype);
+        obj.__wbg_ptr = ptr;
+        SyncChainStateFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        SyncChainStateFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_syncchainstate_free(ptr, 0);
+    }
+}
+if (Symbol.dispose) SyncChainState.prototype[Symbol.dispose] = SyncChainState.prototype.free;
+
+/**
+ * Result from `sync_scan`, containing progress information.
+ */
+export class SyncScanResult {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(SyncScanResult.prototype);
+        obj.__wbg_ptr = ptr;
+        SyncScanResultFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    toJSON() {
+        return {
+            ranges_invalidated: this.ranges_invalidated,
+            scanned_start: this.scanned_start,
+            scanned_end: this.scanned_end,
+            received_sapling: this.received_sapling,
+            spent_sapling: this.spent_sapling,
+            received_orchard: this.received_orchard,
+            spent_orchard: this.spent_orchard,
+        };
+    }
+    toString() {
+        return JSON.stringify(this);
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        SyncScanResultFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_syncscanresult_free(ptr, 0);
+    }
+    /**
+     * Whether the scan invalidated the current set of scan ranges.
+     * If `true`, the caller should discard any prefetched data and
+     * call `sync_get_next_range` again.
+     * @returns {boolean}
+     */
+    get ranges_invalidated() {
+        const ret = wasm.__wbg_get_syncscanresult_ranges_invalidated(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Whether the scan invalidated the current set of scan ranges.
+     * If `true`, the caller should discard any prefetched data and
+     * call `sync_get_next_range` again.
+     * @param {boolean} arg0
+     */
+    set ranges_invalidated(arg0) {
+        wasm.__wbg_set_syncscanresult_ranges_invalidated(this.__wbg_ptr, arg0);
+    }
+    /**
+     * Start height of the scanned range.
+     * @returns {number}
+     */
+    get scanned_start() {
+        const ret = wasm.__wbg_get_blockrange_0(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Start height of the scanned range.
+     * @param {number} arg0
+     */
+    set scanned_start(arg0) {
+        wasm.__wbg_set_blockrange_0(this.__wbg_ptr, arg0);
+    }
+    /**
+     * End height (exclusive) of the scanned range.
+     * @returns {number}
+     */
+    get scanned_end() {
+        const ret = wasm.__wbg_get_blockrange_1(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * End height (exclusive) of the scanned range.
+     * @param {number} arg0
+     */
+    set scanned_end(arg0) {
+        wasm.__wbg_set_blockrange_1(this.__wbg_ptr, arg0);
+    }
+    /**
+     * Number of Sapling notes received in this batch.
+     * @returns {number}
+     */
+    get received_sapling() {
+        const ret = wasm.__wbg_get_syncscanresult_received_sapling(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Number of Sapling notes received in this batch.
+     * @param {number} arg0
+     */
+    set received_sapling(arg0) {
+        wasm.__wbg_set_syncscanresult_received_sapling(this.__wbg_ptr, arg0);
+    }
+    /**
+     * Number of Sapling notes spent in this batch.
+     * @returns {number}
+     */
+    get spent_sapling() {
+        const ret = wasm.__wbg_get_syncscanresult_spent_sapling(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Number of Sapling notes spent in this batch.
+     * @param {number} arg0
+     */
+    set spent_sapling(arg0) {
+        wasm.__wbg_set_syncscanresult_spent_sapling(this.__wbg_ptr, arg0);
+    }
+    /**
+     * Number of Orchard notes received in this batch.
+     * @returns {number}
+     */
+    get received_orchard() {
+        const ret = wasm.__wbg_get_syncscanresult_received_orchard(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Number of Orchard notes received in this batch.
+     * @param {number} arg0
+     */
+    set received_orchard(arg0) {
+        wasm.__wbg_set_syncscanresult_received_orchard(this.__wbg_ptr, arg0);
+    }
+    /**
+     * Number of Orchard notes spent in this batch.
+     * @returns {number}
+     */
+    get spent_orchard() {
+        const ret = wasm.__wbg_get_syncscanresult_spent_orchard(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Number of Orchard notes spent in this batch.
+     * @param {number} arg0
+     */
+    set spent_orchard(arg0) {
+        wasm.__wbg_set_syncscanresult_spent_orchard(this.__wbg_ptr, arg0);
+    }
+}
+if (Symbol.dispose) SyncScanResult.prototype[Symbol.dispose] = SyncScanResult.prototype.free;
 
 export class TransactionRequest {
     static __wrap(ptr) {
@@ -1287,6 +1545,70 @@ export class WebWallet {
      */
     sync_next_batch(batch_size) {
         const ret = wasm.webwallet_sync_next_batch(this.__wbg_ptr, isLikeNone(batch_size) ? 0x100000001 : (batch_size) >>> 0);
+        return takeObject(ret);
+    }
+    /**
+     * One-time preparation for pipelined sync. Downloads subtree roots,
+     * updates chain tip, refreshes UTXOs, and processes Verify-priority
+     * ranges. Must be called once before entering the download/scan loop.
+     * @returns {Promise<void>}
+     */
+    sync_prepare() {
+        const ret = wasm.webwallet_sync_prepare(this.__wbg_ptr);
+        return takeObject(ret);
+    }
+    /**
+     * Get the next scan range of up to `batch_size` blocks.
+     * Returns `None` (undefined in JS) if fully synced.
+     * @param {number} batch_size
+     * @returns {Promise<PipelinedScanRange | undefined>}
+     */
+    sync_get_next_range(batch_size) {
+        const ret = wasm.webwallet_sync_get_next_range(this.__wbg_ptr, batch_size);
+        return takeObject(ret);
+    }
+    /**
+     * Get all scan ranges, each up to `batch_size` blocks.
+     * Returns a JS array of `PipelinedScanRange` objects.
+     *
+     * Use this to download all ranges in parallel, then scan sequentially.
+     * @param {number} batch_size
+     * @returns {Promise<PipelinedScanRange[]>}
+     */
+    sync_get_all_ranges(batch_size) {
+        const ret = wasm.webwallet_sync_get_all_ranges(this.__wbg_ptr, batch_size);
+        return takeObject(ret);
+    }
+    /**
+     * Download blocks for a scan range. Returns opaque chain state
+     * needed for scanning.
+     *
+     * This method does NOT hold any wallet database lock, making it
+     * safe to initiate (fire the Promise) before awaiting `sync_scan`
+     * on a different range — the browser I/O thread will transfer data
+     * during the CPU-bound scan.
+     * @param {PipelinedScanRange} range
+     * @returns {Promise<SyncChainState>}
+     */
+    sync_download(range) {
+        _assertClass(range, PipelinedScanRange);
+        const ret = wasm.webwallet_sync_download(this.__wbg_ptr, range.__wbg_ptr);
+        return takeObject(ret);
+    }
+    /**
+     * Scan a previously-downloaded batch. This is CPU-intensive and
+     * blocks the main thread during execution.
+     *
+     * Check `ranges_invalidated` on the result: if `true`, discard any
+     * prefetched download and call `sync_get_next_range` again.
+     * @param {PipelinedScanRange} range
+     * @param {SyncChainState} chain_state
+     * @returns {Promise<SyncScanResult>}
+     */
+    sync_scan(range, chain_state) {
+        _assertClass(range, PipelinedScanRange);
+        _assertClass(chain_state, SyncChainState);
+        const ret = wasm.webwallet_sync_scan(this.__wbg_ptr, range.__wbg_ptr, chain_state.__wbg_ptr);
         return takeObject(ret);
     }
     /**
@@ -2515,7 +2837,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_8885(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_8951(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2584,6 +2906,10 @@ function __wbg_get_imports(memory) {
     };
     imports.wbg.__wbg_performance_121b9855d716e029 = function() {
         const ret = globalThis.performance;
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbg_pipelinedscanrange_new = function(arg0) {
+        const ret = PipelinedScanRange.__wrap(arg0);
         return addHeapObject(ret);
     };
     imports.wbg.__wbg_postMessage_07504dbe15265d5c = function() { return handleError(function (arg0, arg1) {
@@ -2722,6 +3048,14 @@ function __wbg_get_imports(memory) {
         const ret = getObject(arg0).subarray(arg1 >>> 0, arg2 >>> 0);
         return addHeapObject(ret);
     };
+    imports.wbg.__wbg_syncchainstate_new = function(arg0) {
+        const ret = SyncChainState.__wrap(arg0);
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbg_syncscanresult_new = function(arg0) {
+        const ret = SyncScanResult.__wrap(arg0);
+        return addHeapObject(ret);
+    };
     imports.wbg.__wbg_text_51046bb33d257f63 = function() { return handleError(function (arg0) {
         const ret = getObject(arg0).text();
         return addHeapObject(ret);
@@ -2798,6 +3132,11 @@ function __wbg_get_imports(memory) {
         const ret = BigInt.asUintN(64, arg0);
         return addHeapObject(ret);
     };
+    imports.wbg.__wbindgen_cast_59c7a7aa3e69d978 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1894, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1895, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4844, __wasm_bindgen_func_elem_4845);
+        return addHeapObject(ret);
+    };
     imports.wbg.__wbindgen_cast_77bc3e92745e9a35 = function(arg0, arg1) {
         var v0 = getArrayU8FromWasm0(arg0, arg1).slice();
         wasm.__wbindgen_export4(arg0, arg1 * 1, 1);
@@ -2805,9 +3144,21 @@ function __wbg_get_imports(memory) {
         const ret = v0;
         return addHeapObject(ret);
     };
+    imports.wbg.__wbindgen_cast_8f563b322eefc4ec = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1894, function: Function { arguments: [Externref], shim_idx: 1895, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4844, __wasm_bindgen_func_elem_4845);
+        return addHeapObject(ret);
+    };
     imports.wbg.__wbindgen_cast_9ae0607507abb057 = function(arg0) {
         // Cast intrinsic for `I64 -> Externref`.
         const ret = arg0;
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbindgen_cast_abb3e7f79fb6c65a = function(arg0, arg1) {
+        var v0 = getArrayJsValueFromWasm0(arg0, arg1).slice();
+        wasm.__wbindgen_export4(arg0, arg1 * 4, 4);
+        // Cast intrinsic for `Vector(NamedExternref("PipelinedScanRange")) -> Externref`.
+        const ret = v0;
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_cb9088102bce6b30 = function(arg0, arg1) {
@@ -2815,19 +3166,9 @@ function __wbg_get_imports(memory) {
         const ret = getArrayU8FromWasm0(arg0, arg1);
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_cast_d57ab28697222fee = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1874, function: Function { arguments: [Externref], shim_idx: 1875, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4778, __wasm_bindgen_func_elem_4779);
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {
         // Cast intrinsic for `F64 -> Externref`.
         const ret = arg0;
-        return addHeapObject(ret);
-    };
-    imports.wbg.__wbindgen_cast_f4b9683f07ace6ad = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1874, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1875, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4778, __wasm_bindgen_func_elem_4779);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_link_203404ece0e9bab9 = function(arg0) {

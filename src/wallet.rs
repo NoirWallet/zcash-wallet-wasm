@@ -21,6 +21,8 @@ use tonic::{
     codegen::{Body, Bytes, StdError},
 };
 use zcash_address::ZcashAddress;
+use zcash_client_backend::data_api::chain::ChainState;
+use zcash_client_backend::data_api::scanning::ScanRange;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, SpendingKeys, create_pczt_from_proposal, create_proposed_transactions,
@@ -31,7 +33,10 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, SplitPolicy, StandardFeeRule};
-use zcash_client_backend::sync::{run, run_next_batch};
+use zcash_client_backend::sync::{
+    self, download_for_scan, get_all_scan_ranges, get_next_scan_range, prepare, run,
+    run_next_batch, scan_downloaded,
+};
 use zcash_client_backend::wallet::OvkPolicy;
 use zcash_client_backend::zip321::{Payment, TransactionRequest};
 use zcash_client_backend::{
@@ -103,6 +108,8 @@ pub struct Wallet<W, T> {
     pub(crate) target_note_count: usize,
     /// Note management: the minimum allowed value for split change amounts
     pub(crate) min_split_output_value: u64,
+    /// Shared block cache for pipelined sync operations
+    pub(crate) db_cache: Arc<MemBlockCache>,
 }
 
 impl<W, T: Clone> Clone for Wallet<W, T> {
@@ -114,6 +121,7 @@ impl<W, T: Clone> Clone for Wallet<W, T> {
             min_confirmations: self.min_confirmations,
             target_note_count: self.target_note_count,
             min_split_output_value: self.min_split_output_value,
+            db_cache: self.db_cache.clone(),
         }
     }
 }
@@ -185,6 +193,7 @@ where
             min_confirmations,
             target_note_count: 4,
             min_split_output_value: 10000000,
+            db_cache: Arc::new(MemBlockCache::new()),
         })
     }
 
@@ -443,6 +452,81 @@ where
             &db_cache,
             &mut *db,
             batch_size.unwrap_or(BATCH_SIZE),
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipelined sync API
+    //
+    // These methods split the sync into separate phases so that callers
+    // (e.g. JS frontends) can start downloading the next batch while the
+    // current batch is being scanned on the CPU.
+    // -----------------------------------------------------------------------
+
+    /// One-time preparation for pipelined sync. Downloads subtree roots,
+    /// updates chain tip, refreshes UTXOs, and processes Verify-priority ranges.
+    pub async fn sync_prepare(&self) -> Result<(), Error> {
+        let mut client = self.client.clone();
+        let mut db = self.db.write().await;
+        prepare(
+            &mut client,
+            &self.network.clone(),
+            &*self.db_cache,
+            &mut *db,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Returns the next scan range to process, limited to `batch_size` blocks.
+    /// Returns `None` if the wallet is fully synced.
+    pub async fn sync_get_next_range(&self, batch_size: u32) -> Result<Option<ScanRange>, Error> {
+        let db = self.db.read().await;
+        Ok(get_next_scan_range(&*db, batch_size)?)
+    }
+
+    /// Returns all scan ranges to process, each limited to `batch_size` blocks.
+    /// Returns an empty `Vec` if the wallet is fully synced.
+    ///
+    /// The returned ranges can be downloaded in parallel via `sync_download`
+    /// and then scanned sequentially via `sync_scan`.
+    pub async fn sync_get_all_ranges(&self, batch_size: u32) -> Result<Vec<ScanRange>, Error> {
+        let db = self.db.read().await;
+        Ok(get_all_scan_ranges(&*db, batch_size)?)
+    }
+
+    /// Downloads blocks for the given scan range into the shared cache.
+    /// Returns the `ChainState` needed for scanning.
+    ///
+    /// This method does NOT hold any lock on the wallet database, making it
+    /// safe to call while other read-only operations are in progress.
+    pub async fn sync_download(&self, scan_range: &ScanRange) -> Result<ChainState, Error> {
+        let mut client = self.client.clone();
+        download_for_scan::<_, _, <W as WalletRead>::Error, <W as WalletCommitmentTrees>::Error>(
+            &mut client,
+            &*self.db_cache,
+            scan_range,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Scans a previously-downloaded batch of blocks from the shared cache.
+    /// Returns a `ScanResult` with progress info and whether ranges were invalidated.
+    pub async fn sync_scan(
+        &self,
+        scan_range: &ScanRange,
+        chain_state: &ChainState,
+    ) -> Result<sync::ScanResult, Error> {
+        let mut db = self.db.write().await;
+        scan_downloaded::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+            &self.network.clone(),
+            &*self.db_cache,
+            &mut *db,
+            chain_state,
+            scan_range,
         )
         .await
         .map_err(Into::into)

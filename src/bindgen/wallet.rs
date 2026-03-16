@@ -216,6 +216,88 @@ impl WebWallet {
         Ok(has_more)
     }
 
+    // -------------------------------------------------------------------
+    // Pipelined sync API
+    // -------------------------------------------------------------------
+
+    /// One-time preparation for pipelined sync. Downloads subtree roots,
+    /// updates chain tip, refreshes UTXOs, and processes Verify-priority
+    /// ranges. Must be called once before entering the download/scan loop.
+    pub async fn sync_prepare(&self) -> Result<(), Error> {
+        let start_time = js_sys::Date::now();
+        self.inner.sync_prepare().await?;
+        let elapsed = (js_sys::Date::now() - start_time) / 1000.0;
+        tracing::info!("sync_prepare completed in {:.2}s", elapsed);
+        Ok(())
+    }
+
+    /// Get the next scan range of up to `batch_size` blocks.
+    /// Returns `None` (undefined in JS) if fully synced.
+    pub async fn sync_get_next_range(
+        &self,
+        batch_size: u32,
+    ) -> Result<Option<PipelinedScanRange>, Error> {
+        Ok(self
+            .inner
+            .sync_get_next_range(batch_size)
+            .await?
+            .map(|r| PipelinedScanRange { inner: r }))
+    }
+
+    /// Get all scan ranges, each up to `batch_size` blocks.
+    /// Returns a JS array of `PipelinedScanRange` objects.
+    ///
+    /// Use this to download all ranges in parallel, then scan sequentially.
+    pub async fn sync_get_all_ranges(
+        &self,
+        batch_size: u32,
+    ) -> Result<Vec<PipelinedScanRange>, Error> {
+        Ok(self
+            .inner
+            .sync_get_all_ranges(batch_size)
+            .await?
+            .into_iter()
+            .map(|r| PipelinedScanRange { inner: r })
+            .collect())
+    }
+
+    /// Download blocks for a scan range. Returns opaque chain state
+    /// needed for scanning.
+    ///
+    /// This method does NOT hold any wallet database lock, making it
+    /// safe to initiate (fire the Promise) before awaiting `sync_scan`
+    /// on a different range — the browser I/O thread will transfer data
+    /// during the CPU-bound scan.
+    pub async fn sync_download(&self, range: &PipelinedScanRange) -> Result<SyncChainState, Error> {
+        let chain_state = self.inner.sync_download(&range.inner).await?;
+        Ok(SyncChainState { inner: chain_state })
+    }
+
+    /// Scan a previously-downloaded batch. This is CPU-intensive and
+    /// blocks the main thread during execution.
+    ///
+    /// Check `ranges_invalidated` on the result: if `true`, discard any
+    /// prefetched download and call `sync_get_next_range` again.
+    pub async fn sync_scan(
+        &self,
+        range: &PipelinedScanRange,
+        chain_state: &SyncChainState,
+    ) -> Result<SyncScanResult, Error> {
+        let result = self
+            .inner
+            .sync_scan(&range.inner, &chain_state.inner)
+            .await?;
+        Ok(SyncScanResult {
+            ranges_invalidated: result.ranges_invalidated,
+            scanned_start: result.scanned_range_start.into(),
+            scanned_end: result.scanned_range_end.into(),
+            received_sapling: result.received_sapling as u32,
+            spent_sapling: result.spent_sapling as u32,
+            received_orchard: result.received_orchard as u32,
+            spent_orchard: result.spent_orchard as u32,
+        })
+    }
+
     pub async fn get_wallet_summary(&self) -> Result<Option<WalletSummary>, Error> {
         Ok(self.inner.get_wallet_summary().await?.map(Into::into))
     }
@@ -814,6 +896,66 @@ where
             next_orchard_subtree_index: summary.next_orchard_subtree_index(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pipelined sync types
+// ---------------------------------------------------------------------------
+
+/// Opaque wrapper for a scan range, passed between pipelined sync methods.
+#[wasm_bindgen(inspectable)]
+pub struct PipelinedScanRange {
+    inner: zcash_client_backend::data_api::scanning::ScanRange,
+}
+
+#[wasm_bindgen]
+impl PipelinedScanRange {
+    #[wasm_bindgen(getter)]
+    pub fn start_height(&self) -> u32 {
+        self.inner.block_range().start.into()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn end_height(&self) -> u32 {
+        self.inner.block_range().end.into()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn len(&self) -> u32 {
+        self.inner.len() as u32
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn priority(&self) -> String {
+        format!("{:?}", self.inner.priority())
+    }
+}
+
+/// Opaque wrapper for chain state, passed from `sync_download` to `sync_scan`.
+#[wasm_bindgen]
+pub struct SyncChainState {
+    inner: zcash_client_backend::data_api::chain::ChainState,
+}
+
+/// Result from `sync_scan`, containing progress information.
+#[wasm_bindgen(inspectable)]
+pub struct SyncScanResult {
+    /// Whether the scan invalidated the current set of scan ranges.
+    /// If `true`, the caller should discard any prefetched data and
+    /// call `sync_get_next_range` again.
+    pub ranges_invalidated: bool,
+    /// Start height of the scanned range.
+    pub scanned_start: u32,
+    /// End height (exclusive) of the scanned range.
+    pub scanned_end: u32,
+    /// Number of Sapling notes received in this batch.
+    pub received_sapling: u32,
+    /// Number of Sapling notes spent in this batch.
+    pub spent_sapling: u32,
+    /// Number of Orchard notes received in this batch.
+    pub received_orchard: u32,
+    /// Number of Orchard notes spent in this batch.
+    pub spent_orchard: u32,
 }
 
 #[derive(Serialize)]

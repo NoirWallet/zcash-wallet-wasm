@@ -79,6 +79,24 @@ export class Pczt {
   static from_bytes(bytes: Uint8Array): Pczt;
 }
 
+export class PipelinedScanRange {
+  private constructor();
+/**
+** Return copy of self without private attributes.
+*/
+  toJSON(): Object;
+/**
+* Return stringified version of self.
+*/
+  toString(): string;
+  free(): void;
+  [Symbol.dispose](): void;
+  readonly start_height: number;
+  readonly end_height: number;
+  readonly len: number;
+  readonly priority: string;
+}
+
 export class ProofGenerationKey {
   private constructor();
   free(): void;
@@ -97,6 +115,56 @@ export class SeedFingerprint {
   constructor(seed: Uint8Array);
   to_bytes(): Uint8Array;
   static from_bytes(bytes: Uint8Array): SeedFingerprint;
+}
+
+export class SyncChainState {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+}
+
+export class SyncScanResult {
+  private constructor();
+/**
+** Return copy of self without private attributes.
+*/
+  toJSON(): Object;
+/**
+* Return stringified version of self.
+*/
+  toString(): string;
+  free(): void;
+  [Symbol.dispose](): void;
+  /**
+   * Whether the scan invalidated the current set of scan ranges.
+   * If `true`, the caller should discard any prefetched data and
+   * call `sync_get_next_range` again.
+   */
+  ranges_invalidated: boolean;
+  /**
+   * Start height of the scanned range.
+   */
+  scanned_start: number;
+  /**
+   * End height (exclusive) of the scanned range.
+   */
+  scanned_end: number;
+  /**
+   * Number of Sapling notes received in this batch.
+   */
+  received_sapling: number;
+  /**
+   * Number of Sapling notes spent in this batch.
+   */
+  spent_sapling: number;
+  /**
+   * Number of Orchard notes received in this batch.
+   */
+  received_orchard: number;
+  /**
+   * Number of Orchard notes spent in this batch.
+   */
+  spent_orchard: number;
 }
 
 export class TransactionRequest {
@@ -167,6 +235,42 @@ export class WebWallet {
    * Returns `true` if there is more work to do, `false` if fully synced.
    */
   sync_next_batch(batch_size?: number | null): Promise<boolean>;
+  /**
+   * One-time preparation for pipelined sync. Downloads subtree roots,
+   * updates chain tip, refreshes UTXOs, and processes Verify-priority
+   * ranges. Must be called once before entering the download/scan loop.
+   */
+  sync_prepare(): Promise<void>;
+  /**
+   * Get the next scan range of up to `batch_size` blocks.
+   * Returns `None` (undefined in JS) if fully synced.
+   */
+  sync_get_next_range(batch_size: number): Promise<PipelinedScanRange | undefined>;
+  /**
+   * Get all scan ranges, each up to `batch_size` blocks.
+   * Returns a JS array of `PipelinedScanRange` objects.
+   *
+   * Use this to download all ranges in parallel, then scan sequentially.
+   */
+  sync_get_all_ranges(batch_size: number): Promise<PipelinedScanRange[]>;
+  /**
+   * Download blocks for a scan range. Returns opaque chain state
+   * needed for scanning.
+   *
+   * This method does NOT hold any wallet database lock, making it
+   * safe to initiate (fire the Promise) before awaiting `sync_scan`
+   * on a different range — the browser I/O thread will transfer data
+   * during the CPU-bound scan.
+   */
+  sync_download(range: PipelinedScanRange): Promise<SyncChainState>;
+  /**
+   * Scan a previously-downloaded batch. This is CPU-intensive and
+   * blocks the main thread during execution.
+   *
+   * Check `ranges_invalidated` on the result: if `true`, discard any
+   * prefetched download and call `sync_get_next_range` again.
+   */
+  sync_scan(range: PipelinedScanRange, chain_state: SyncChainState): Promise<SyncScanResult>;
   get_wallet_summary(): Promise<WalletSummary | undefined>;
   /**
    * Get the birthday height for a specific account
@@ -610,6 +714,11 @@ export interface InitOutput {
   readonly webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
   readonly webwallet_sync: (a: number) => number;
   readonly webwallet_sync_next_batch: (a: number, b: number) => number;
+  readonly webwallet_sync_prepare: (a: number) => number;
+  readonly webwallet_sync_get_next_range: (a: number, b: number) => number;
+  readonly webwallet_sync_get_all_ranges: (a: number, b: number) => number;
+  readonly webwallet_sync_download: (a: number, b: number) => number;
+  readonly webwallet_sync_scan: (a: number, b: number, c: number) => number;
   readonly webwallet_get_wallet_summary: (a: number) => number;
   readonly webwallet_get_account_birthday: (a: number, b: number) => number;
   readonly webwallet_get_block_time: (a: number, b: number) => number;
@@ -639,12 +748,33 @@ export interface InitOutput {
   readonly __wbg_get_walletsummary_next_orchard_subtree_index: (a: number) => bigint;
   readonly __wbg_set_walletsummary_next_orchard_subtree_index: (a: number, b: bigint) => void;
   readonly walletsummary_account_balances: (a: number) => number;
+  readonly __wbg_pipelinedscanrange_free: (a: number, b: number) => void;
+  readonly pipelinedscanrange_start_height: (a: number) => number;
+  readonly pipelinedscanrange_end_height: (a: number) => number;
+  readonly pipelinedscanrange_len: (a: number) => number;
+  readonly pipelinedscanrange_priority: (a: number, b: number) => void;
+  readonly __wbg_syncchainstate_free: (a: number, b: number) => void;
+  readonly __wbg_syncscanresult_free: (a: number, b: number) => void;
+  readonly __wbg_get_syncscanresult_ranges_invalidated: (a: number) => number;
+  readonly __wbg_set_syncscanresult_ranges_invalidated: (a: number, b: number) => void;
+  readonly __wbg_get_syncscanresult_received_sapling: (a: number) => number;
+  readonly __wbg_set_syncscanresult_received_sapling: (a: number, b: number) => void;
+  readonly __wbg_get_syncscanresult_spent_sapling: (a: number) => number;
+  readonly __wbg_set_syncscanresult_spent_sapling: (a: number, b: number) => void;
+  readonly __wbg_get_syncscanresult_received_orchard: (a: number) => number;
+  readonly __wbg_set_syncscanresult_received_orchard: (a: number, b: number) => void;
+  readonly __wbg_get_syncscanresult_spent_orchard: (a: number) => number;
+  readonly __wbg_set_syncscanresult_spent_orchard: (a: number, b: number) => void;
   readonly start: () => void;
   readonly __wbg_blockrange_free: (a: number, b: number) => void;
   readonly __wbg_get_blockrange_0: (a: number) => number;
   readonly __wbg_set_blockrange_0: (a: number, b: number) => void;
   readonly __wbg_get_blockrange_1: (a: number) => number;
   readonly __wbg_set_blockrange_1: (a: number, b: number) => void;
+  readonly __wbg_get_syncscanresult_scanned_start: (a: number) => number;
+  readonly __wbg_get_syncscanresult_scanned_end: (a: number) => number;
+  readonly __wbg_set_syncscanresult_scanned_start: (a: number, b: number) => void;
+  readonly __wbg_set_syncscanresult_scanned_end: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_8_1_context_create: (a: number) => number;
   readonly rustsecp256k1_v0_8_1_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_8_1_default_illegal_callback_fn: (a: number, b: number) => void;
@@ -672,9 +802,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_4779: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_4778: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_8885: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_4845: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_4844: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_8951: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
