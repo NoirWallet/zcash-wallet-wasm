@@ -596,6 +596,17 @@ impl WebWallet {
             .await
     }
 
+    pub async fn get_max_transferable_amount(
+        &self,
+        account_id: u32,
+        to_address: String,
+    ) -> Result<u64, Error> {
+        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+        self.inner
+            .get_max_transferable_amount(AccountId::from(account_id), to_address)
+            .await
+    }
+
     pub async fn oneclick_pczt_shield(
         &self,
         account_id: u32,

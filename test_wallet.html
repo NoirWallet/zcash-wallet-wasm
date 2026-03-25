@@ -348,8 +348,11 @@
                     <div style="background-color: #f8f9fa; padding: 10px; border-radius: 4px; margin-bottom: 10px; min-height: 100px;">
                         <div id="oneclickStatus">Ready to send...</div>
                     </div>
+                    <button onclick="getMaxTransferableAmount()" style="background-color: #17a2b8;">
+                        1. Get Max Transferable Amount
+                    </button>
                     <button onclick="oneclickPcztTransfer()" style="background-color: #28a745; font-size: 16px; padding: 12px 24px;">
-                        ⚡ Send Now (One-Click)
+                        ⚡ Send Custom Amount (One-Click)
                     </button>
                 </div>
             </div>
@@ -1252,6 +1255,46 @@
         };
 
         // 6c. One-Click PCZT Transfer
+        window.getMaxTransferableAmount = async function() {
+            try {
+                if (!wallet) {
+                    throw new Error('Please initialize wallet first');
+                }
+
+                const accountId = parseInt(document.getElementById('oneclickAccountId').value);
+                const toAddress = document.getElementById('oneclickToAddress').value.trim();
+
+                if (!toAddress) {
+                    throw new Error('Please enter recipient address');
+                }
+
+                const statusDiv = document.getElementById('oneclickStatus');
+                statusDiv.innerHTML = '⏳ Calculating max transferable amount...';
+                showResult('oneclickResult', '⏳ Calculating max transferable amount...', 'info');
+
+                const maxAmount = await wallet.get_max_transferable_amount(accountId, toAddress);
+                document.getElementById('oneclickAmount').value = maxAmount.toString();
+
+                statusDiv.innerHTML = `✅ Max transferable amount ready<br>Amount: ${maxAmount} zatoshi`;
+                showResult(
+                    'oneclickResult',
+                    `✅ Max Transferable Amount Calculated!\n\n` +
+                    `Account ID: ${accountId}\n` +
+                    `To Address: ${toAddress}\n` +
+                    `Max Transferable: ${maxAmount} zatoshi\n` +
+                    `≈ ${(Number(maxAmount) / 100000000).toFixed(8)} ZEC\n\n` +
+                    `The amount field has been updated automatically.\n` +
+                    `You can now click \"Send Custom Amount\" to send this amount.`,
+                    'success'
+                );
+            } catch (e) {
+                const statusDiv = document.getElementById('oneclickStatus');
+                statusDiv.innerHTML = `❌ Error: ${e.message || e}`;
+                showResult('oneclickResult', '❌ Error: ' + e, 'error');
+                console.error('Get max transferable amount error:', e);
+            }
+        };
+
         window.oneclickPcztTransfer = async function() {
             try {
                 if (!wallet) {

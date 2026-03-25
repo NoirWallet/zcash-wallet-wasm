@@ -949,6 +949,102 @@ where
         Ok(pczt)
     }
 
+    async fn can_propose_transfer(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+    ) -> bool {
+        let change_strategy = MultiOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+            SplitPolicy::with_min_output_value(
+                match NonZeroUsize::new(self.target_note_count) {
+                    Some(v) => v,
+                    None => return false,
+                },
+                match Zatoshis::from_u64(self.min_split_output_value) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                },
+            ),
+        );
+
+        let input_selector = GreedyInputSelector::new();
+        let request = match TransactionRequest::new(vec![Payment::without_memo(
+            to_address,
+            match Zatoshis::from_u64(value) {
+                Ok(v) => v,
+                Err(_) => return false,
+            },
+        )]) {
+            Ok(request) => request,
+            Err(_) => return false,
+        };
+
+        let mut db = self.db.write().await;
+        propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &input_selector,
+            &change_strategy,
+            request,
+            self.confirmations_policy(),
+        )
+        .is_ok()
+    }
+
+    pub async fn get_max_transferable_amount(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+    ) -> Result<u64, Error> {
+        let summary = self.get_wallet_summary().await?.ok_or_else(|| {
+            Error::Generic("Wallet summary unavailable; sync required".to_string())
+        })?;
+
+        let account_balance = summary
+            .account_balances()
+            .get(&account_id)
+            .ok_or_else(|| Error::Generic("Account not found in wallet summary".to_string()))?;
+
+        let upper_bound = u64::from(account_balance.sapling_balance().spendable_value())
+            + u64::from(account_balance.orchard_balance().spendable_value());
+
+        if upper_bound == 0 {
+            return Ok(0);
+        }
+
+        let mut low = 0u64;
+        let mut high = upper_bound;
+        let mut best = 0u64;
+
+        while low <= high {
+            let mid = low + (high - low) / 2;
+
+            if self
+                .can_propose_transfer(account_id, to_address.clone(), mid)
+                .await
+            {
+                best = mid;
+                if mid == u64::MAX {
+                    break;
+                }
+                low = mid.saturating_add(1);
+            } else {
+                if mid == 0 {
+                    break;
+                }
+                high = mid - 1;
+            }
+        }
+
+        Ok(best)
+    }
+
     pub async fn pczt_prove(
         &self,
         pczt: Pczt,
