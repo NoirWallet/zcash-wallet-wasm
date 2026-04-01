@@ -30,15 +30,15 @@ console_error_panic_hook = { version = "0.1.7" }
 tonic-web-wasm-client = "0.7.0"
 tokio_with_wasm = { version = "0.7.1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 
-zcash_keys = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "b531c47d546116d7ae13aa140995d4807a409351", features = ["transparent-inputs", "orchard", "sapling", "unstable"] }
-zcash_client_backend = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "b531c47d546116d7ae13aa140995d4807a409351", default-features = false, features = ["sync", "lightwalletd-tonic", "orchard", "pczt", "wasm-bindgen"] }
-zcash_client_memory = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "b531c47d546116d7ae13aa140995d4807a409351", default-features = false, features = ["orchard", "transparent-inputs", "multicore"] }
-zcash_primitives = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "b531c47d546116d7ae13aa140995d4807a409351", default-features = false, features = ["std", "multicore"] }
-zcash_address = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "b531c47d546116d7ae13aa140995d4807a409351" }
-zcash_proofs = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "b531c47d546116d7ae13aa140995d4807a409351", default-features = false, features = ["bundled-prover", "multicore"] }
-zcash_protocol = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "b531c47d546116d7ae13aa140995d4807a409351", default-features = false }
-pczt = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "b531c47d546116d7ae13aa140995d4807a409351", default-features = false, features = ["orchard", "sapling", "transparent"] }
-zip321 = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "b531c47d546116d7ae13aa140995d4807a409351" }
+zcash_keys = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "65880ce0ada417b982bf9cc8a00dd39bfec5d781", features = ["transparent-inputs", "orchard", "sapling", "unstable"] }
+zcash_client_backend = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "65880ce0ada417b982bf9cc8a00dd39bfec5d781", default-features = false, features = ["sync", "lightwalletd-tonic", "orchard", "pczt", "wasm-bindgen"] }
+zcash_client_memory = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "65880ce0ada417b982bf9cc8a00dd39bfec5d781", default-features = false, features = ["orchard", "transparent-inputs", "multicore"] }
+zcash_primitives = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "65880ce0ada417b982bf9cc8a00dd39bfec5d781", default-features = false, features = ["std", "multicore"] }
+zcash_address = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "65880ce0ada417b982bf9cc8a00dd39bfec5d781" }
+zcash_proofs = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "65880ce0ada417b982bf9cc8a00dd39bfec5d781", default-features = false, features = ["bundled-prover", "multicore"] }
+zcash_protocol = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "65880ce0ada417b982bf9cc8a00dd39bfec5d781", default-features = false }
+pczt = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "65880ce0ada417b982bf9cc8a00dd39bfec5d781", default-features = false, features = ["orchard", "sapling", "transparent"] }
+zip321 = { git = "https://github.com/rhea-finance/librustzcash.git", rev = "65880ce0ada417b982bf9cc8a00dd39bfec5d781" }
 
 zip32 = { version = "0.2" }
 
