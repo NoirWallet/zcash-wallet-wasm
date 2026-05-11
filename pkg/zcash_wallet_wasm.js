@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_4776(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4776(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4833(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4833(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_8875(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_8875(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_8932(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_8932(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -1401,10 +1401,51 @@ export class WebWallet {
         return takeObject(ret);
     }
     /**
+     * Journal-aware sync: download + scan one batch, return journal data for persistence.
+     * Returns null if fully synced, or Uint8Array with journal entry data.
+     * @param {number | null} [batch_size]
+     * @returns {Promise<Uint8Array | undefined>}
+     */
+    prepare_sync_batch(batch_size) {
+        const ret = wasm.webwallet_prepare_sync_batch(this.__wbg_ptr, isLikeNone(batch_size) ? 0x100000001 : (batch_size) >>> 0);
+        return takeObject(ret);
+    }
+    /**
+     * Scan a journal entry for recovery (replay from base snapshot + journal).
+     * Returns true if more scan ranges remain.
+     * @param {Uint8Array} journal_data
+     * @returns {Promise<boolean>}
+     */
+    scan_journal_entry(journal_data) {
+        const ptr0 = passArray8ToWasm0(journal_data, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_scan_journal_entry(this.__wbg_ptr, ptr0, len0);
+        return takeObject(ret);
+    }
+    /**
+     * Replay multiple journal entries in sequence (for recovery).
+     * @param {Uint8Array[]} entries
+     * @returns {Promise<void>}
+     */
+    replay_journal_entries(entries) {
+        const ptr0 = passArrayJsValueToWasm0(entries, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_replay_journal_entries(this.__wbg_ptr, ptr0, len0);
+        return takeObject(ret);
+    }
+    /**
      * @returns {Promise<Uint8Array>}
      */
     db_to_bytes() {
         const ret = wasm.webwallet_db_to_bytes(this.__wbg_ptr);
+        return takeObject(ret);
+    }
+    /**
+     * @param {Function} callback
+     * @returns {Promise<void>}
+     */
+    db_to_bytes_chunked(callback) {
+        const ret = wasm.webwallet_db_to_bytes_chunked(this.__wbg_ptr, addHeapObject(callback));
         return takeObject(ret);
     }
     /**
@@ -2515,7 +2556,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_8875(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_8932(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2793,9 +2834,9 @@ function __wbg_get_imports(memory) {
         const ret = (BigInt.asUintN(64, arg0) | (arg1 << BigInt(64)));
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_cast_2fbdcd04e6d72a8e = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1875, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1876, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4775, __wasm_bindgen_func_elem_4776);
+    imports.wbg.__wbindgen_cast_39baf03af472933b = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1895, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1896, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4832, __wasm_bindgen_func_elem_4833);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_4625c577ab2ec9ee = function(arg0) {
@@ -2803,9 +2844,9 @@ function __wbg_get_imports(memory) {
         const ret = BigInt.asUintN(64, arg0);
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_cast_4e683db374ddb8e7 = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1875, function: Function { arguments: [Externref], shim_idx: 1876, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4775, __wasm_bindgen_func_elem_4776);
+    imports.wbg.__wbindgen_cast_5d9f33d6add65e13 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1895, function: Function { arguments: [Externref], shim_idx: 1896, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4832, __wasm_bindgen_func_elem_4833);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_77bc3e92745e9a35 = function(arg0, arg1) {
@@ -2851,7 +2892,7 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbindgen_object_drop_ref = function(arg0) {
         takeObject(arg0);
     };
-    imports.wbg.memory = memory || new WebAssembly.Memory({initial:835,maximum:16384,shared:true});
+    imports.wbg.memory = memory || new WebAssembly.Memory({initial:835,maximum:65536,shared:true});
 
     return imports;
 }

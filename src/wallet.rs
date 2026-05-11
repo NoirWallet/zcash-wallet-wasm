@@ -1,6 +1,7 @@
 use crate::*;
 
 use bip0039::{English, Mnemonic};
+use futures_util::TryStreamExt;
 use nonempty::NonEmpty;
 use pczt::Pczt;
 use pczt::roles::prover::Prover;
@@ -47,6 +48,7 @@ use zcash_protocol::ShieldedProtocol;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
 
+use zcash_client_backend::data_api::chain::BlockCache;
 use zcash_client_memory::{MemBlockCache, MemoryWalletDb};
 use zcash_protocol::consensus::Parameters;
 
@@ -136,6 +138,12 @@ where
             })?;
         db.encode(&mut memory_wallet_bytes)?;
         Ok(memory_wallet_bytes)
+    }
+
+    pub async fn db_to_bytes_chunked<F: FnMut(&[u8])>(&self, flush_fn: F) -> Result<(), Error> {
+        let db = self.db.read().await;
+        db.encode_chunked(flush_fn)?;
+        Ok(())
     }
 }
 
@@ -455,6 +463,345 @@ where
         )
         .await
         .map_err(Into::into)
+    }
+
+    /// Execute a full journal-aware sync cycle:
+    /// 1) Prepare (download from network, return journal data)
+    /// 2) JS persists the journal data
+    /// 3) scan_journal_entry applies the scan
+    ///
+    /// This method handles step 1: network operations + data capture.
+    /// Returns None if fully synced, Some(journal_bytes) with captured data.
+    pub async fn prepare_sync_batch(&self, batch_size: Option<u32>) -> Result<Option<Vec<u8>>, Error> {
+        use prost::Message;
+        use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
+        use zcash_client_backend::proto::compact_formats::CompactBlock;
+        use zcash_client_backend::proto::service::{self, BlockId};
+
+        let batch_size = batch_size.unwrap_or(BATCH_SIZE);
+        let mut client = self.client.clone();
+
+        // We need a write lock for update_chain_tip, suggest_scan_ranges, etc.
+        let mut db = self.db.write().await;
+
+        // 1. Update subtree roots
+        Self::do_update_subtree_roots(&mut client, &mut *db).await?;
+
+        // 2. Update chain tip
+        let tip_height: zcash_protocol::consensus::BlockHeight = client
+            .get_latest_block(service::ChainSpec::default())
+            .await
+            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+            .get_ref()
+            .height
+            .try_into()
+            .map_err(|_| Error::Generic("Invalid tip height".into()))?;
+        db.update_chain_tip(tip_height)
+            .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
+        // 3. Handle verify-priority ranges inline (not journaled, they're small)
+        {
+            let db_cache = MemBlockCache::new();
+            loop {
+                let scan_ranges = db
+                    .suggest_scan_ranges()
+                    .map_err(|e| Error::Generic(format!("{e}")))?;
+                match scan_ranges.first() {
+                    Some(scan_range) if scan_range.priority() == ScanPriority::Verify => {
+                        Self::download_and_insert_blocks(&mut client, &db_cache, scan_range).await?;
+                        let chain_state = Self::fetch_chain_state(&mut client, scan_range.block_range().start - 1).await?;
+                        zcash_client_backend::data_api::chain::scan_cached_blocks(
+                            &self.network,
+                            &db_cache,
+                            &mut *db,
+                            scan_range.block_range().start,
+                            &chain_state,
+                            scan_range.len(),
+                        ).map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
+                        db_cache.delete(scan_range.clone()).await.map_err(|e| Error::Generic(format!("{e}")))?;
+                    }
+                    _ => break,
+                }
+            }
+        }
+
+        // 4. Get next scan range
+        let scan_ranges = db.suggest_scan_ranges().map_err(|e| Error::Generic(format!("{e}")))?;
+        let first_batch = scan_ranges
+            .into_iter()
+            .flat_map(|r| {
+                (0..).scan(r, |acc, _| {
+                    if acc.is_empty() {
+                        None
+                    } else if let Some((cur, next)) = acc.split_at(acc.block_range().start + batch_size) {
+                        *acc = next;
+                        Some(cur)
+                    } else {
+                        let cur = acc.clone();
+                        let end_val = acc.block_range().end;
+                        *acc = ScanRange::from_parts(end_val..end_val, acc.priority());
+                        Some(cur)
+                    }
+                })
+            })
+            .next();
+
+        let scan_range = match first_batch {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        // 5. Download compact blocks for the range
+        let mut start_id = service::BlockId::default();
+        start_id.height = scan_range.block_range().start.into();
+        let mut end_id = service::BlockId::default();
+        end_id.height = (scan_range.block_range().end - 1).into();
+        let compact_blocks: Vec<CompactBlock> = client
+            .get_block_range(service::BlockRange { start: Some(start_id), end: Some(end_id) })
+            .await
+            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+            .into_inner()
+            .try_collect()
+            .await
+            .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+
+        // 6. Download tree state for range.start - 1
+        let tree_state_proto = client
+            .get_tree_state(BlockId { height: (scan_range.block_range().start - 1).into(), hash: vec![] })
+            .await
+            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+            .into_inner();
+
+        // 7. Serialize into journal entry format:
+        //    [range_start:u32 | range_end:u32 | tree_state_len:u32 | tree_state_bytes | (block_len:u32 + block_bytes)*]
+        let range_start: u32 = scan_range.block_range().start.into();
+        let range_end: u32 = scan_range.block_range().end.into();
+        let tree_state_bytes = tree_state_proto.encode_to_vec();
+        let ts_len = tree_state_bytes.len() as u32;
+
+        let mut blocks_bytes = Vec::new();
+        for cb in &compact_blocks {
+            let encoded = cb.encode_to_vec();
+            blocks_bytes.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            blocks_bytes.extend_from_slice(&encoded);
+        }
+
+        let mut journal_data = Vec::with_capacity(12 + tree_state_bytes.len() + blocks_bytes.len());
+        journal_data.extend_from_slice(&range_start.to_le_bytes());
+        journal_data.extend_from_slice(&range_end.to_le_bytes());
+        journal_data.extend_from_slice(&ts_len.to_le_bytes());
+        journal_data.extend_from_slice(&tree_state_bytes);
+        journal_data.extend_from_slice(&blocks_bytes);
+
+        // 8. Now scan the blocks we just downloaded
+        let db_cache = MemBlockCache::new();
+        db_cache.insert(compact_blocks).await.map_err(|e| Error::Generic(format!("{e}")))?;
+        let chain_state = tree_state_proto.to_chain_state().map_err(|e| Error::Generic(format!("{e}")))?;
+        zcash_client_backend::data_api::chain::scan_cached_blocks(
+            &self.network,
+            &db_cache,
+            &mut *db,
+            scan_range.block_range().start,
+            &chain_state,
+            scan_range.len(),
+        ).map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
+
+        Ok(Some(journal_data))
+    }
+
+    /// Scan a journal entry (for recovery from base snapshot + journal).
+    /// This consumes the raw journal entry bytes and applies the scan to the wallet DB.
+    pub async fn scan_journal_entry(&self, journal_data: &[u8]) -> Result<bool, Error> {
+        use prost::Message;
+        use zcash_client_backend::proto::compact_formats::CompactBlock;
+        use zcash_client_backend::proto::service;
+
+        if journal_data.len() < 12 {
+            return Err(Error::Generic("Journal data too short".into()));
+        }
+
+        let range_start =
+            u32::from_le_bytes(journal_data[0..4].try_into().unwrap());
+        let range_end =
+            u32::from_le_bytes(journal_data[4..8].try_into().unwrap());
+        let ts_len =
+            u32::from_le_bytes(journal_data[8..12].try_into().unwrap()) as usize;
+
+        if journal_data.len() < 12 + ts_len {
+            return Err(Error::Generic("Journal data truncated (tree state)".into()));
+        }
+
+        let tree_state_bytes = &journal_data[12..12 + ts_len];
+        let blocks_data = &journal_data[12 + ts_len..];
+
+        let tree_state_proto =
+            service::TreeState::decode(tree_state_bytes)
+                .map_err(|e| Error::Generic(format!("Failed to decode TreeState: {e}")))?;
+        let chain_state = tree_state_proto
+            .to_chain_state()
+            .map_err(|e| Error::Generic(format!("Failed to parse ChainState: {e}")))?;
+
+        // Deserialize compact blocks
+        let mut compact_blocks = Vec::new();
+        let mut offset = 0;
+        while offset + 4 <= blocks_data.len() {
+            let block_len =
+                u32::from_le_bytes(blocks_data[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            if offset + block_len > blocks_data.len() {
+                return Err(Error::Generic("Journal data truncated (block)".into()));
+            }
+            let cb = CompactBlock::decode(&blocks_data[offset..offset + block_len])
+                .map_err(|e| Error::Generic(format!("Failed to decode CompactBlock: {e}")))?;
+            compact_blocks.push(cb);
+            offset += block_len;
+        }
+
+        let db_cache = MemBlockCache::new();
+        db_cache
+            .insert(compact_blocks)
+            .await
+            .map_err(|e| Error::Generic(format!("{e}")))?;
+
+        let from_height = zcash_protocol::consensus::BlockHeight::from_u32(range_start);
+        let block_count = (range_end - range_start) as usize;
+
+        let mut db = self.db.write().await;
+        zcash_client_backend::data_api::chain::scan_cached_blocks(
+            &self.network,
+            &db_cache,
+            &mut *db,
+            from_height,
+            &chain_state,
+            block_count,
+        )
+        .map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
+
+        // Check if more work remains
+        let remaining = db
+            .suggest_scan_ranges()
+            .map_err(|e| Error::Generic(format!("{e}")))?;
+        let has_more = remaining
+            .iter()
+            .any(|r| !r.is_empty());
+
+        Ok(has_more)
+    }
+
+    /// Replay multiple journal entries in sequence (for recovery from base snapshot + journal).
+    pub async fn replay_journal_entries(&self, entries: Vec<Vec<u8>>) -> Result<(), Error> {
+        for (i, entry) in entries.iter().enumerate() {
+            tracing::info!("Replaying journal entry {}/{}", i + 1, entries.len());
+            self.scan_journal_entry(entry).await?;
+        }
+        Ok(())
+    }
+
+    // Internal helper: download blocks and insert into cache
+    async fn download_and_insert_blocks(
+        client: &mut CompactTxStreamerClient<T>,
+        db_cache: &MemBlockCache,
+        scan_range: &zcash_client_backend::data_api::scanning::ScanRange,
+    ) -> Result<(), Error> {
+        use zcash_client_backend::proto::service;
+
+        let mut start = service::BlockId::default();
+        start.height = scan_range.block_range().start.into();
+        let mut end = service::BlockId::default();
+        end.height = (scan_range.block_range().end - 1).into();
+        let range = service::BlockRange {
+            start: Some(start),
+            end: Some(end),
+        };
+        let compact_blocks: Vec<zcash_client_backend::proto::compact_formats::CompactBlock> =
+            client
+                .get_block_range(range)
+                .await
+                .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+                .into_inner()
+                .try_collect()
+                .await
+                .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+        db_cache
+            .insert(compact_blocks)
+            .await
+            .map_err(|e| Error::Generic(format!("{e}")))?;
+        Ok(())
+    }
+
+    // Internal helper: fetch chain state at a given height
+    async fn fetch_chain_state(
+        client: &mut CompactTxStreamerClient<T>,
+        height: zcash_protocol::consensus::BlockHeight,
+    ) -> Result<zcash_client_backend::data_api::chain::ChainState, Error> {
+        use zcash_client_backend::proto::service::BlockId;
+        let tree_state = client
+            .get_tree_state(BlockId {
+                height: height.into(),
+                hash: vec![],
+            })
+            .await
+            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?;
+        tree_state
+            .into_inner()
+            .to_chain_state()
+            .map_err(|e| Error::Generic(format!("Failed to parse ChainState: {e}")))
+    }
+
+    // Internal helper: update subtree roots from lightwalletd
+    async fn do_update_subtree_roots(
+        client: &mut CompactTxStreamerClient<T>,
+        db: &mut W,
+    ) -> Result<(), Error> {
+        use zcash_client_backend::data_api::chain::CommitmentTreeRoot;
+        use zcash_client_backend::proto::service;
+        use zcash_primitives::merkle_tree::HashSer;
+
+        let mut request = service::GetSubtreeRootsArg::default();
+        request.set_shielded_protocol(service::ShieldedProtocol::Sapling);
+        let sapling_roots: Vec<CommitmentTreeRoot<sapling::Node>> = client
+            .get_subtree_roots(request)
+            .await
+            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+            .into_inner()
+            .and_then(|root| async move {
+                let root_hash = sapling::Node::read(&root.root_hash[..])?;
+                Ok(CommitmentTreeRoot::from_parts(
+                    zcash_protocol::consensus::BlockHeight::from_u32(
+                        root.completing_block_height as u32,
+                    ),
+                    root_hash,
+                ))
+            })
+            .try_collect()
+            .await
+            .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+        db.put_sapling_subtree_roots(0, &sapling_roots)
+            .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
+        let mut request = service::GetSubtreeRootsArg::default();
+        request.set_shielded_protocol(service::ShieldedProtocol::Orchard);
+        let orchard_roots: Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>> = client
+            .get_subtree_roots(request)
+            .await
+            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+            .into_inner()
+            .and_then(|root| async move {
+                let root_hash = orchard::tree::MerkleHashOrchard::read(&root.root_hash[..])?;
+                Ok(CommitmentTreeRoot::from_parts(
+                    zcash_protocol::consensus::BlockHeight::from_u32(
+                        root.completing_block_height as u32,
+                    ),
+                    root_hash,
+                ))
+            })
+            .try_collect()
+            .await
+            .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+        db.put_orchard_subtree_roots(0, &orchard_roots)
+            .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
+        Ok(())
     }
 
     pub async fn get_wallet_summary(&self) -> Result<Option<WalletSummary<AccountId>>, Error> {

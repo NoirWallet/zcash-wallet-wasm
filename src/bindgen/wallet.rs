@@ -353,9 +353,76 @@ impl WebWallet {
     //     Ok(flattened_txid_bytes)
     // }
 
+    /// Journal-aware sync: download + scan one batch, return journal data for persistence.
+    /// Returns null if fully synced, or Uint8Array with journal entry data.
+    pub async fn prepare_sync_batch(&self, batch_size: Option<u32>) -> Result<Option<Box<[u8]>>, Error> {
+        let start_time = js_sys::Date::now();
+
+        let result = self.inner.prepare_sync_batch(batch_size).await?;
+
+        let elapsed_seconds = (js_sys::Date::now() - start_time) / 1000.0;
+        match &result {
+            Some(data) => {
+                tracing::info!(
+                    "⏱️ prepare_sync_batch completed in {:.2}s, journal entry: {} bytes",
+                    elapsed_seconds,
+                    data.len()
+                );
+            }
+            None => {
+                tracing::info!("⏱️ prepare_sync_batch: fully synced ({:.2}s)", elapsed_seconds);
+            }
+        }
+
+        Ok(result.map(|v| v.into_boxed_slice()))
+    }
+
+    /// Scan a journal entry for recovery (replay from base snapshot + journal).
+    /// Returns true if more scan ranges remain.
+    pub async fn scan_journal_entry(&self, journal_data: &[u8]) -> Result<bool, Error> {
+        let start_time = js_sys::Date::now();
+
+        let has_more = self.inner.scan_journal_entry(journal_data).await?;
+
+        let elapsed_seconds = (js_sys::Date::now() - start_time) / 1000.0;
+        tracing::info!(
+            "⏱️ scan_journal_entry completed in {:.2}s, has_more: {}",
+            elapsed_seconds,
+            has_more
+        );
+
+        Ok(has_more)
+    }
+
+    /// Replay multiple journal entries in sequence (for recovery).
+    pub async fn replay_journal_entries(&self, entries: Vec<js_sys::Uint8Array>) -> Result<(), Error> {
+        let entries: Vec<Vec<u8>> = entries.iter().map(|e| e.to_vec()).collect();
+
+        let start_time = js_sys::Date::now();
+        tracing::info!("Replaying {} journal entries...", entries.len());
+
+        self.inner.replay_journal_entries(entries).await?;
+
+        let elapsed_seconds = (js_sys::Date::now() - start_time) / 1000.0;
+        tracing::info!("⏱️ Journal replay completed in {:.2}s", elapsed_seconds);
+
+        Ok(())
+    }
+
     pub async fn db_to_bytes(&self) -> Result<Box<[u8]>, Error> {
         let bytes = self.inner.db_to_bytes().await?;
         Ok(bytes.into_boxed_slice())
+    }
+
+    pub async fn db_to_bytes_chunked(&self, callback: &js_sys::Function) -> Result<(), Error> {
+        let cb = callback.clone();
+        self.inner
+            .db_to_bytes_chunked(move |chunk: &[u8]| {
+                let arr = js_sys::Uint8Array::from(chunk);
+                let _ = cb.call1(&JsValue::NULL, &arr);
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn send_authorized_transactions(&self, txids: Vec<u8>) -> Result<(), Error> {

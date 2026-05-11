@@ -305,6 +305,13 @@ impl<P: Parameters> MemoryWalletDb<P> {
         Ok(())
     }
 
+    pub fn encode_chunked<F: FnMut(&[u8])>(&self, flush_fn: F) -> Result<()> {
+        let mut writer = ChunkedWriter::new(flush_fn);
+        self.encode(&mut writer)?;
+        writer.flush();
+        Ok(())
+    }
+
     fn proto_accounts(&self) -> proto::Accounts {
         proto::Accounts {
             accounts: self
@@ -707,6 +714,66 @@ where
             })?;
 
         Ok(len)
+    }
+}
+
+const CHUNK_FLUSH_SIZE: usize = 4 * 1024 * 1024; // 4 MB
+
+pub struct ChunkedWriter<F> {
+    buf: Vec<u8>,
+    flush_fn: F,
+    flush_threshold: usize,
+}
+
+impl<F: FnMut(&[u8])> ChunkedWriter<F> {
+    pub fn new(flush_fn: F) -> Self {
+        Self {
+            buf: Vec::with_capacity(CHUNK_FLUSH_SIZE),
+            flush_fn,
+            flush_threshold: CHUNK_FLUSH_SIZE,
+        }
+    }
+
+    pub fn flush(&mut self) {
+        if !self.buf.is_empty() {
+            (self.flush_fn)(&self.buf);
+            self.buf.clear();
+        }
+    }
+}
+
+unsafe impl<F: FnMut(&[u8])> BufMut for ChunkedWriter<F> {
+    fn remaining_mut(&self) -> usize {
+        usize::MAX
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        let new_len = self.buf.len() + cnt;
+        self.buf.set_len(new_len);
+        if self.buf.len() >= self.flush_threshold {
+            self.flush();
+        }
+    }
+
+    fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+        if self.buf.len() >= self.flush_threshold {
+            self.flush();
+        }
+        let spare = self.buf.spare_capacity_mut();
+        if spare.is_empty() {
+            self.buf.reserve(self.flush_threshold);
+            let spare = self.buf.spare_capacity_mut();
+            unsafe { bytes::buf::UninitSlice::from_raw_parts_mut(spare.as_mut_ptr().cast(), spare.len()) }
+        } else {
+            unsafe { bytes::buf::UninitSlice::from_raw_parts_mut(spare.as_mut_ptr().cast(), spare.len()) }
+        }
+    }
+
+    fn put_slice(&mut self, src: &[u8]) {
+        self.buf.extend_from_slice(src);
+        if self.buf.len() >= self.flush_threshold {
+            self.flush();
+        }
     }
 }
 

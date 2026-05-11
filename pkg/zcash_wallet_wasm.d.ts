@@ -253,7 +253,22 @@ export class WebWallet {
    * ```
    */
   get_block_by_time(time: number): Promise<number>;
+  /**
+   * Journal-aware sync: download + scan one batch, return journal data for persistence.
+   * Returns null if fully synced, or Uint8Array with journal entry data.
+   */
+  prepare_sync_batch(batch_size?: number | null): Promise<Uint8Array | undefined>;
+  /**
+   * Scan a journal entry for recovery (replay from base snapshot + journal).
+   * Returns true if more scan ranges remain.
+   */
+  scan_journal_entry(journal_data: Uint8Array): Promise<boolean>;
+  /**
+   * Replay multiple journal entries in sequence (for recovery).
+   */
+  replay_journal_entries(entries: Uint8Array[]): Promise<void>;
   db_to_bytes(): Promise<Uint8Array>;
+  db_to_bytes_chunked(callback: Function): Promise<void>;
   send_authorized_transactions(txids: Uint8Array): Promise<void>;
   /**
    * Get account ID by account name
@@ -615,7 +630,11 @@ export interface InitOutput {
   readonly webwallet_get_block_time: (a: number, b: number) => number;
   readonly webwallet_get_latest_height: (a: number) => number;
   readonly webwallet_get_block_by_time: (a: number, b: number) => number;
+  readonly webwallet_prepare_sync_batch: (a: number, b: number) => number;
+  readonly webwallet_scan_journal_entry: (a: number, b: number, c: number) => number;
+  readonly webwallet_replay_journal_entries: (a: number, b: number, c: number) => number;
   readonly webwallet_db_to_bytes: (a: number) => number;
+  readonly webwallet_db_to_bytes_chunked: (a: number, b: number) => number;
   readonly webwallet_send_authorized_transactions: (a: number, b: number, c: number) => number;
   readonly webwallet_get_account_id_by_name: (a: number, b: number, c: number) => number;
   readonly webwallet_get_account_hd_index: (a: number, b: number) => number;
@@ -672,9 +691,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_4776: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_4775: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_8875: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_4833: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_4832: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_8932: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

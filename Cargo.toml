@@ -73,6 +73,9 @@ tonic = { version = "0.13", default-features = false, features = [
     "codegen",
 ] }
 
+prost = "0.13"
+futures-util = "0.3"
+
 gloo-net = "0.6.0"
 
 [profile.release]
