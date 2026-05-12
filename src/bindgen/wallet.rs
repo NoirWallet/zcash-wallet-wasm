@@ -471,7 +471,7 @@ impl WebWallet {
         use zcash_address::unified::{self, Container};
         use zcash_client_backend::data_api::Account;
         use zcash_client_backend::encoding::AddressCodec;
-        use zcash_keys::keys::UnifiedAddressRequest as UAR;
+        use zcash_keys::keys::UnifiedAddressRequest;
         use zcash_primitives::consensus::Parameters;
         use zcash_primitives::legacy::TransparentAddress;
 
@@ -483,8 +483,8 @@ impl WebWallet {
         // Get the unified incoming viewing key from the account
         let uivk = account.uivk();
 
-        // Generate the full unified address with all available receivers
-        let (full_address, _) = uivk.default_address(UAR::ALLOW_ALL)?;
+        // Generate the first address that includes every receiver supported by the UIVK.
+        let (full_address, _) = uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
         let unified_str = full_address.encode(&self.inner.network);
 
         // Parse the unified address to extract individual receivers

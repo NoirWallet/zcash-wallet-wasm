@@ -328,8 +328,8 @@ pub fn mnemonic_to_addresses(
     // Get UIVK (unified incoming viewing key) from UFVK
     let uivk = ufvk.as_inner().to_unified_incoming_viewing_key();
 
-    // Generate the default address (diversifier index 0) with all receivers
-    let (address, _) = uivk.default_address(UnifiedAddressRequest::ALLOW_ALL)?;
+    // Generate the first address that includes every receiver supported by the UIVK.
+    let (address, _) = uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
 
     // Encode the unified address
     let unified_str = address.encode(&net);
