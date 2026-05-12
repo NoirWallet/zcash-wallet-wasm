@@ -315,8 +315,6 @@ where
         purpose: AccountPurpose,
         key_source: Option<&str>,
     ) -> Result<AccountId, Error> {
-        tracing::info!("Importing account with Ufvk: {:?}", ufvk);
-
         // Check if an account with this name already exists
         match self.get_account_id_by_name(account_name).await {
             Ok(_) => {
@@ -623,7 +621,6 @@ where
     //         self.confirmations_policy(),
     //     )
     //     .map_err(|_e| Error::Generic("something bad happened when calling propose transfer. Possibly insufficient balance..".to_string()))?;
-    //     tracing::info!("Proposal: {:#?}", proposal);
     //     Ok(proposal)
     // }
 
@@ -860,8 +857,6 @@ where
         )
         .map_err(|e| Error::Generic(format!("Error when proposing shielding: {:?}", e)))?;
 
-        tracing::info!("Shielding proposal created: {:#?}", proposal);
-
         // Create and send the transaction directly
         let prover = get_prover();
         let spending_keys = SpendingKeys::from_unified_spending_key(usk.clone());
@@ -883,8 +878,6 @@ where
             &proposal,
         )
         .map_err(|e| Error::Generic(format!("Failed to create shielding transaction: {:?}", e)))?;
-
-        tracing::info!("Shielding transactions created: {:?}", transactions);
 
         // Transactions are automatically stored in the database by create_proposed_transactions
         // Now we need to broadcast them
@@ -930,7 +923,6 @@ where
             self.confirmations_policy(),
         )
             .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {:?}", e)))?;
-        tracing::info!("Proposal: {:#?}", proposal);
         let pczt = create_pczt_from_proposal::<
             _,
             _,
