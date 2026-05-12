@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_4126(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4126(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4127(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4127(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7995(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_7995(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_7996(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_7996(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -1617,11 +1617,11 @@ export class WebWallet {
 if (Symbol.dispose) WebWallet.prototype[Symbol.dispose] = WebWallet.prototype.free;
 
 /**
- * Generate a new BIP-39 mnemonic phrase with the specified word count.
+ * Generate a new 24-word BIP-39 mnemonic phrase.
  *
  * # Arguments
  *
- * * `word_count` - Number of words in the mnemonic (12, 15, 18, 21, or 24)
+ * * `word_count` - Number of words in the mnemonic. Must be 24 for new wallet generation.
  *
  * # Returns
  *
@@ -2473,7 +2473,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_7995(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_7996(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2714,7 +2714,7 @@ function __wbg_get_imports(memory) {
     };
     imports.wbg.__wbindgen_cast_064b2865400dcdae = function(arg0, arg1) {
         // Cast intrinsic for `Closure(Closure { dtor_idx: 1609, function: Function { arguments: [Externref], shim_idx: 1610, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4125, __wasm_bindgen_func_elem_4126);
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4126, __wasm_bindgen_func_elem_4127);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
@@ -2746,7 +2746,7 @@ function __wbg_get_imports(memory) {
     };
     imports.wbg.__wbindgen_cast_bc9966501bbd5d26 = function(arg0, arg1) {
         // Cast intrinsic for `Closure(Closure { dtor_idx: 1609, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1610, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4125, __wasm_bindgen_func_elem_4126);
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4126, __wasm_bindgen_func_elem_4127);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_cb9088102bce6b30 = function(arg0, arg1) {

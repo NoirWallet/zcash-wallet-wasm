@@ -339,11 +339,11 @@ export class WebWallet {
 }
 
 /**
- * Generate a new BIP-39 mnemonic phrase with the specified word count.
+ * Generate a new 24-word BIP-39 mnemonic phrase.
  *
  * # Arguments
  *
- * * `word_count` - Number of words in the mnemonic (12, 15, 18, 21, or 24)
+ * * `word_count` - Number of words in the mnemonic. Must be 24 for new wallet generation.
  *
  * # Returns
  *
@@ -672,9 +672,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_4126: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_4125: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_7995: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_4127: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_4126: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_7996: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

@@ -19,11 +19,11 @@ pub struct UnifiedAddresses {
     pub transparent: Option<String>,
 }
 
-/// Generate a new BIP-39 mnemonic phrase with the specified word count.
+/// Generate a new 24-word BIP-39 mnemonic phrase.
 ///
 /// # Arguments
 ///
-/// * `word_count` - Number of words in the mnemonic (12, 15, 18, 21, or 24)
+/// * `word_count` - Number of words in the mnemonic. Must be 24 for new wallet generation.
 ///
 /// # Returns
 ///
@@ -38,10 +38,6 @@ pub struct UnifiedAddresses {
 #[wasm_bindgen]
 pub fn generate_mnemonic(word_count: u32) -> Result<String, Error> {
     let count = match word_count {
-        12 => Count::Words12,
-        15 => Count::Words15,
-        18 => Count::Words18,
-        21 => Count::Words21,
         24 => Count::Words24,
         _ => return Err(Error::InvalidSeedPhrase),
     };
@@ -487,4 +483,23 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
 
     // Convert to JsValue using serde_wasm_bindgen
     Ok(serde_wasm_bindgen::to_value(&result)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_mnemonic;
+    use crate::Error;
+
+    #[test]
+    fn generate_mnemonic_only_allows_24_words() {
+        for word_count in [12, 15, 18, 21] {
+            assert!(matches!(
+                generate_mnemonic(word_count),
+                Err(Error::InvalidSeedPhrase)
+            ));
+        }
+
+        let mnemonic = generate_mnemonic(24).expect("24-word mnemonic generation should succeed");
+        assert_eq!(mnemonic.split_whitespace().count(), 24);
+    }
 }
