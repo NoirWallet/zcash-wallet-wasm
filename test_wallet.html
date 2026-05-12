@@ -325,7 +325,6 @@
             <div class="info" style="margin-bottom: 15px; padding: 10px; background-color: #d4edda; border-left: 4px solid #28a745;">
                 <strong>🚀 Fastest Method - All in One!</strong><br>
                 Combines all PCZT steps (Create → Sign → Prove → Send) into a single call.<br>
-                Optionally uses a remote proving server for faster proving.<br>
                 <strong>Note:</strong> Requires mnemonic for signing.
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
@@ -338,10 +337,6 @@
                     <input type="number" id="oneclickAmount" value="10000" min="1" placeholder="Amount in zatoshi (1 ZEC = 100,000,000 zatoshi)">
                     <label>Mnemonic for signing:</label>
                     <textarea id="oneclickMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
-                    <label style="margin-top: 10px;">
-                        <input type="checkbox" id="useProveServer" checked>
-                        Use remote proving server (faster)
-                    </label>
                 </div>
                 <div>
                     <h3>Status:</h3>
@@ -423,7 +418,6 @@
                 <strong>🚀 Fastest Shield Method - All in One!</strong><br>
                 Shields all transparent funds in your account by moving them to the Orchard shielded pool.<br>
                 Combines all PCZT steps (Create → Sign → Prove → Send) into a single call.<br>
-                Optionally uses a remote proving server for faster proving.<br>
                 <strong>Note:</strong> Requires mnemonic for signing. This improves privacy by hiding your funds.
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
@@ -432,10 +426,6 @@
                     <input type="number" id="oneclickShieldAccountId" value="0" min="0">
                     <label>Mnemonic for signing:</label>
                     <textarea id="oneclickShieldMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
-                    <label style="margin-top: 10px;">
-                        <input type="checkbox" id="shieldUseProveServer" checked>
-                        Use remote proving server (faster)
-                    </label>
                 </div>
                 <div>
                     <h3>Status:</h3>
@@ -1262,7 +1252,6 @@
                 const toAddress = document.getElementById('oneclickToAddress').value.trim();
                 const amount = BigInt(document.getElementById('oneclickAmount').value);
                 const mnemonic = document.getElementById('oneclickMnemonic').value.trim();
-                const useProveServer = document.getElementById('useProveServer').checked;
 
                 if (!toAddress) {
                     throw new Error('Please enter recipient address');
@@ -1304,11 +1293,7 @@
 
                 // Call one-click transfer
                 statusDiv.innerHTML += '<br>🚀 Executing one-click transfer...';
-                if (useProveServer) {
-                    statusDiv.innerHTML += '<br>🌐 Using remote proving server (faster)...';
-                } else {
-                    statusDiv.innerHTML += '<br>💻 Using local proving (slower, ~70-80s)...';
-                }
+                statusDiv.innerHTML += '<br>💻 Using local proving...';
 
                 const txid = await wallet.oneclick_pczt_transfer(
                     accountId,
@@ -1316,8 +1301,7 @@
                     amount,
                     usk,
                     seedFp,
-                    null,
-                    useProveServer
+                    null
                 );
 
                 const totalElapsed = ((performance.now() - totalStartTime) / 1000).toFixed(2);
@@ -1330,7 +1314,7 @@
                     `From Account: ${accountId}\n` +
                     `To Address: ${toAddress}\n` +
                     `Amount: ${amount} zatoshi\n` +
-                    `Prove Server: ${useProveServer ? 'Remote (faster)' : 'Local'}\n\n` +
+                    `Proving: Local\n\n` +
                     `✅ Transaction created, signed, proven, and sent in a single call!`,
                     'success'
                 );
@@ -1354,7 +1338,6 @@
 
                 const accountId = parseInt(document.getElementById('oneclickShieldAccountId').value);
                 const mnemonic = document.getElementById('oneclickShieldMnemonic').value.trim();
-                const useProveServer = document.getElementById('shieldUseProveServer').checked;
 
                 if (!mnemonic) {
                     throw new Error('Please enter mnemonic for signing');
@@ -1393,18 +1376,13 @@
 
                 // Call one-click shield
                 statusDiv.innerHTML += '<br>🛡️ Executing one-click shield...';
-                if (useProveServer) {
-                    statusDiv.innerHTML += '<br>🌐 Using remote proving server (faster)...';
-                } else {
-                    statusDiv.innerHTML += '<br>💻 Using local proving (slower, ~70-80s)...';
-                }
+                statusDiv.innerHTML += '<br>💻 Using local proving...';
 
                 const txid = await wallet.oneclick_pczt_shield(
                     accountId,
                     usk,
                     seedFp,
-                    null,
-                    useProveServer
+                    null
                 );
 
                 const totalElapsed = ((performance.now() - totalStartTime) / 1000).toFixed(2);
@@ -1415,7 +1393,7 @@
                     `Transaction ID: ${txid}\n` +
                     `Total Time: ${totalElapsed}s\n` +
                     `Account ID: ${accountId}\n` +
-                    `Prove Server: ${useProveServer ? 'Remote (faster)' : 'Local'}\n\n` +
+                    `Proving: Local\n\n` +
                     `✅ All transparent funds have been shielded!\n` +
                     `Your funds are now private in the Orchard shielded pool.\n\n` +
                     `Transaction created, signed, proven, and sent in a single call!`,

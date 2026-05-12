@@ -55,7 +55,6 @@ nonempty = "0.11"
 secp256k1 = { version = "0.27", features = ["recovery", "global-context"] }
 bitcoin_hashes = "0.13"
 hex = "0.4"
-base64 = "0.22"
 bs58 = "0.5"
 sha2 = "0.10"
 
@@ -72,8 +71,6 @@ tonic = { version = "0.13", default-features = false, features = [
     "prost",
     "codegen",
 ] }
-
-gloo-net = "0.6.0"
 
 [profile.release]
 opt-level = 3
