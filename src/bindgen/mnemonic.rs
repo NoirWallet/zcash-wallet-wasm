@@ -1,6 +1,7 @@
 use crate::Error;
 use crate::bindgen::{SeedFingerprint, UnifiedSpendingKey};
 use bip0039::{Count, English, Mnemonic};
+use secrecy::Zeroize;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -143,8 +144,10 @@ pub fn mnemonic_to_seed(phrase: &str, passphrase: &str) -> Result<Vec<u8>, Error
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
-    Ok(seed.to_vec())
+    let mut seed = mnemonic.to_seed(passphrase);
+    let result = seed.to_vec();
+    seed.zeroize();
+    Ok(result)
 }
 
 /// Generate a UnifiedSpendingKey from a mnemonic phrase.
@@ -182,10 +185,12 @@ pub fn mnemonic_to_spending_key(
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
 
     // Create UnifiedSpendingKey from seed
-    UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)
+    let result = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index);
+    seed.zeroize();
+    result
 }
 
 /// Generate a SeedFingerprint from a mnemonic phrase.
@@ -217,10 +222,12 @@ pub fn mnemonic_to_seed_fingerprint(
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
 
     // Create SeedFingerprint from seed
-    SeedFingerprint::new(seed.to_vec().into_boxed_slice())
+    let result = SeedFingerprint::new(seed.to_vec().into_boxed_slice());
+    seed.zeroize();
+    result
 }
 
 // /// Generate a UnifiedFullViewingKey from a mnemonic phrase.
@@ -310,10 +317,12 @@ pub fn mnemonic_to_addresses(
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
 
     // Create UnifiedSpendingKey from seed
-    let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)?;
+    let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index);
+    seed.zeroize();
+    let usk = usk?;
 
     // Get UnifiedFullViewingKey
     let ufvk = usk.to_unified_full_viewing_key();

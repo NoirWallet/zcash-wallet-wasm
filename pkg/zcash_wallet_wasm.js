@@ -265,8 +265,8 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_4123(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4123(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4124(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4124(arg0, arg1, addHeapObject(arg2));
 }
 
 function __wasm_bindgen_func_elem_7992(arg0, arg1, arg2, arg3) {
@@ -2772,7 +2772,7 @@ function __wbg_get_imports(memory) {
     };
     imports.wbg.__wbindgen_cast_21569c83479906de = function(arg0, arg1) {
         // Cast intrinsic for `Closure(Closure { dtor_idx: 1606, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1607, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4122, __wasm_bindgen_func_elem_4123);
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4123, __wasm_bindgen_func_elem_4124);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
@@ -2809,7 +2809,7 @@ function __wbg_get_imports(memory) {
     };
     imports.wbg.__wbindgen_cast_cedab93f4b5b48ac = function(arg0, arg1) {
         // Cast intrinsic for `Closure(Closure { dtor_idx: 1606, function: Function { arguments: [Externref], shim_idx: 1607, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4122, __wasm_bindgen_func_elem_4123);
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4123, __wasm_bindgen_func_elem_4124);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {
