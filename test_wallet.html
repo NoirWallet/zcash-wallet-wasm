@@ -306,6 +306,8 @@
                     <input type="text" id="oneclickToAddress" placeholder="Recipient Zcash address">
                     <label>Amount (zatoshi):</label>
                     <input type="number" id="oneclickAmount" value="10000" min="1" placeholder="Amount in zatoshi (1 ZEC = 100,000,000 zatoshi)">
+                    <label>Memo (optional, shielded recipients only):</label>
+                    <textarea id="oneclickMemo" rows="2" placeholder="Leave empty for no memo"></textarea>
                     <label>Mnemonic for signing:</label>
                     <textarea id="oneclickMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
                     <label>BIP39 Passphrase (optional):</label>
@@ -1007,6 +1009,8 @@
                 const accountId = parseInt(document.getElementById('oneclickAccountId').value);
                 const toAddress = document.getElementById('oneclickToAddress').value.trim();
                 const amount = BigInt(document.getElementById('oneclickAmount').value);
+                const memoText = document.getElementById('oneclickMemo').value;
+                const memo = memoText ? new TextEncoder().encode(memoText) : null;
                 const mnemonic = document.getElementById('oneclickMnemonic').value.trim();
                 const passphrase = document.getElementById('oneclickPassphrase').value;
 
@@ -1049,7 +1053,8 @@
                     amount,
                     usk,
                     seedFp,
-                    null
+                    null,
+                    memo
                 );
 
                 const totalElapsed = ((performance.now() - totalStartTime) / 1000).toFixed(2);
@@ -1062,6 +1067,7 @@
                     `From Account: ${accountId}\n` +
                     `To Address: ${toAddress}\n` +
                     `Amount: ${amount} zatoshi\n` +
+                    `Memo: ${memoText ? 'yes' : 'none'}\n` +
                     `Proving: Local\n\n` +
                     `✅ Transaction created, signed, proven, and sent in a single call!`,
                     'success'

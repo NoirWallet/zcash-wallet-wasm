@@ -43,6 +43,7 @@ use zcash_primitives::transaction::fees::FeeRule;
 use zcash_proofs::prover::LocalTxProver;
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+use zcash_primitives::memo::MemoBytes;
 use zcash_protocol::ShieldedProtocol;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
@@ -805,6 +806,7 @@ where
         account_id: AccountId,
         to_address: ZcashAddress,
         value: u64,
+        memo: Option<Vec<u8>>,
     ) -> Result<Pczt, Error> {
         // Create the PCZT.
         let change_strategy = MultiOutputChangeStrategy::new(
@@ -820,10 +822,17 @@ where
         );
 
         let input_selector = GreedyInputSelector::new();
-        let request = TransactionRequest::new(vec![Payment::without_memo(
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let payment = Payment::new(
             to_address,
             Zatoshis::from_u64(value)?,
-        )])?;
+            memo,
+            None,
+            None,
+            vec![],
+        )
+        .ok_or(Error::UnsupportedMemoRecipient)?;
+        let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
         let proposal = propose_transfer::<_, _, _,_, <W as WalletCommitmentTrees>::Error>(
             &mut *db,

@@ -550,11 +550,12 @@ impl WebWallet {
         usk: super::UnifiedSpendingKey,
         seed_fp: SeedFingerprint,
         sapling_proof_gen_key: Option<ProofGenerationKey>,
+        memo: Option<Vec<u8>>,
     ) -> Result<String, Error> {
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
         let pczt = self
             .inner
-            .pczt_create(AccountId::from(account_id), to_address, value)
+            .pczt_create(AccountId::from(account_id), to_address, value, memo)
             .await?;
 
         self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
