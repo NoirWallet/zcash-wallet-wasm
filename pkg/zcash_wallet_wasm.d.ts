@@ -159,7 +159,7 @@ export class WalletSummary {
 export class WebWallet {
   free(): void;
   [Symbol.dispose](): void;
-  constructor(network: string, lightwalletd_url: string, min_confirmations: number, db_bytes?: Uint8Array | null);
+  constructor(network: string, lightwalletd_url: string, db_bytes?: Uint8Array | null);
   create_account(account_name: string, seed_phrase: string, account_hd_index: number, birthday_height?: number | null, passphrase?: string | null): Promise<number>;
   sync(): Promise<void>;
   /**
@@ -585,7 +585,7 @@ export interface InitOutput {
   readonly paymentrequest_other_params: (a: number, b: number) => void;
   readonly sign_message_with_transparent: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
   readonly __wbg_webwallet_free: (a: number, b: number) => void;
-  readonly webwallet_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
+  readonly webwallet_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
   readonly webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
   readonly webwallet_sync: (a: number) => number;
   readonly webwallet_sync_next_batch: (a: number, b: number) => number;
@@ -646,9 +646,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_3292: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_3291: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_7134: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_3293: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_3292: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_7135: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

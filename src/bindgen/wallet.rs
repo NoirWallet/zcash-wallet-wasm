@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, str::FromStr};
+use std::str::FromStr;
 
 use crate::bindgen::sign::pczt_sign_inner;
 use crate::bindgen::{ProofGenerationKey, SeedFingerprint};
@@ -44,12 +44,9 @@ impl WebWallet {
     pub fn new(
         network: &str,
         lightwalletd_url: &str,
-        min_confirmations: u32,
         db_bytes: Option<Box<[u8]>>,
     ) -> Result<WebWallet, Error> {
         let network = Network::from_str(network)?;
-        let min_confirmations = NonZeroU32::try_from(min_confirmations)
-            .map_err(|_| Error::InvalidMinConformations(min_confirmations))?;
         let client = Client::new(lightwalletd_url.to_string());
 
         let db = match db_bytes {
@@ -63,7 +60,7 @@ impl WebWallet {
         };
 
         Ok(Self {
-            inner: Wallet::new(db, client, network, min_confirmations)?,
+            inner: Wallet::new(db, client, network)?,
         })
     }
 

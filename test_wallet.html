@@ -155,8 +155,6 @@
             </select>
             <label>Lightwalletd URL:</label>
             <input type="text" id="lightwalletdUrl" value="https://zcash-testnet.chainsafe.dev" placeholder="https://zcash-testnet.chainsafe.dev">
-            <label>Min Confirmations:</label>
-            <input type="number" id="minConfirmations" value="1" min="1">
             <button onclick="initWallet()">Initialize Wallet</button>
             <div class="result" id="initResult"></div>
         </div>
@@ -525,20 +523,18 @@
             try {
                 const network = document.getElementById('network').value;
                 const lightwalletdUrl = document.getElementById('lightwalletdUrl').value;
-                const minConfirmations = parseInt(document.getElementById('minConfirmations').value);
 
                 if (!lightwalletdUrl) {
                     throw new Error('Please enter lightwalletd URL');
                 }
 
-                wallet = new WebWallet(network, lightwalletdUrl, minConfirmations, null);
+                wallet = new WebWallet(network, lightwalletdUrl, null);
 
                 updateStatus();
                 showResult('initResult',
                     'Wallet initialized successfully!\n' +
                     'Network: ' + network + '\n' +
-                    'Lightwalletd: ' + lightwalletdUrl + '\n' +
-                    'Min Confirmations: ' + minConfirmations,
+                    'Lightwalletd: ' + lightwalletdUrl,
                     'success'
                 );
             } catch (e) {
@@ -1196,9 +1192,8 @@
 
                 const network = document.getElementById('network').value;
                 const lightwalletdUrl = document.getElementById('lightwalletdUrl').value;
-                const minConfirmations = parseInt(document.getElementById('minConfirmations').value);
 
-                wallet = new WebWallet(network, lightwalletdUrl, minConfirmations, bytes);
+                wallet = new WebWallet(network, lightwalletdUrl, bytes);
 
                 updateStatus();
                 showResult('saveLoadResult',

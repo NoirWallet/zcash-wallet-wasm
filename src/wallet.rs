@@ -12,8 +12,8 @@ use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::OnceLock;
-use std::{num::NonZeroU32, sync::Arc};
 use subtle::ConditionallySelectable;
 use tokio::sync::RwLock;
 use tonic::{
@@ -99,7 +99,6 @@ pub struct Wallet<W, T> {
     // gRPC client used to connect to a lightwalletd instance for network data
     pub(crate) client: CompactTxStreamerClient<T>,
     pub(crate) network: Network,
-    pub(crate) min_confirmations: NonZeroU32,
     /// Note management: the number of notes to maintain in the wallet
     pub(crate) target_note_count: usize,
     /// Note management: the minimum allowed value for split change amounts
@@ -112,7 +111,6 @@ impl<W, T: Clone> Clone for Wallet<W, T> {
             db: self.db.clone(),
             client: self.client.clone(),
             network: self.network,
-            min_confirmations: self.min_confirmations,
             target_note_count: self.target_note_count,
             min_split_output_value: self.min_split_output_value,
         }
@@ -160,22 +158,15 @@ where
     T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
     <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
 {
-    /// Creates a confirmations policy using the wallet's min_confirmations setting.
-    /// This applies the same confirmation requirement to both trusted and untrusted transactions,
-    /// and allows zero-confirmation shielding of transparent UTXOs (matching ZIP 315 defaults).
+    /// Creates the ZIP-315 default confirmations policy.
+    ///
+    /// This preserves ZIP-315's distinction between trusted and untrusted
+    /// outputs while allowing zero-confirmation shielding of transparent UTXOs.
     fn confirmations_policy(&self) -> ConfirmationsPolicy {
-        ConfirmationsPolicy::new_symmetrical(
-            self.min_confirmations,
-            true, // allow zero-conf shielding (matches default behavior)
-        )
+        ConfirmationsPolicy::default()
     }
 
-    pub fn new(
-        db: W,
-        client: T,
-        network: Network,
-        min_confirmations: NonZeroU32,
-    ) -> Result<Self, Error> {
+    pub fn new(db: W, client: T, network: Network) -> Result<Self, Error> {
         get_prover();
         get_orchard_proving_key();
         get_orchard_verifying_key();
@@ -183,7 +174,6 @@ where
             db: Arc::new(RwLock::new(db)),
             client: CompactTxStreamerClient::new(client),
             network,
-            min_confirmations,
             target_note_count: 4,
             min_split_output_value: 10000000,
         })
@@ -606,13 +596,6 @@ where
     //     )])?;
 
     //     tracing::info!("Chain height: {:?}", self.db.read().await.chain_height()?);
-    //     tracing::info!(
-    //         "target and anchor heights: {:?}",
-    //         self.db
-    //             .read()
-    //             .await
-    //             .get_target_and_anchor_heights(self.min_confirmations)?
-    //     );
     //     let mut db = self.db.write().await;
     //     let proposal = propose_transfer::<_, _, _,_, <W as WalletCommitmentTrees>::Error>(
     //         &mut *db,
