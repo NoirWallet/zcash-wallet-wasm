@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_4127(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4127(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4123(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4123(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7996(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_7996(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_7992(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_7992(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -662,8 +662,19 @@ export class PaymentRequest {
      * @returns {any}
      */
     other_params() {
-        const ret = wasm.paymentrequest_other_params(this.__wbg_ptr);
-        return takeObject(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.paymentrequest_other_params(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
 }
 if (Symbol.dispose) PaymentRequest.prototype[Symbol.dispose] = PaymentRequest.prototype.free;
@@ -691,8 +702,19 @@ export class Pczt {
      * @returns {any}
      */
     to_json() {
-        const ret = wasm.pczt_to_json(this.__wbg_ptr);
-        return takeObject(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.pczt_to_json(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * Returns a Pczt from a JSON object
@@ -700,8 +722,19 @@ export class Pczt {
      * @returns {Pczt}
      */
     static from_json(s) {
-        const ret = wasm.pczt_from_json(addHeapObject(s));
-        return Pczt.__wrap(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.pczt_from_json(retptr, addHeapObject(s));
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return Pczt.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * Returns the postcard serialization of the Pczt.
@@ -726,10 +759,21 @@ export class Pczt {
      * @returns {Pczt}
      */
     static from_bytes(bytes) {
-        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_export);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.pczt_from_bytes(ptr0, len0);
-        return Pczt.__wrap(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.pczt_from_bytes(retptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return Pczt.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
 }
 if (Symbol.dispose) Pczt.prototype[Symbol.dispose] = Pczt.prototype.free;
@@ -1211,8 +1255,19 @@ export class WalletSummary {
      * @returns {any}
      */
     get account_balances() {
-        const ret = wasm.walletsummary_account_balances(this.__wbg_ptr);
-        return takeObject(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.walletsummary_account_balances(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
 }
 if (Symbol.dispose) WalletSummary.prototype[Symbol.dispose] = WalletSummary.prototype.free;
@@ -2476,7 +2531,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_7996(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_7992(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2715,9 +2770,9 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_warn_6e567d0d926ff881 = function(arg0) {
         console.warn(getObject(arg0));
     };
-    imports.wbg.__wbindgen_cast_064b2865400dcdae = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1609, function: Function { arguments: [Externref], shim_idx: 1610, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4126, __wasm_bindgen_func_elem_4127);
+    imports.wbg.__wbindgen_cast_21569c83479906de = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1606, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1607, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4122, __wasm_bindgen_func_elem_4123);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
@@ -2747,14 +2802,14 @@ function __wbg_get_imports(memory) {
         const ret = arg0;
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_cast_bc9966501bbd5d26 = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1609, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1610, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4126, __wasm_bindgen_func_elem_4127);
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbindgen_cast_cb9088102bce6b30 = function(arg0, arg1) {
         // Cast intrinsic for `Ref(Slice(U8)) -> NamedExternref("Uint8Array")`.
         const ret = getArrayU8FromWasm0(arg0, arg1);
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbindgen_cast_cedab93f4b5b48ac = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1606, function: Function { arguments: [Externref], shim_idx: 1607, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4122, __wasm_bindgen_func_elem_4123);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {

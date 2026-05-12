@@ -753,8 +753,8 @@ pub struct WalletSummary {
 #[wasm_bindgen]
 impl WalletSummary {
     #[wasm_bindgen(getter)]
-    pub fn account_balances(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.account_balances).unwrap()
+    pub fn account_balances(&self) -> Result<JsValue, Error> {
+        serde_wasm_bindgen::to_value(&self.account_balances).map_err(Error::from)
     }
 }
 

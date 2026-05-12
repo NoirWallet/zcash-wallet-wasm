@@ -463,11 +463,8 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
                 let t_addr = TransparentAddress::PublicKeyHash(data);
                 transparent_addr = Some(t_addr.encode(&net));
             }
-            unified::Receiver::P2sh(_) => {
-                unreachable!();
-            }
-            unified::Receiver::Unknown { .. } => {
-                unreachable!();
+            unified::Receiver::P2sh(_) | unified::Receiver::Unknown { .. } => {
+                return Err(Error::InvalidAddress);
             }
         }
     }

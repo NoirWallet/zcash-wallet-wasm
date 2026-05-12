@@ -21,13 +21,13 @@ impl From<Pczt> for pczt::Pczt {
 #[wasm_bindgen]
 impl Pczt {
     /// Returns a JSON object with the details of the Pczt.
-    pub fn to_json(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self).unwrap()
+    pub fn to_json(&self) -> Result<JsValue, Error> {
+        serde_wasm_bindgen::to_value(&self).map_err(Error::from)
     }
 
     /// Returns a Pczt from a JSON object
-    pub fn from_json(s: JsValue) -> Pczt {
-        serde_wasm_bindgen::from_value(s).unwrap()
+    pub fn from_json(s: JsValue) -> Result<Pczt, Error> {
+        serde_wasm_bindgen::from_value(s).map_err(Error::from)
     }
 
     /// Returns the postcard serialization of the Pczt.
@@ -36,7 +36,9 @@ impl Pczt {
     }
 
     /// Deserialize to a Pczt from postcard bytes.
-    pub fn from_bytes(bytes: &[u8]) -> Pczt {
-        Self(pczt::Pczt::parse(bytes).unwrap())
+    pub fn from_bytes(bytes: &[u8]) -> Result<Pczt, Error> {
+        pczt::Pczt::parse(bytes)
+            .map(Self)
+            .map_err(|e| Error::Generic(format!("Failed to parse PCZT bytes: {:?}", e)))
     }
 }

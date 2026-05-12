@@ -342,8 +342,8 @@ where
                     .into_inner()
                     .height
                     .try_into()
-                    .expect("block heights must fit into u32");
-                chain_tip - 100
+                    .map_err(|_| Error::Birthday)?;
+                chain_tip.checked_sub(100).ok_or(Error::Birthday)?
             }
         };
         // Construct an `AccountBirthday` for the account's birthday.
@@ -351,7 +351,7 @@ where
             // Fetch the tree state corresponding to the last block prior to the wallet's
             // birthday height. NOTE: THIS APPROACH LEAKS THE BIRTHDAY TO THE SERVER!
             let request = service::BlockId {
-                height: (birthday - 1).into(),
+                height: birthday.checked_sub(1).ok_or(Error::Birthday)?.into(),
                 ..Default::default()
             };
             let treestate = client.get_tree_state(request).await?.into_inner();
@@ -1084,7 +1084,7 @@ pub(crate) fn usk_from_seed_str(
         SecretVec::new(secret)
     };
     let seed_fingerprint =
-        SeedFingerprint::from_seed(seed.expose_secret()).expect("seed fingerprint");
+        SeedFingerprint::from_seed(seed.expose_secret()).ok_or(Error::SeedFingerprint)?;
     let usk = UnifiedSpendingKey::from_seed(network, seed.expose_secret(), account_id.try_into()?)?;
     Ok((usk, seed_fingerprint))
 }

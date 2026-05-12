@@ -583,10 +583,10 @@ export interface InitOutput {
   readonly mnemonic_to_addresses: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
   readonly parse_unified_address: (a: number, b: number, c: number, d: number, e: number) => void;
   readonly __wbg_pczt_free: (a: number, b: number) => void;
-  readonly pczt_to_json: (a: number) => number;
-  readonly pczt_from_json: (a: number) => number;
+  readonly pczt_to_json: (a: number, b: number) => void;
+  readonly pczt_from_json: (a: number, b: number) => void;
   readonly pczt_serialize: (a: number, b: number) => void;
-  readonly pczt_from_bytes: (a: number, b: number) => number;
+  readonly pczt_from_bytes: (a: number, b: number, c: number) => void;
   readonly __wbg_transactionrequest_free: (a: number, b: number) => void;
   readonly transactionrequest_new: (a: number, b: number, c: number) => void;
   readonly transactionrequest_empty: () => number;
@@ -602,7 +602,7 @@ export interface InitOutput {
   readonly paymentrequest_memo: (a: number, b: number) => void;
   readonly paymentrequest_label: (a: number, b: number) => void;
   readonly paymentrequest_message: (a: number, b: number) => void;
-  readonly paymentrequest_other_params: (a: number) => number;
+  readonly paymentrequest_other_params: (a: number, b: number) => void;
   readonly pczt_sign: (a: number, b: number, c: number, d: number, e: number) => number;
   readonly sign_message_with_transparent: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
   readonly __wbg_webwallet_free: (a: number, b: number) => void;
@@ -638,7 +638,7 @@ export interface InitOutput {
   readonly __wbg_set_walletsummary_next_sapling_subtree_index: (a: number, b: bigint) => void;
   readonly __wbg_get_walletsummary_next_orchard_subtree_index: (a: number) => bigint;
   readonly __wbg_set_walletsummary_next_orchard_subtree_index: (a: number, b: bigint) => void;
-  readonly walletsummary_account_balances: (a: number) => number;
+  readonly walletsummary_account_balances: (a: number, b: number) => void;
   readonly start: () => void;
   readonly __wbg_blockrange_free: (a: number, b: number) => void;
   readonly __wbg_get_blockrange_0: (a: number) => number;
@@ -672,9 +672,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_4127: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_4126: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_7996: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_4123: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_4122: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_7992: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
