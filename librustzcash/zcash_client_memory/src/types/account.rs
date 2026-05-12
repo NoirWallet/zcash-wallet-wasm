@@ -149,7 +149,10 @@ impl Accounts {
                 Ok(Some(id))
             } else {
                 for (account_id, account) in self.accounts.iter() {
-                    if account.get_legacy_transparent_address()?.is_some() {
+                    if account
+                        .get_legacy_transparent_address()?
+                        .is_some_and(|(legacy_address, _)| legacy_address == *address)
+                    {
                         return Ok(Some(*account_id));
                     }
                 }
@@ -800,9 +803,38 @@ mod serialization {
     mod tests {
         use super::*;
         use crate::proto::memwallet as proto;
+        use zcash_client_backend::data_api::Zip32Derivation;
+        use zcash_keys::keys::UnifiedSpendingKey;
         use zcash_primitives::block::BlockHash;
+        use zip32::fingerprint::SeedFingerprint;
 
         const TEST_VK: &str = "uview1tg6rpjgju2s2j37gkgjq79qrh5lvzr6e0ed3n4sf4hu5qd35vmsh7avl80xa6mx7ryqce9hztwaqwrdthetpy4pc0kce25x453hwcmax02p80pg5savlg865sft9reat07c5vlactr6l2pxtlqtqunt2j9gmvr8spcuzf07af80h5qmut38h0gvcfa9k4rwujacwwca9vu8jev7wq6c725huv8qjmhss3hdj2vh8cfxhpqcm2qzc34msyrfxk5u6dqttt4vv2mr0aajreww5yufpk0gn4xkfm888467k7v6fmw7syqq6cceu078yw8xja502jxr0jgum43lhvpzmf7eu5dmnn6cr6f7p43yw8znzgxg598mllewnx076hljlvynhzwn5es94yrv65tdg3utuz2u3sras0wfcq4adxwdvlk387d22g3q98t5z74quw2fa4wed32escx8dwh4mw35t4jwf35xyfxnu83mk5s4kw2glkgsshmxk";
+
+        fn derived_account(seed: &[u8], account_index: zip32::AccountId) -> Account {
+            let usk = UnifiedSpendingKey::from_seed(&EncodingParams, seed, account_index).unwrap();
+            let account_index_u32 = u32::from(account_index);
+            let birthday = AccountBirthday::from_sapling_activation(
+                &EncodingParams,
+                BlockHash::from_slice(&[0; 32]),
+            );
+
+            Account::new(
+                format!("account {account_index_u32}"),
+                AccountId(account_index_u32 + 1),
+                AccountSource::Derived {
+                    derivation: Zip32Derivation::new(
+                        SeedFingerprint::from_seed(seed).unwrap(),
+                        account_index,
+                        #[cfg(feature = "zcashd-compat")]
+                        None,
+                    ),
+                    key_source: None,
+                },
+                usk.to_unified_full_viewing_key(),
+                birthday,
+            )
+            .unwrap()
+        }
 
         #[test]
         fn test_account_serialization_roundtrip() {
@@ -826,6 +858,25 @@ mod serialization {
             let proto_acc2: proto::Account = acc2.clone().into();
 
             assert_eq!(proto_acc, proto_acc2);
+        }
+
+        #[cfg(feature = "transparent-inputs")]
+        #[test]
+        fn find_account_for_transparent_address_matches_legacy_address() {
+            let first = derived_account(&[0; 32], zip32::AccountId::ZERO);
+            let second = derived_account(&[1; 32], zip32::AccountId::try_from(1).unwrap());
+            let second_legacy_address = second.get_legacy_transparent_address().unwrap().unwrap().0;
+
+            let mut accounts = Accounts::new();
+            accounts.accounts.insert(first.account_id(), first);
+            accounts.accounts.insert(second.account_id(), second);
+
+            assert_eq!(
+                accounts
+                    .find_account_for_transparent_address(&second_legacy_address)
+                    .unwrap(),
+                Some(AccountId(2))
+            );
         }
     }
 }
