@@ -192,12 +192,14 @@ where
         &self,
         account_name: &str,
         seed_phrase: &str,
+        passphrase: &str,
         account_hd_index: u32,
         birthday_height: Option<u32>,
         key_source: Option<&str>,
     ) -> Result<AccountId, Error> {
         // decode the mnemonic and derive the first account
-        let (usk, seed_fp) = usk_from_seed_str(seed_phrase, account_hd_index, &self.network)?;
+        let (usk, seed_fp) =
+            usk_from_seed_str(seed_phrase, passphrase, account_hd_index, &self.network)?;
         let ufvk = usk.to_unified_full_viewing_key();
 
         let derivation =
@@ -714,7 +716,7 @@ where
     //     to_address: ZcashAddress,
     //     value: u64,
     // ) -> Result<(), Error> {
-    //     let (usk, _) = usk_from_seed_str(seed_phrase, account_hd_index, &self.network)?;
+    //     let (usk, _) = usk_from_seed_str(seed_phrase, "", account_hd_index, &self.network)?;
     //     let proposal = self
     //         .propose_transfer(from_account_id, to_address, value)
     //         .await?;
@@ -1070,12 +1072,13 @@ where
 
 pub(crate) fn usk_from_seed_str(
     seed: &str,
+    passphrase: &str,
     account_id: u32,
     network: &Network,
 ) -> Result<(UnifiedSpendingKey, SeedFingerprint), Error> {
     let mnemonic = <Mnemonic<English>>::from_phrase(seed).map_err(|_| Error::InvalidSeedPhrase)?;
     let seed = {
-        let mut seed = mnemonic.to_seed("");
+        let mut seed = mnemonic.to_seed(passphrase);
         let secret = seed.to_vec();
         seed.zeroize();
         SecretVec::new(secret)
@@ -1084,4 +1087,30 @@ pub(crate) fn usk_from_seed_str(
         SeedFingerprint::from_seed(seed.expose_secret()).expect("seed fingerprint");
     let usk = UnifiedSpendingKey::from_seed(network, seed.expose_secret(), account_id.try_into()?)?;
     Ok((usk, seed_fingerprint))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usk_from_seed_str;
+    use crate::Network;
+
+    #[test]
+    fn usk_from_seed_str_uses_bip39_passphrase() {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+        let (_, empty_passphrase_fingerprint) =
+            usk_from_seed_str(phrase, "", 0, &Network::MainNetwork).unwrap();
+        let (_, protected_fingerprint) = usk_from_seed_str(
+            phrase,
+            "correct horse battery staple",
+            0,
+            &Network::MainNetwork,
+        )
+        .unwrap();
+
+        assert_ne!(
+            empty_passphrase_fingerprint.to_bytes(),
+            protected_fingerprint.to_bytes()
+        );
+    }
 }

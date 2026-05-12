@@ -44,7 +44,7 @@ export const pczt_sign: (a: number, b: number, c: number, d: number, e: number) 
 export const sign_message_with_transparent: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
 export const __wbg_webwallet_free: (a: number, b: number) => void;
 export const webwallet_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
-export const webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
+export const webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
 export const webwallet_sync: (a: number) => number;
 export const webwallet_sync_next_batch: (a: number, b: number) => number;
 export const webwallet_get_wallet_summary: (a: number) => number;

@@ -73,12 +73,14 @@ impl WebWallet {
         seed_phrase: &str,
         account_hd_index: u32,
         birthday_height: Option<u32>,
+        passphrase: Option<String>,
     ) -> Result<u32, Error> {
         tracing::info!("Create account called");
         self.inner
             .create_account(
                 account_name,
                 seed_phrase,
+                passphrase.as_deref().unwrap_or(""),
                 account_hd_index,
                 birthday_height,
                 None,
@@ -329,7 +331,7 @@ impl WebWallet {
     //     seed_phrase: &str,
     //     account_hd_index: u32,
     // ) -> Result<Vec<u8>, Error> {
-    //     let (usk, _) = usk_from_seed_str(seed_phrase, account_hd_index, &self.inner.network)?;
+    //     let (usk, _) = usk_from_seed_str(seed_phrase, "", account_hd_index, &self.inner.network)?;
 
     //     // Record start time
     //     let start_time = js_sys::Date::now();

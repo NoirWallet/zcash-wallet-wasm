@@ -181,6 +181,8 @@
             <input type="text" id="accountName" value="My Account" placeholder="My Account">
             <label>Mnemonic (from step 2):</label>
             <textarea id="accountMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
+            <label>BIP39 Passphrase (optional):</label>
+            <input type="password" id="accountPassphrase" placeholder="Leave empty if none">
             <label>Account HD Index:</label>
             <input type="number" id="accountHdIndex" value="0" min="0">
             <label>Birthday Height (optional):</label>
@@ -272,8 +274,10 @@
                     <input type="text" id="toAddress" placeholder="Recipient Zcash address">
                     <label>Amount (zatoshi):</label>
                     <input type="number" id="amount" value="10000" min="1" placeholder="Amount in zatoshi (1 ZEC = 100,000,000 zatoshi)">
-                    <label>Mnemonic for signing:</label>
-                    <textarea id="sendMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
+            <label>Mnemonic for signing:</label>
+            <textarea id="sendMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
+            <label>BIP39 Passphrase (optional):</label>
+            <input type="password" id="sendPassphrase" placeholder="Leave empty if none">
                 </div>
                 <div>
                     <h3>Transaction Steps:</h3>
@@ -305,6 +309,8 @@
                     <input type="number" id="pcztAmount" value="10000" min="1" placeholder="Amount in zatoshi (1 ZEC = 100,000,000 zatoshi)">
                     <label>Mnemonic for signing (optional if account was created in this session):</label>
                     <textarea id="pcztSendMnemonic" rows="3" placeholder="Leave empty to use stored mnemonic, or paste manually"></textarea>
+                    <label>BIP39 Passphrase (optional):</label>
+                    <input type="password" id="pcztSendPassphrase" placeholder="Leave empty to use stored passphrase or none">
                 </div>
                 <div>
                     <h3>PCZT Steps:</h3>
@@ -336,6 +342,8 @@
                     <input type="number" id="oneclickAmount" value="10000" min="1" placeholder="Amount in zatoshi (1 ZEC = 100,000,000 zatoshi)">
                     <label>Mnemonic for signing:</label>
                     <textarea id="oneclickMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
+                    <label>BIP39 Passphrase (optional):</label>
+                    <input type="password" id="oneclickPassphrase" placeholder="Leave empty if none">
                 </div>
                 <div>
                     <h3>Status:</h3>
@@ -406,6 +414,8 @@
             <div style="margin-top: 10px;">
                 <label>Mnemonic (for signing):</label>
                 <textarea id="shieldMnemonic" rows="3" placeholder="Paste mnemonic here for signing"></textarea>
+                <label>BIP39 Passphrase (optional):</label>
+                <input type="password" id="shieldPassphrase" placeholder="Leave empty if none">
             </div>
             <div class="result" id="shieldResult"></div>
         </div>
@@ -425,6 +435,8 @@
                     <input type="number" id="oneclickShieldAccountId" value="0" min="0">
                     <label>Mnemonic for signing:</label>
                     <textarea id="oneclickShieldMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
+                    <label>BIP39 Passphrase (optional):</label>
+                    <input type="password" id="oneclickShieldPassphrase" placeholder="Leave empty if none">
                 </div>
                 <div>
                     <h3>Status:</h3>
@@ -458,6 +470,8 @@
             <div style="margin-top: 10px;">
                 <label>Mnemonic (required for signing):</label>
                 <textarea id="directShieldMnemonic" rows="3" placeholder="Enter your 24-word mnemonic phrase"></textarea>
+                <label>BIP39 Passphrase (optional):</label>
+                <input type="password" id="directShieldPassphrase" placeholder="Leave empty if none">
             </div>
             <button onclick="shieldFundsDirect()" style="background-color: #4caf50;">Shield Transparent Funds</button>
             <div class="result" id="directShieldResult"></div>
@@ -479,7 +493,30 @@
         let wallet = null;
         let currentProposal = null;
         let currentTxIds = null;
-        let accountMnemonics = {}; // Store mnemonic for each account: { accountId: mnemonic }
+        let accountMnemonics = {}; // Store signing material for each account: { accountId: { mnemonic, passphrase } }
+
+        function getStoredSigningMaterial(accountId) {
+            const stored = accountMnemonics[accountId];
+            if (!stored) {
+                return null;
+            }
+
+            if (typeof stored === 'string') {
+                return { mnemonic: stored, passphrase: "" };
+            }
+
+            return {
+                mnemonic: stored.mnemonic,
+                passphrase: stored.passphrase || ""
+            };
+        }
+
+        function deriveSigningKeys(network, mnemonic, passphrase, hdIndex) {
+            return {
+                usk: mnemonic_to_spending_key(network, mnemonic, passphrase, hdIndex),
+                seedFp: mnemonic_to_seed_fingerprint(mnemonic, passphrase)
+            };
+        }
 
         // Show loading indicator
         function showLoading(message) {
@@ -625,6 +662,7 @@
 
                 const accountName = document.getElementById('accountName').value;
                 const mnemonic = document.getElementById('accountMnemonic').value.trim();
+                const passphrase = document.getElementById('accountPassphrase').value;
                 const hdIndex = parseInt(document.getElementById('accountHdIndex').value);
                 const birthdayHeightStr = document.getElementById('birthdayHeight').value;
                 const birthdayHeight = birthdayHeightStr ? parseInt(birthdayHeightStr) : null;
@@ -639,11 +677,11 @@
                 // Validate mnemonic
                 validate_mnemonic(mnemonic);
 
-                const accountId = await wallet.create_account(accountName, mnemonic, hdIndex, birthdayHeight);
+                const accountId = await wallet.create_account(accountName, mnemonic, hdIndex, birthdayHeight, passphrase);
 
-                // Store the mnemonic for this account
-                accountMnemonics[accountId] = mnemonic;
-                console.log(`💾 Stored mnemonic for account ${accountId}`);
+                // Store the signing material for this account
+                accountMnemonics[accountId] = { mnemonic, passphrase };
+                console.log(`💾 Stored mnemonic and passphrase for account ${accountId}`);
 
                 document.getElementById('addressAccountId').value = accountId;
                 document.getElementById('sendAccountId').value = accountId;
@@ -656,7 +694,8 @@
                     'Account ID: ' + accountId + '\n' +
                     'HD Index: ' + hdIndex +
                     (birthdayHeight ? '\nBirthday Height: ' + birthdayHeight : '') +
-                    '\n✅ Mnemonic stored for PCZT signing',
+                    (passphrase ? '\nBIP39 Passphrase: set' : '\nBIP39 Passphrase: none') +
+                    '\n✅ Signing material stored for PCZT signing',
                     'success'
                 );
             } catch (e) {
@@ -1129,16 +1168,31 @@
                 const network = document.getElementById('network').value;
                 const accountId = parseInt(document.getElementById('pcztSendAccountId').value);
 
-                // Get stored mnemonic
-                let mnemonic = accountMnemonics[accountId];
+                // Get stored signing material
+                let signingMaterial = getStoredSigningMaterial(accountId);
+                if (!signingMaterial) {
+                    const mnemonic = document.getElementById('pcztSendMnemonic').value.trim();
+                    const passphrase = document.getElementById('pcztSendPassphrase').value;
+                    if (!mnemonic) {
+                        throw new Error('Please enter mnemonic for signing (no stored mnemonic found for this account)');
+                    }
+                    signingMaterial = { mnemonic, passphrase };
+                    console.log('⚠️ Using mnemonic and passphrase from input fields (not stored)');
+                } else {
+                    const manualPassphrase = document.getElementById('pcztSendPassphrase').value;
+                    if (manualPassphrase) {
+                        signingMaterial.passphrase = manualPassphrase;
+                    }
+                    console.log(`✅ Using stored signing material for account ${accountId}`);
+                }
+
+                let mnemonic = signingMaterial.mnemonic;
+                let passphrase = signingMaterial.passphrase;
                 if (!mnemonic) {
                     mnemonic = document.getElementById('pcztSendMnemonic').value.trim();
                     if (!mnemonic) {
                         throw new Error('Please enter mnemonic for signing (no stored mnemonic found for this account)');
                     }
-                    console.log('⚠️ Using mnemonic from input field (not stored)');
-                } else {
-                    console.log(`✅ Using stored mnemonic for account ${accountId}`);
                 }
 
                 const hdIndex = await wallet.get_account_hd_index(accountId);
@@ -1149,16 +1203,7 @@
                 console.log(`📝 Signing PCZT for account ${accountId}, HD index ${hdIndex}`);
 
                 // Get spending key and seed fingerprint
-                const usk = mnemonic_to_spending_key(
-                    network,
-                    mnemonic,
-                    "",  // passphrase
-                    hdIndex
-                );
-                const seedFp = mnemonic_to_seed_fingerprint(
-                    mnemonic,
-                    ""  // passphrase
-                );
+                const { usk, seedFp } = deriveSigningKeys(network, mnemonic, passphrase, hdIndex);
 
                 // Sign 
                 console.log('🔑 Signing PCZT...');
@@ -1251,6 +1296,7 @@
                 const toAddress = document.getElementById('oneclickToAddress').value.trim();
                 const amount = BigInt(document.getElementById('oneclickAmount').value);
                 const mnemonic = document.getElementById('oneclickMnemonic').value.trim();
+                const passphrase = document.getElementById('oneclickPassphrase').value;
 
                 if (!toAddress) {
                     throw new Error('Please enter recipient address');
@@ -1276,16 +1322,7 @@
 
                 // Get spending key and seed fingerprint
                 statusDiv.innerHTML += '<br>🔑 Generating spending key and seed fingerprint...';
-                const usk = mnemonic_to_spending_key(
-                    network,
-                    mnemonic,
-                    "",  // passphrase
-                    hdIndex
-                );
-                const seedFp = mnemonic_to_seed_fingerprint(
-                    mnemonic,
-                    ""  // passphrase
-                );
+                const { usk, seedFp } = deriveSigningKeys(network, mnemonic, passphrase, hdIndex);
 
                 // Get Sapling proof generation key
                 statusDiv.innerHTML += '<br>🌱 Getting Sapling proof generation key...';
@@ -1337,6 +1374,7 @@
 
                 const accountId = parseInt(document.getElementById('oneclickShieldAccountId').value);
                 const mnemonic = document.getElementById('oneclickShieldMnemonic').value.trim();
+                const passphrase = document.getElementById('oneclickShieldPassphrase').value;
 
                 if (!mnemonic) {
                     throw new Error('Please enter mnemonic for signing');
@@ -1359,16 +1397,7 @@
 
                 // Get spending key and seed fingerprint
                 statusDiv.innerHTML += '<br>🔑 Generating spending key and seed fingerprint...';
-                const usk = mnemonic_to_spending_key(
-                    network,
-                    mnemonic,
-                    "",  // passphrase
-                    hdIndex
-                );
-                const seedFp = mnemonic_to_seed_fingerprint(
-                    mnemonic,
-                    ""  // passphrase
-                );
+                const { usk, seedFp } = deriveSigningKeys(network, mnemonic, passphrase, hdIndex);
 
                 // Get Sapling proof generation key
                 statusDiv.innerHTML += '<br>🌱 Getting Sapling proof generation key...';
@@ -1623,16 +1652,22 @@
                 // Get account info
                 const accountId = parseInt(document.getElementById('shieldAccountId').value);
 
-                // Try to get stored mnemonic first, fallback to input field
-                let mnemonic = accountMnemonics[accountId];
-                if (!mnemonic) {
-                    mnemonic = document.getElementById('shieldMnemonic').value.trim();
+                // Try to get stored signing material first, fallback to input fields
+                let signingMaterial = getStoredSigningMaterial(accountId);
+                if (!signingMaterial) {
+                    const mnemonic = document.getElementById('shieldMnemonic').value.trim();
+                    const passphrase = document.getElementById('shieldPassphrase').value;
                     if (!mnemonic) {
                         throw new Error('Please enter mnemonic for signing (no stored mnemonic found for this account)');
                     }
-                    console.log('⚠️ Using mnemonic from input field for shield signing (not stored)');
+                    signingMaterial = { mnemonic, passphrase };
+                    console.log('⚠️ Using mnemonic and passphrase from input fields for shield signing (not stored)');
                 } else {
-                    console.log(`✅ Using stored mnemonic for shield signing account ${accountId}`);
+                    const manualPassphrase = document.getElementById('shieldPassphrase').value;
+                    if (manualPassphrase) {
+                        signingMaterial.passphrase = manualPassphrase;
+                    }
+                    console.log(`✅ Using stored signing material for shield signing account ${accountId}`);
                 }
 
                 const hdIndex = await wallet.get_account_hd_index(accountId);
@@ -1644,15 +1679,11 @@
 
                 // Get spending key and seed fingerprint from mnemonic using the correct HD index
                 const network = document.getElementById('network').value;
-                const usk = mnemonic_to_spending_key(
+                const { usk, seedFp } = deriveSigningKeys(
                     network,
-                    mnemonic,
-                    "",  // passphrase (empty string)
+                    signingMaterial.mnemonic,
+                    signingMaterial.passphrase,
                     hdIndex
-                );
-                const seedFp = mnemonic_to_seed_fingerprint(
-                    mnemonic,
-                    ""  // passphrase (empty string)
                 );
 
                 // Sign
@@ -1778,6 +1809,7 @@
 
                 const accountId = parseInt(document.getElementById('directShieldAccountId').value);
                 const mnemonic = document.getElementById('directShieldMnemonic').value.trim();
+                const passphrase = document.getElementById('directShieldPassphrase').value;
 
                 if (!mnemonic) {
                     throw new Error('Please enter your mnemonic phrase');
@@ -1811,7 +1843,7 @@
                 const usk = mnemonic_to_spending_key(
                     network,
                     mnemonic,
-                    "",  // passphrase (empty string)
+                    passphrase,
                     accountHdIndex
                 );
 

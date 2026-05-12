@@ -1262,14 +1262,17 @@ export class WebWallet {
      * @param {string} seed_phrase
      * @param {number} account_hd_index
      * @param {number | null} [birthday_height]
+     * @param {string | null} [passphrase]
      * @returns {Promise<number>}
      */
-    create_account(account_name, seed_phrase, account_hd_index, birthday_height) {
+    create_account(account_name, seed_phrase, account_hd_index, birthday_height, passphrase) {
         const ptr0 = passStringToWasm0(account_name, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(seed_phrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.webwallet_create_account(this.__wbg_ptr, ptr0, len0, ptr1, len1, account_hd_index, isLikeNone(birthday_height) ? 0x100000001 : (birthday_height) >>> 0);
+        var ptr2 = isLikeNone(passphrase) ? 0 : passStringToWasm0(passphrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_create_account(this.__wbg_ptr, ptr0, len0, ptr1, len1, account_hd_index, isLikeNone(birthday_height) ? 0x100000001 : (birthday_height) >>> 0, ptr2, len2);
         return takeObject(ret);
     }
     /**

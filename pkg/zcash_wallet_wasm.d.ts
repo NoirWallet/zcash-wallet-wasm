@@ -160,7 +160,7 @@ export class WebWallet {
   free(): void;
   [Symbol.dispose](): void;
   constructor(network: string, lightwalletd_url: string, min_confirmations: number, db_bytes?: Uint8Array | null);
-  create_account(account_name: string, seed_phrase: string, account_hd_index: number, birthday_height?: number | null): Promise<number>;
+  create_account(account_name: string, seed_phrase: string, account_hd_index: number, birthday_height?: number | null, passphrase?: string | null): Promise<number>;
   sync(): Promise<void>;
   /**
    * Runs a single batch of the sync process without looping.
@@ -607,7 +607,7 @@ export interface InitOutput {
   readonly sign_message_with_transparent: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
   readonly __wbg_webwallet_free: (a: number, b: number) => void;
   readonly webwallet_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
-  readonly webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
+  readonly webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
   readonly webwallet_sync: (a: number) => number;
   readonly webwallet_sync_next_batch: (a: number, b: number) => number;
   readonly webwallet_get_wallet_summary: (a: number) => number;
