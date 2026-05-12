@@ -164,7 +164,7 @@ export class WebWallet {
   sync(): Promise<void>;
   /**
    * Runs a single batch of the sync process without looping.
-   * Returns `true` if there is more work to do, `false` if fully synced.
+   * Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
    */
   sync_next_batch(batch_size?: number | null): Promise<boolean>;
   get_wallet_summary(): Promise<WalletSummary | undefined>;

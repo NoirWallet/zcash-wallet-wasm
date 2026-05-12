@@ -82,12 +82,12 @@ where
     Ok(())
 }
 
-/// Syncs a single batch of blocks and returns whether there is more work to do.
+/// Syncs a single batch of blocks and returns whether any work was performed.
 ///
 /// Unlike [`run`], which loops until the wallet is fully synced, this function
 /// processes at most `batch_size` blocks (plus any Verify-priority ranges for
-/// chain continuity) and then returns. Returns `true` if there are more blocks
-/// to sync, `false` if the wallet is fully synced.
+/// chain continuity) and then returns. Returns `true` if a scan range was
+/// processed, and `false` only if no scan ranges were suggested.
 pub async fn run_next_batch<P, ChT, CaT, DbT>(
     client: &mut CompactTxStreamerClient<ChT>,
     params: &P,

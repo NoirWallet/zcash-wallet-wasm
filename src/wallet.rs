@@ -431,7 +431,7 @@ where
     }
 
     /// Runs a single batch of the sync process without looping.
-    /// Returns `true` if there is more work to do, `false` if fully synced.
+    /// Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
     pub async fn sync_next_batch(&self, batch_size: Option<u32>) -> Result<bool, Error> {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();

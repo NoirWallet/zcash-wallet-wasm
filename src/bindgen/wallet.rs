@@ -199,21 +199,21 @@ impl WebWallet {
     }
 
     /// Runs a single batch of the sync process without looping.
-    /// Returns `true` if there is more work to do, `false` if fully synced.
+    /// Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
     pub async fn sync_next_batch(&self, batch_size: Option<u32>) -> Result<bool, Error> {
         let start_time = js_sys::Date::now();
 
-        let has_more = self.inner.sync_next_batch(batch_size).await?;
+        let processed_batch = self.inner.sync_next_batch(batch_size).await?;
 
         let end_time = js_sys::Date::now();
         let elapsed_seconds = (end_time - start_time) / 1000.0;
         tracing::info!(
-            "⏱️ Sync next batch completed in {:.2} seconds, has_more: {}",
+            "⏱️ Sync next batch completed in {:.2} seconds, processed_batch: {}",
             elapsed_seconds,
-            has_more
+            processed_batch
         );
 
-        Ok(has_more)
+        Ok(processed_batch)
     }
 
     pub async fn get_wallet_summary(&self) -> Result<Option<WalletSummary>, Error> {

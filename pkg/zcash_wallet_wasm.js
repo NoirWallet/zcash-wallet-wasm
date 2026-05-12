@@ -1339,7 +1339,7 @@ export class WebWallet {
     }
     /**
      * Runs a single batch of the sync process without looping.
-     * Returns `true` if there is more work to do, `false` if fully synced.
+     * Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
      * @param {number | null} [batch_size]
      * @returns {Promise<boolean>}
      */
