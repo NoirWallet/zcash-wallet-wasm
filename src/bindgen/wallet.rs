@@ -1,7 +1,7 @@
 use std::{num::NonZeroU32, str::FromStr};
 
 use crate::bindgen::sign::pczt_sign_inner;
-use crate::bindgen::{Pczt, ProofGenerationKey, SeedFingerprint};
+use crate::bindgen::{ProofGenerationKey, SeedFingerprint};
 use crate::{Error, Network, PRUNING_DEPTH, Wallet};
 
 use nonempty::NonEmpty;
@@ -541,40 +541,6 @@ impl WebWallet {
         Ok(serde_wasm_bindgen::to_value(&result)?)
     }
 
-    pub async fn pczt_shield(&self, account_id: u32) -> Result<Pczt, Error> {
-        self.inner
-            .pczt_shield(account_id.into())
-            .await
-            .map(Into::into)
-    }
-
-    /// Shield transparent funds by moving them to the Orchard shielded pool
-    /// This is a direct method that doesn't use PCZT (works around metadata limitations)
-    ///
-    /// # Arguments
-    ///
-    /// * `account_id` - The ID of the account to shield funds from
-    /// * `mnemonic` - The mnemonic phrase to derive spending keys
-    ///
-    /// # Returns
-    ///
-    /// Returns transaction IDs of the shielding transactions
-    pub async fn shield_funds(
-        &self,
-        account_id: u32,
-        usk: super::UnifiedSpendingKey,
-    ) -> Result<JsValue, Error> {
-        let txids = self
-            .inner
-            .shield_funds(account_id.into(), usk.as_inner())
-            .await?;
-
-        // Convert NonEmpty<TxId> to Vec<String>
-        let txid_strings: Vec<String> = txids.iter().map(|txid| txid.to_string()).collect();
-
-        serde_wasm_bindgen::to_value(&txid_strings).map_err(Error::from)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub async fn oneclick_pczt_transfer(
         &self,
@@ -642,45 +608,6 @@ impl WebWallet {
         // Send the proven PCZT
         let txid = self.inner.pczt_send(proved_pczt).await?;
         Ok(txid)
-    }
-
-    pub async fn pczt_create(
-        &self,
-        account_id: u32,
-        to_address: String,
-        value: u64,
-    ) -> Result<Pczt, Error> {
-        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        self.inner
-            .pczt_create(AccountId::from(account_id), to_address, value)
-            .await
-            .map(Into::into)
-    }
-
-    pub async fn pczt_prove(
-        &self,
-        pczt: Pczt,
-        sapling_proof_gen_key: Option<ProofGenerationKey>,
-    ) -> Result<Pczt, Error> {
-        let pczt_inner = pczt.into();
-        let proof_gen_key = sapling_proof_gen_key.map(Into::into);
-
-        // Record start time
-        let start_time = js_sys::Date::now();
-
-        let result_pczt = self.inner.pczt_prove(pczt_inner, proof_gen_key).await?;
-
-        // Calculate elapsed time in seconds
-        let end_time = js_sys::Date::now();
-        let elapsed_seconds = (end_time - start_time) / 1000.0;
-
-        tracing::info!("⏱️ pczt_prove completed in {:.2} seconds", elapsed_seconds);
-
-        Ok(result_pczt.into())
-    }
-
-    pub async fn pczt_send(&self, pczt: Pczt) -> Result<String, Error> {
-        self.inner.pczt_send(pczt.into()).await
     }
 
     // pub fn pczt_combine(&self, pczts: Vec<Pczt>) -> Result<Pczt, Error> {

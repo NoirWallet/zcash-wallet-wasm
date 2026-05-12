@@ -1,6 +1,6 @@
-use crate::bindgen::{SeedFingerprint, UnifiedSpendingKey};
+use crate::Network;
+use crate::bindgen::UnifiedSpendingKey;
 use crate::error::Error;
-use crate::{Network, bindgen::Pczt};
 use pczt::roles::signer::Signer;
 use pczt::roles::verifier::Verifier;
 use std::collections::BTreeMap;
@@ -10,24 +10,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use zcash_primitives::consensus::{NetworkConstants, Parameters};
 use zcash_primitives::legacy::keys::{NonHardenedChildIndex, TransparentKeyScope};
 
-#[wasm_bindgen]
-pub async fn pczt_sign(
-    network: &str,
-    pczt: Pczt,
-    usk: UnifiedSpendingKey,
-    seed_fp: SeedFingerprint,
-) -> Result<Pczt, Error> {
-    pczt_sign_inner(
-        Network::from_str(network)?,
-        pczt.into(),
-        usk.into(),
-        seed_fp.into(),
-    )
-    .await
-    .map(Into::into)
-}
-
-pub async fn pczt_sign_inner(
+pub(crate) async fn pczt_sign_inner(
     network: Network,
     pczt: pczt::Pczt,
     usk: zcash_keys::keys::UnifiedSpendingKey,

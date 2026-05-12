@@ -23,8 +23,8 @@ use tonic::{
 use zcash_address::ZcashAddress;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::{
-    ConfirmationsPolicy, SpendingKeys, create_pczt_from_proposal, create_proposed_transactions,
-    extract_and_store_transaction_from_pczt, propose_shielding, propose_transfer,
+    ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
+    propose_shielding, propose_transfer,
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, WalletSummary, Zip32Derivation,
@@ -798,96 +798,6 @@ where
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
 
         Ok(pczt)
-    }
-
-    /// Shield transparent funds by moving them to the Orchard shielded pool
-    /// This is a simplified version that doesn't use PCZT
-    pub async fn shield_funds(
-        &self,
-        account_id: AccountId,
-        usk: &UnifiedSpendingKey,
-    ) -> Result<NonEmpty<TxId>, Error> {
-        let change_strategy = MultiOutputChangeStrategy::new(
-            StandardFeeRule::Zip317,
-            None,
-            ShieldedProtocol::Orchard,
-            DustOutputPolicy::default(),
-            SplitPolicy::with_min_output_value(
-                NonZeroUsize::new(self.target_note_count)
-                    .ok_or(Error::FailedToCreateTransaction)?,
-                Zatoshis::from_u64(self.min_split_output_value)?,
-            ),
-        );
-
-        let input_selector = GreedyInputSelector::new();
-        let mut db = self.db.write().await;
-
-        // Shield all funds immediately
-        let max_height = match db.chain_height()? {
-            Some(max_height) => max_height,
-            None => {
-                return Err(Error::Generic(
-                    "Haven't scanned yet, can't shield".to_string(),
-                ));
-            }
-        };
-
-        let transparent_balances = db.get_transparent_balances(
-            account_id,
-            (max_height + 1).into(),
-            self.confirmations_policy(),
-        )?;
-        let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
-
-        if from_addrs.is_empty() {
-            return Err(Error::Generic(
-                "No transparent addresses found for this account. Make sure the account has received funds to a transparent address.".to_string()
-            ));
-        }
-
-        tracing::info!("Shielding from {} transparent addresses", from_addrs.len());
-
-        let proposal = propose_shielding::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
-            &mut *db,
-            &self.network,
-            &input_selector,
-            &change_strategy,
-            SHIELDING_THRESHOLD,
-            &from_addrs,
-            account_id,
-            ConfirmationsPolicy::new_symmetrical(NonZeroU32::new(1).unwrap(), true),
-        )
-        .map_err(|e| Error::Generic(format!("Error when proposing shielding: {:?}", e)))?;
-
-        // Create and send the transaction directly
-        let prover = get_prover();
-        let spending_keys = SpendingKeys::from_unified_spending_key(usk.clone());
-
-        let transactions = create_proposed_transactions::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <StandardFeeRule as FeeRule>::Error,
-            _,
-        >(
-            &mut *db,
-            &self.network,
-            prover,
-            prover,
-            &spending_keys,
-            OvkPolicy::Sender,
-            &proposal,
-        )
-        .map_err(|e| Error::Generic(format!("Failed to create shielding transaction: {:?}", e)))?;
-
-        // Transactions are automatically stored in the database by create_proposed_transactions
-        // Now we need to broadcast them
-        drop(db); // Release the lock before sending
-
-        self.send_authorized_transactions(&transactions).await?;
-
-        Ok(transactions)
     }
 
     pub async fn pczt_create(

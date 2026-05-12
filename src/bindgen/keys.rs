@@ -187,13 +187,6 @@ impl UnifiedSpendingKey {
     // }
 }
 
-impl UnifiedSpendingKey {
-    /// Get a reference to the inner UnifiedSpendingKey
-    pub(crate) fn as_inner(&self) -> &zcash_keys::keys::UnifiedSpendingKey {
-        &self.inner
-    }
-}
-
 impl From<UnifiedSpendingKey> for zcash_keys::keys::UnifiedSpendingKey {
     fn from(value: UnifiedSpendingKey) -> Self {
         value.inner

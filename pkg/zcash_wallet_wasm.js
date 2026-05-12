@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_4124(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4124(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_3291(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_3291(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7992(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_7992(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_7133(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_7133(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -1554,36 +1554,6 @@ export class WebWallet {
     }
     /**
      * @param {number} account_id
-     * @returns {Promise<Pczt>}
-     */
-    pczt_shield(account_id) {
-        const ret = wasm.webwallet_pczt_shield(this.__wbg_ptr, account_id);
-        return takeObject(ret);
-    }
-    /**
-     * Shield transparent funds by moving them to the Orchard shielded pool
-     * This is a direct method that doesn't use PCZT (works around metadata limitations)
-     *
-     * # Arguments
-     *
-     * * `account_id` - The ID of the account to shield funds from
-     * * `mnemonic` - The mnemonic phrase to derive spending keys
-     *
-     * # Returns
-     *
-     * Returns transaction IDs of the shielding transactions
-     * @param {number} account_id
-     * @param {UnifiedSpendingKey} usk
-     * @returns {Promise<any>}
-     */
-    shield_funds(account_id, usk) {
-        _assertClass(usk, UnifiedSpendingKey);
-        var ptr0 = usk.__destroy_into_raw();
-        const ret = wasm.webwallet_shield_funds(this.__wbg_ptr, account_id, ptr0);
-        return takeObject(ret);
-    }
-    /**
-     * @param {number} account_id
      * @param {string} to_address
      * @param {bigint} value
      * @param {UnifiedSpendingKey} usk
@@ -1624,44 +1594,6 @@ export class WebWallet {
             ptr2 = sapling_proof_gen_key.__destroy_into_raw();
         }
         const ret = wasm.webwallet_oneclick_pczt_shield(this.__wbg_ptr, account_id, ptr0, ptr1, ptr2);
-        return takeObject(ret);
-    }
-    /**
-     * @param {number} account_id
-     * @param {string} to_address
-     * @param {bigint} value
-     * @returns {Promise<Pczt>}
-     */
-    pczt_create(account_id, to_address, value) {
-        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.webwallet_pczt_create(this.__wbg_ptr, account_id, ptr0, len0, value);
-        return takeObject(ret);
-    }
-    /**
-     * @param {Pczt} pczt
-     * @param {ProofGenerationKey | null} [sapling_proof_gen_key]
-     * @returns {Promise<Pczt>}
-     */
-    pczt_prove(pczt, sapling_proof_gen_key) {
-        _assertClass(pczt, Pczt);
-        var ptr0 = pczt.__destroy_into_raw();
-        let ptr1 = 0;
-        if (!isLikeNone(sapling_proof_gen_key)) {
-            _assertClass(sapling_proof_gen_key, ProofGenerationKey);
-            ptr1 = sapling_proof_gen_key.__destroy_into_raw();
-        }
-        const ret = wasm.webwallet_pczt_prove(this.__wbg_ptr, ptr0, ptr1);
-        return takeObject(ret);
-    }
-    /**
-     * @param {Pczt} pczt
-     * @returns {Promise<string>}
-     */
-    pczt_send(pczt) {
-        _assertClass(pczt, Pczt);
-        var ptr0 = pczt.__destroy_into_raw();
-        const ret = wasm.webwallet_pczt_send(this.__wbg_ptr, ptr0);
         return takeObject(ret);
     }
     /**
@@ -1973,26 +1905,6 @@ export function parse_unified_address(network, unified_address) {
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
-}
-
-/**
- * @param {string} network
- * @param {Pczt} pczt
- * @param {UnifiedSpendingKey} usk
- * @param {SeedFingerprint} seed_fp
- * @returns {Promise<Pczt>}
- */
-export function pczt_sign(network, pczt, usk, seed_fp) {
-    const ptr0 = passStringToWasm0(network, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-    const len0 = WASM_VECTOR_LEN;
-    _assertClass(pczt, Pczt);
-    var ptr1 = pczt.__destroy_into_raw();
-    _assertClass(usk, UnifiedSpendingKey);
-    var ptr2 = usk.__destroy_into_raw();
-    _assertClass(seed_fp, SeedFingerprint);
-    var ptr3 = seed_fp.__destroy_into_raw();
-    const ret = wasm.pczt_sign(ptr0, len0, ptr1, ptr2, ptr3);
-    return takeObject(ret);
 }
 
 /**
@@ -2531,7 +2443,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_7992(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_7133(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2589,10 +2501,6 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_paymentrequest_unwrap = function(arg0) {
         const ret = PaymentRequest.__unwrap(getObject(arg0));
         return ret;
-    };
-    imports.wbg.__wbg_pczt_new = function(arg0) {
-        const ret = Pczt.__wrap(arg0);
-        return addHeapObject(ret);
     };
     imports.wbg.__wbg_performance_121b9855d716e029 = function() {
         const ret = globalThis.performance;
@@ -2770,11 +2678,6 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_warn_6e567d0d926ff881 = function(arg0) {
         console.warn(getObject(arg0));
     };
-    imports.wbg.__wbindgen_cast_21569c83479906de = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1606, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1607, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4123, __wasm_bindgen_func_elem_4124);
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
         // Cast intrinsic for `Ref(String) -> Externref`.
         const ret = getStringFromWasm0(arg0, arg1);
@@ -2788,6 +2691,11 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbindgen_cast_4625c577ab2ec9ee = function(arg0) {
         // Cast intrinsic for `U64 -> Externref`.
         const ret = BigInt.asUintN(64, arg0);
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbindgen_cast_501c995fc85454a8 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1180, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1181, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_3290, __wasm_bindgen_func_elem_3291);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_77bc3e92745e9a35 = function(arg0, arg1) {
@@ -2807,14 +2715,14 @@ function __wbg_get_imports(memory) {
         const ret = getArrayU8FromWasm0(arg0, arg1);
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_cast_cedab93f4b5b48ac = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1606, function: Function { arguments: [Externref], shim_idx: 1607, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4123, __wasm_bindgen_func_elem_4124);
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {
         // Cast intrinsic for `F64 -> Externref`.
         const ret = arg0;
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbindgen_cast_e9e48f63e7793127 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1180, function: Function { arguments: [Externref], shim_idx: 1181, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_3290, __wasm_bindgen_func_elem_3291);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_link_203404ece0e9bab9 = function(arg0) {
@@ -2838,7 +2746,7 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbindgen_object_drop_ref = function(arg0) {
         takeObject(arg0);
     };
-    imports.wbg.memory = memory || new WebAssembly.Memory({initial:834,maximum:16384,shared:true});
+    imports.wbg.memory = memory || new WebAssembly.Memory({initial:833,maximum:16384,shared:true});
 
     return imports;
 }
