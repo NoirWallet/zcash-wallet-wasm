@@ -228,9 +228,13 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                     continue; // note is in an unscanned range. Skip it
                 }
             }
-            // don't count notes in unmined transactions or that have expired
-            if let Ok(Some(note_tx)) = self.get_transaction(note.txid) {
-                if note_tx.expiry_height() < BlockHeight::from(target_height) {
+            // Don't count notes in unmined transactions that have expired.
+            if let Some(note_tx) = self.tx_table.get_transaction(&note.txid) {
+                if note_tx.mined_height().is_none()
+                    && note_tx.expiry_height().is_some_and(|expiry_height| {
+                        expiry_height < BlockHeight::from(target_height)
+                    })
+                {
                     continue;
                 }
             }

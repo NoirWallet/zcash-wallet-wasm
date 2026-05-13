@@ -890,7 +890,16 @@
                 const summary = await wallet.get_wallet_summary();
 
                 if (summary) {
-                    document.getElementById('balanceStatus').textContent = summary.account_balances + ' zatoshi';
+                    const accountBalances = summary.account_balances || [];
+                    const totals = accountBalances.reduce((acc, [, balance]) => {
+                        acc.spendable += BigInt(balance.spendable_balance || 0);
+                        acc.pending += BigInt(balance.pending_balance || 0);
+                        acc.total += BigInt(balance.total_balance || 0);
+                        return acc;
+                    }, { spendable: 0n, pending: 0n, total: 0n });
+
+                    document.getElementById('balanceStatus').textContent =
+                        `${totals.total} total (${totals.spendable} spendable, ${totals.pending} pending)`;
                     showResult('syncResult',
                         'Wallet Summary:\n' + stringifyWithBigInt(summary, 2),
                         'success'
