@@ -119,7 +119,11 @@ impl WebWallet {
     }
 
     pub async fn get_wallet_summary(&self) -> Result<Option<WalletSummary>, Error> {
-        Ok(self.inner.get_wallet_summary().await?.map(Into::into))
+        self.inner
+            .get_wallet_summary()
+            .await?
+            .map(WalletSummary::try_from)
+            .transpose()
     }
 
     /// Get the birthday height for a specific account
@@ -503,37 +507,79 @@ pub struct AccountBalance {
     pub sapling_balance: u64,
     pub orchard_balance: u64,
     pub unshielded_balance: u64,
+    pub sapling_pending_balance: u64,
+    pub orchard_pending_balance: u64,
+    pub unshielded_pending_balance: u64,
+    pub sapling_total_balance: u64,
+    pub orchard_total_balance: u64,
+    pub unshielded_total_balance: u64,
+    pub spendable_balance: u64,
+    pub pending_balance: u64,
+    pub total_balance: u64,
 }
 
-impl From<zcash_client_backend::data_api::AccountBalance> for AccountBalance {
-    fn from(balance: zcash_client_backend::data_api::AccountBalance) -> Self {
-        AccountBalance {
+impl TryFrom<zcash_client_backend::data_api::AccountBalance> for AccountBalance {
+    type Error = Error;
+
+    fn try_from(balance: zcash_client_backend::data_api::AccountBalance) -> Result<Self, Error> {
+        use zcash_protocol::value::Zatoshis;
+
+        fn pending_value(
+            balance: &zcash_client_backend::data_api::Balance,
+        ) -> Result<Zatoshis, Error> {
+            (balance.change_pending_confirmation() + balance.value_pending_spendability())
+                .ok_or(zcash_protocol::value::BalanceError::Overflow)
+                .map_err(Error::from)
+        }
+
+        let sapling_pending_balance = pending_value(balance.sapling_balance())?;
+        let orchard_pending_balance = pending_value(balance.orchard_balance())?;
+        let unshielded_pending_balance = pending_value(balance.unshielded_balance())?;
+        let pending_balance = (balance.change_pending_confirmation()
+            + balance.value_pending_spendability())
+        .ok_or(zcash_protocol::value::BalanceError::Overflow)
+        .map_err(Error::from)?;
+
+        Ok(AccountBalance {
             sapling_balance: balance.sapling_balance().spendable_value().into(),
             orchard_balance: balance.orchard_balance().spendable_value().into(),
             unshielded_balance: balance.unshielded_balance().spendable_value().into(),
-        }
+            sapling_pending_balance: sapling_pending_balance.into(),
+            orchard_pending_balance: orchard_pending_balance.into(),
+            unshielded_pending_balance: unshielded_pending_balance.into(),
+            sapling_total_balance: balance.sapling_balance().total().into(),
+            orchard_total_balance: balance.orchard_balance().total().into(),
+            unshielded_total_balance: balance.unshielded_balance().total().into(),
+            spendable_balance: balance.spendable_value().into(),
+            pending_balance: pending_balance.into(),
+            total_balance: balance.total().into(),
+        })
     }
 }
 
-impl<T> From<zcash_client_backend::data_api::WalletSummary<T>> for WalletSummary
+impl<T> TryFrom<zcash_client_backend::data_api::WalletSummary<T>> for WalletSummary
 where
     T: std::cmp::Eq + std::hash::Hash + std::ops::Deref<Target = u32> + Clone,
 {
-    fn from(summary: zcash_client_backend::data_api::WalletSummary<T>) -> Self {
+    type Error = Error;
+
+    fn try_from(summary: zcash_client_backend::data_api::WalletSummary<T>) -> Result<Self, Error> {
         let mut account_balances: Vec<_> = summary
             .account_balances()
             .iter()
-            .map(|(k, v)| (*(*k).clone().deref(), (*v).into()))
-            .collect();
+            .map(|(k, v)| {
+                AccountBalance::try_from(*v).map(|balance| (*(*k).clone().deref(), balance))
+            })
+            .collect::<Result<_, _>>()?;
 
         account_balances.sort_by(|a, b| a.0.cmp(&b.0));
 
-        WalletSummary {
+        Ok(WalletSummary {
             account_balances,
             chain_tip_height: summary.chain_tip_height().into(),
             fully_scanned_height: summary.fully_scanned_height().into(),
             next_sapling_subtree_index: summary.next_sapling_subtree_index(),
             next_orchard_subtree_index: summary.next_orchard_subtree_index(),
-        }
+        })
     }
 }
