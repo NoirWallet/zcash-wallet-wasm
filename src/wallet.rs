@@ -210,96 +210,6 @@ where
         .await
     }
 
-    // pub async fn import_ufvk(
-    //     &self,
-    //     account_name: &str,
-    //     ufvk: &UnifiedFullViewingKey,
-    //     purpose: AccountPurpose,
-    //     birthday_height: Option<u32>,
-    //     key_source: Option<&str>,
-    // ) -> Result<AccountId, Error> {
-    //     self.import_account_ufvk(account_name, ufvk, birthday_height, purpose, key_source)
-    //         .await
-    // }
-
-    // /// Import an account from a Sapling Extended Spending Key
-    // ///
-    // /// This creates a spending account with only Sapling key material.
-    // /// Transparent and Orchard keys will not be available.
-    // pub async fn import_sapling_spending_key(
-    //     &self,
-    //     account_name: &str,
-    //     sapling_key_encoded: &str,
-    //     birthday_height: Option<u32>,
-    //     key_source: Option<&str>,
-    // ) -> Result<AccountId, Error> {
-    //     use zcash_keys::encoding::decode_extended_spending_key;
-
-    //     let hrp = match &self.network {
-    //         Network::MainNetwork => "secret-extended-key-main",
-    //         Network::TestNetwork => "secret-extended-key-test",
-    //     };
-
-    //     // Decode the Sapling Extended Spending Key
-    //     let extsk = decode_extended_spending_key(hrp, sapling_key_encoded)
-    //         .map_err(|e| Error::KeyParse(format!("Failed to decode Sapling spending key: {:?}", e)))?;
-
-    //     // Convert to Extended Full Viewing Key
-    //     #[allow(deprecated)]
-    //     let extfvk = extsk.to_extended_full_viewing_key();
-
-    //     // Create UFVK from Sapling FVK
-    //     let ufvk = zcash_keys::keys::UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
-    //         .map_err(Error::Derivation)?;
-
-    //     // Import as a spending account (no derivation info since we don't have the seed)
-    //     self.import_account_ufvk(
-    //         account_name,
-    //         &ufvk,
-    //         birthday_height,
-    //         AccountPurpose::Spending { derivation: None },
-    //         key_source,
-    //     )
-    //     .await
-    // }
-
-    // /// Import an account from a Sapling Extended Full Viewing Key
-    // ///
-    // /// This creates a view-only account with only Sapling key material.
-    // /// The account can view transactions but cannot spend funds.
-    // pub async fn import_sapling_viewing_key(
-    //     &self,
-    //     account_name: &str,
-    //     sapling_fvk_encoded: &str,
-    //     birthday_height: Option<u32>,
-    //     key_source: Option<&str>,
-    // ) -> Result<AccountId, Error> {
-    //     use zcash_keys::encoding::decode_extended_full_viewing_key;
-
-    //     let hrp = match &self.network {
-    //         Network::MainNetwork => "zxviews",
-    //         Network::TestNetwork => "zxviewtestsapling",
-    //     };
-
-    //     // Decode the Sapling Extended Full Viewing Key
-    //     let extfvk = decode_extended_full_viewing_key(hrp, sapling_fvk_encoded)
-    //         .map_err(|e| Error::KeyParse(format!("Failed to decode Sapling viewing key: {:?}", e)))?;
-
-    //     // Create UFVK from Sapling FVK
-    //     let ufvk = zcash_keys::keys::UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
-    //         .map_err(Error::Derivation)?;
-
-    //     // Import as a view-only account
-    //     self.import_account_ufvk(
-    //         account_name,
-    //         &ufvk,
-    //         birthday_height,
-    //         AccountPurpose::ViewOnly,
-    //         key_source,
-    //     )
-    //     .await
-    // }
-
     async fn import_account_ufvk(
         &self,
         account_name: &str,
@@ -389,20 +299,6 @@ where
 
         Ok(account_id)
     }
-
-    // pub async fn suggest_scan_ranges(&self) -> Result<Vec<BlockRange>, Error> {
-    //     Ok(self.db.read().await.suggest_scan_ranges().map(|ranges| {
-    //         ranges
-    //             .iter()
-    //             .map(|scan_range| {
-    //                 BlockRange(
-    //                     scan_range.block_range().start.into(),
-    //                     scan_range.block_range().end.into(),
-    //                 )
-    //             })
-    //             .collect()
-    //     })?)
-    // }
 
     pub async fn sync(&self) -> Result<(), Error> {
         let mut client = self.client.clone();
@@ -571,98 +467,6 @@ where
         Ok(start)
     }
 
-    // pub async fn propose_transfer(
-    //     &self,
-    //     account_id: AccountId,
-    //     to_address: ZcashAddress,
-    //     value: u64,
-    // ) -> Result<Proposal<StandardFeeRule, NoteRef>, Error> {
-    //     let input_selector = GreedyInputSelector::new();
-
-    //     let change_strategy = MultiOutputChangeStrategy::new(
-    //         StandardFeeRule::Zip317,
-    //         None,
-    //         ShieldedProtocol::Orchard,
-    //         DustOutputPolicy::default(),
-    //         SplitPolicy::with_min_output_value(
-    //             NonZeroUsize::new(self.target_note_count)
-    //                 .ok_or(Error::FailedToCreateTransaction)?,
-    //             Zatoshis::from_u64(self.min_split_output_value)?,
-    //         ),
-    //     );
-    //     let request = TransactionRequest::new(vec![Payment::without_memo(
-    //         to_address,
-    //         Zatoshis::from_u64(value)?,
-    //     )])?;
-
-    //     tracing::info!("Chain height: {:?}", self.db.read().await.chain_height()?);
-    //     let mut db = self.db.write().await;
-    //     let proposal = propose_transfer::<_, _, _,_, <W as WalletCommitmentTrees>::Error>(
-    //         &mut *db,
-    //         &self.network,
-    //         account_id,
-    //         &input_selector,
-    //         &change_strategy,
-    //         request,
-    //         self.confirmations_policy(),
-    //     )
-    //     .map_err(|_e| Error::Generic("something bad happened when calling propose transfer. Possibly insufficient balance..".to_string()))?;
-    //     Ok(proposal)
-    // }
-
-    // pub async fn create_proposed_transactions(
-    //     &self,
-    //     proposal: Proposal<StandardFeeRule, NoteRef>,
-    //     usk: &UnifiedSpendingKey,
-    // ) -> Result<NonEmpty<TxId>, Error> {
-    //     use js_sys::Date;
-
-    //     let start = Date::now();
-    //     tracing::info!("🔧 Starting create_proposed_transactions");
-
-    //     let prover = get_prover();
-
-    //     let spending_keys = SpendingKeys::from_unified_spending_key(usk.clone());
-
-    //     let db_lock_start = Date::now();
-    //     let mut db = self.db.write().await;
-    //     tracing::info!(
-    //         "🔒 DB write lock acquired in {:.2}s",
-    //         (Date::now() - db_lock_start) / 1000.0
-    //     );
-
-    //     let create_start = Date::now();
-    //     tracing::info!("📝 Calling create_proposed_transactions from librustzcash...");
-    //     let transactions = create_proposed_transactions::<
-    //         _,
-    //         _,
-    //         <MemoryWalletDb<Network> as InputSource>::Error,
-    //         _,
-    //         <StandardFeeRule as FeeRule>::Error,
-    //         _,
-    //     >(
-    //         &mut *db,
-    //         &self.network,
-    //         prover,
-    //         prover,
-    //         &spending_keys,
-    //         OvkPolicy::Sender,
-    //         &proposal,
-    //     )
-    //     .map_err(|_| Error::FailedToCreateTransaction)?;
-
-    //     tracing::info!(
-    //         "✅ create_proposed_transactions completed in {:.2}s",
-    //         (Date::now() - create_start) / 1000.0
-    //     );
-    //     tracing::info!(
-    //         "⏱️ Total create_proposed_transactions took {:.2}s",
-    //         (Date::now() - start) / 1000.0
-    //     );
-
-    //     Ok(transactions)
-    // }
-
     pub async fn send_authorized_transactions(&self, txids: &NonEmpty<TxId>) -> Result<(), Error> {
         let mut client = self.client.clone();
         for txid in txids.iter() {
@@ -691,26 +495,6 @@ where
         }
         Ok(())
     }
-
-    // pub async fn transfer(
-    //     &self,
-    //     seed_phrase: &str,
-    //     account_hd_index: u32,
-    //     from_account_id: AccountId,
-    //     to_address: ZcashAddress,
-    //     value: u64,
-    // ) -> Result<(), Error> {
-    //     let (usk, _) = usk_from_seed_str(seed_phrase, "", account_hd_index, &self.network)?;
-    //     let proposal = self
-    //         .propose_transfer(from_account_id, to_address, value)
-    //         .await?;
-    //     // TODO: Add callback for approving the transaction here
-    //     let txids = self.create_proposed_transactions(proposal, &usk).await?;
-
-    //     // send the transactions to the network!!
-    //     tracing::info!("Sending transactions");
-    //     self.send_authorized_transactions(&txids).await
-    // }
 
     pub async fn pczt_shield(&self, account_id: AccountId) -> Result<Pczt, Error> {
         let change_strategy = MultiOutputChangeStrategy::new(
@@ -964,12 +748,6 @@ where
         tracing::info!("🎉 Transaction broadcast successfully!");
         Ok(txid.to_string())
     }
-
-    // pub fn pczt_combine(&self, pczts: Vec<Pczt>) -> Result<Pczt, Error> {
-    //     Combiner::new(pczts)
-    //         .combine()
-    //         .map_err(|e| Error::PcztCombine(format!("Failed to combine PCZT: {:?}", e)))
-    // }
 }
 
 pub(crate) fn usk_from_seed_str(
