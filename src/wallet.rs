@@ -13,8 +13,8 @@ use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::OnceLock;
-use std::{num::NonZeroU32, sync::Arc};
 use subtle::ConditionallySelectable;
 use tokio::sync::RwLock;
 use tonic::{
@@ -24,8 +24,8 @@ use tonic::{
 use zcash_address::ZcashAddress;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::{
-    ConfirmationsPolicy, SpendingKeys, create_pczt_from_proposal, create_proposed_transactions,
-    extract_and_store_transaction_from_pczt, propose_shielding, propose_transfer,
+    ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
+    propose_shielding, propose_transfer,
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, WalletSummary, Zip32Derivation,
@@ -44,6 +44,7 @@ use zcash_primitives::transaction::fees::FeeRule;
 use zcash_proofs::prover::LocalTxProver;
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+use zcash_primitives::memo::MemoBytes;
 use zcash_protocol::ShieldedProtocol;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
@@ -100,7 +101,6 @@ pub struct Wallet<W, T> {
     // gRPC client used to connect to a lightwalletd instance for network data
     pub(crate) client: CompactTxStreamerClient<T>,
     pub(crate) network: Network,
-    pub(crate) min_confirmations: NonZeroU32,
     /// Note management: the number of notes to maintain in the wallet
     pub(crate) target_note_count: usize,
     /// Note management: the minimum allowed value for split change amounts
@@ -113,7 +113,6 @@ impl<W, T: Clone> Clone for Wallet<W, T> {
             db: self.db.clone(),
             client: self.client.clone(),
             network: self.network,
-            min_confirmations: self.min_confirmations,
             target_note_count: self.target_note_count,
             min_split_output_value: self.min_split_output_value,
         }
@@ -176,22 +175,15 @@ where
     T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
     <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
 {
-    /// Creates a confirmations policy using the wallet's min_confirmations setting.
-    /// This applies the same confirmation requirement to both trusted and untrusted transactions,
-    /// and allows zero-confirmation shielding of transparent UTXOs (matching ZIP 315 defaults).
+    /// Creates the ZIP-315 default confirmations policy.
+    ///
+    /// This preserves ZIP-315's distinction between trusted and untrusted
+    /// outputs while allowing zero-confirmation shielding of transparent UTXOs.
     fn confirmations_policy(&self) -> ConfirmationsPolicy {
-        ConfirmationsPolicy::new_symmetrical(
-            self.min_confirmations,
-            true, // allow zero-conf shielding (matches default behavior)
-        )
+        ConfirmationsPolicy::default()
     }
 
-    pub fn new(
-        db: W,
-        client: T,
-        network: Network,
-        min_confirmations: NonZeroU32,
-    ) -> Result<Self, Error> {
+    pub fn new(db: W, client: T, network: Network) -> Result<Self, Error> {
         get_prover();
         get_orchard_proving_key();
         get_orchard_verifying_key();
@@ -199,7 +191,6 @@ where
             db: Arc::new(RwLock::new(db)),
             client: CompactTxStreamerClient::new(client),
             network,
-            min_confirmations,
             target_note_count: 4,
             min_split_output_value: 10000000,
         })
@@ -209,12 +200,14 @@ where
         &self,
         account_name: &str,
         seed_phrase: &str,
+        passphrase: &str,
         account_hd_index: u32,
         birthday_height: Option<u32>,
         key_source: Option<&str>,
     ) -> Result<AccountId, Error> {
         // decode the mnemonic and derive the first account
-        let (usk, seed_fp) = usk_from_seed_str(seed_phrase, account_hd_index, &self.network)?;
+        let (usk, seed_fp) =
+            usk_from_seed_str(seed_phrase, passphrase, account_hd_index, &self.network)?;
         let ufvk = usk.to_unified_full_viewing_key();
 
         let derivation =
@@ -234,96 +227,6 @@ where
         .await
     }
 
-    // pub async fn import_ufvk(
-    //     &self,
-    //     account_name: &str,
-    //     ufvk: &UnifiedFullViewingKey,
-    //     purpose: AccountPurpose,
-    //     birthday_height: Option<u32>,
-    //     key_source: Option<&str>,
-    // ) -> Result<AccountId, Error> {
-    //     self.import_account_ufvk(account_name, ufvk, birthday_height, purpose, key_source)
-    //         .await
-    // }
-
-    // /// Import an account from a Sapling Extended Spending Key
-    // ///
-    // /// This creates a spending account with only Sapling key material.
-    // /// Transparent and Orchard keys will not be available.
-    // pub async fn import_sapling_spending_key(
-    //     &self,
-    //     account_name: &str,
-    //     sapling_key_encoded: &str,
-    //     birthday_height: Option<u32>,
-    //     key_source: Option<&str>,
-    // ) -> Result<AccountId, Error> {
-    //     use zcash_keys::encoding::decode_extended_spending_key;
-
-    //     let hrp = match &self.network {
-    //         Network::MainNetwork => "secret-extended-key-main",
-    //         Network::TestNetwork => "secret-extended-key-test",
-    //     };
-
-    //     // Decode the Sapling Extended Spending Key
-    //     let extsk = decode_extended_spending_key(hrp, sapling_key_encoded)
-    //         .map_err(|e| Error::KeyParse(format!("Failed to decode Sapling spending key: {:?}", e)))?;
-
-    //     // Convert to Extended Full Viewing Key
-    //     #[allow(deprecated)]
-    //     let extfvk = extsk.to_extended_full_viewing_key();
-
-    //     // Create UFVK from Sapling FVK
-    //     let ufvk = zcash_keys::keys::UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
-    //         .map_err(Error::Derivation)?;
-
-    //     // Import as a spending account (no derivation info since we don't have the seed)
-    //     self.import_account_ufvk(
-    //         account_name,
-    //         &ufvk,
-    //         birthday_height,
-    //         AccountPurpose::Spending { derivation: None },
-    //         key_source,
-    //     )
-    //     .await
-    // }
-
-    // /// Import an account from a Sapling Extended Full Viewing Key
-    // ///
-    // /// This creates a view-only account with only Sapling key material.
-    // /// The account can view transactions but cannot spend funds.
-    // pub async fn import_sapling_viewing_key(
-    //     &self,
-    //     account_name: &str,
-    //     sapling_fvk_encoded: &str,
-    //     birthday_height: Option<u32>,
-    //     key_source: Option<&str>,
-    // ) -> Result<AccountId, Error> {
-    //     use zcash_keys::encoding::decode_extended_full_viewing_key;
-
-    //     let hrp = match &self.network {
-    //         Network::MainNetwork => "zxviews",
-    //         Network::TestNetwork => "zxviewtestsapling",
-    //     };
-
-    //     // Decode the Sapling Extended Full Viewing Key
-    //     let extfvk = decode_extended_full_viewing_key(hrp, sapling_fvk_encoded)
-    //         .map_err(|e| Error::KeyParse(format!("Failed to decode Sapling viewing key: {:?}", e)))?;
-
-    //     // Create UFVK from Sapling FVK
-    //     let ufvk = zcash_keys::keys::UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
-    //         .map_err(Error::Derivation)?;
-
-    //     // Import as a view-only account
-    //     self.import_account_ufvk(
-    //         account_name,
-    //         &ufvk,
-    //         birthday_height,
-    //         AccountPurpose::ViewOnly,
-    //         key_source,
-    //     )
-    //     .await
-    // }
-
     async fn import_account_ufvk(
         &self,
         account_name: &str,
@@ -332,8 +235,6 @@ where
         purpose: AccountPurpose,
         key_source: Option<&str>,
     ) -> Result<AccountId, Error> {
-        tracing::info!("Importing account with Ufvk: {:?}", ufvk);
-
         // Check if an account with this name already exists
         match self.get_account_id_by_name(account_name).await {
             Ok(_) => {
@@ -359,8 +260,8 @@ where
                     .into_inner()
                     .height
                     .try_into()
-                    .expect("block heights must fit into u32");
-                chain_tip - 100
+                    .map_err(|_| Error::Birthday)?;
+                chain_tip.checked_sub(100).ok_or(Error::Birthday)?
             }
         };
         // Construct an `AccountBirthday` for the account's birthday.
@@ -368,7 +269,7 @@ where
             // Fetch the tree state corresponding to the last block prior to the wallet's
             // birthday height. NOTE: THIS APPROACH LEAKS THE BIRTHDAY TO THE SERVER!
             let request = service::BlockId {
-                height: (birthday - 1).into(),
+                height: birthday.checked_sub(1).ok_or(Error::Birthday)?.into(),
                 ..Default::default()
             };
             let treestate = client.get_tree_state(request).await?.into_inner();
@@ -416,20 +317,6 @@ where
         Ok(account_id)
     }
 
-    // pub async fn suggest_scan_ranges(&self) -> Result<Vec<BlockRange>, Error> {
-    //     Ok(self.db.read().await.suggest_scan_ranges().map(|ranges| {
-    //         ranges
-    //             .iter()
-    //             .map(|scan_range| {
-    //                 BlockRange(
-    //                     scan_range.block_range().start.into(),
-    //                     scan_range.block_range().end.into(),
-    //                 )
-    //             })
-    //             .collect()
-    //     })?)
-    // }
-
     pub async fn sync(&self) -> Result<(), Error> {
         let mut client = self.client.clone();
         // TODO: This should be held in the Wallet struct so we can download in parallel
@@ -448,7 +335,7 @@ where
     }
 
     /// Runs a single batch of the sync process without looping.
-    /// Returns `true` if there is more work to do, `false` if fully synced.
+    /// Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
     pub async fn sync_next_batch(&self, batch_size: Option<u32>) -> Result<bool, Error> {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();
@@ -936,106 +823,6 @@ where
         Ok(start)
     }
 
-    // pub async fn propose_transfer(
-    //     &self,
-    //     account_id: AccountId,
-    //     to_address: ZcashAddress,
-    //     value: u64,
-    // ) -> Result<Proposal<StandardFeeRule, NoteRef>, Error> {
-    //     let input_selector = GreedyInputSelector::new();
-
-    //     let change_strategy = MultiOutputChangeStrategy::new(
-    //         StandardFeeRule::Zip317,
-    //         None,
-    //         ShieldedProtocol::Orchard,
-    //         DustOutputPolicy::default(),
-    //         SplitPolicy::with_min_output_value(
-    //             NonZeroUsize::new(self.target_note_count)
-    //                 .ok_or(Error::FailedToCreateTransaction)?,
-    //             Zatoshis::from_u64(self.min_split_output_value)?,
-    //         ),
-    //     );
-    //     let request = TransactionRequest::new(vec![Payment::without_memo(
-    //         to_address,
-    //         Zatoshis::from_u64(value)?,
-    //     )])?;
-
-    //     tracing::info!("Chain height: {:?}", self.db.read().await.chain_height()?);
-    //     tracing::info!(
-    //         "target and anchor heights: {:?}",
-    //         self.db
-    //             .read()
-    //             .await
-    //             .get_target_and_anchor_heights(self.min_confirmations)?
-    //     );
-    //     let mut db = self.db.write().await;
-    //     let proposal = propose_transfer::<_, _, _,_, <W as WalletCommitmentTrees>::Error>(
-    //         &mut *db,
-    //         &self.network,
-    //         account_id,
-    //         &input_selector,
-    //         &change_strategy,
-    //         request,
-    //         self.confirmations_policy(),
-    //     )
-    //     .map_err(|_e| Error::Generic("something bad happened when calling propose transfer. Possibly insufficient balance..".to_string()))?;
-    //     tracing::info!("Proposal: {:#?}", proposal);
-    //     Ok(proposal)
-    // }
-
-    // pub async fn create_proposed_transactions(
-    //     &self,
-    //     proposal: Proposal<StandardFeeRule, NoteRef>,
-    //     usk: &UnifiedSpendingKey,
-    // ) -> Result<NonEmpty<TxId>, Error> {
-    //     use js_sys::Date;
-
-    //     let start = Date::now();
-    //     tracing::info!("🔧 Starting create_proposed_transactions");
-
-    //     let prover = get_prover();
-
-    //     let spending_keys = SpendingKeys::from_unified_spending_key(usk.clone());
-
-    //     let db_lock_start = Date::now();
-    //     let mut db = self.db.write().await;
-    //     tracing::info!(
-    //         "🔒 DB write lock acquired in {:.2}s",
-    //         (Date::now() - db_lock_start) / 1000.0
-    //     );
-
-    //     let create_start = Date::now();
-    //     tracing::info!("📝 Calling create_proposed_transactions from librustzcash...");
-    //     let transactions = create_proposed_transactions::<
-    //         _,
-    //         _,
-    //         <MemoryWalletDb<Network> as InputSource>::Error,
-    //         _,
-    //         <StandardFeeRule as FeeRule>::Error,
-    //         _,
-    //     >(
-    //         &mut *db,
-    //         &self.network,
-    //         prover,
-    //         prover,
-    //         &spending_keys,
-    //         OvkPolicy::Sender,
-    //         &proposal,
-    //     )
-    //     .map_err(|_| Error::FailedToCreateTransaction)?;
-
-    //     tracing::info!(
-    //         "✅ create_proposed_transactions completed in {:.2}s",
-    //         (Date::now() - create_start) / 1000.0
-    //     );
-    //     tracing::info!(
-    //         "⏱️ Total create_proposed_transactions took {:.2}s",
-    //         (Date::now() - start) / 1000.0
-    //     );
-
-    //     Ok(transactions)
-    // }
-
     pub async fn send_authorized_transactions(&self, txids: &NonEmpty<TxId>) -> Result<(), Error> {
         let mut client = self.client.clone();
         for txid in txids.iter() {
@@ -1064,26 +851,6 @@ where
         }
         Ok(())
     }
-
-    // pub async fn transfer(
-    //     &self,
-    //     seed_phrase: &str,
-    //     account_hd_index: u32,
-    //     from_account_id: AccountId,
-    //     to_address: ZcashAddress,
-    //     value: u64,
-    // ) -> Result<(), Error> {
-    //     let (usk, _) = usk_from_seed_str(seed_phrase, account_hd_index, &self.network)?;
-    //     let proposal = self
-    //         .propose_transfer(from_account_id, to_address, value)
-    //         .await?;
-    //     // TODO: Add callback for approving the transaction here
-    //     let txids = self.create_proposed_transactions(proposal, &usk).await?;
-
-    //     // send the transactions to the network!!
-    //     tracing::info!("Sending transactions");
-    //     self.send_authorized_transactions(&txids).await
-    // }
 
     pub async fn pczt_shield(&self, account_id: AccountId) -> Result<Pczt, Error> {
         let change_strategy = MultiOutputChangeStrategy::new(
@@ -1157,105 +924,12 @@ where
         Ok(pczt)
     }
 
-    /// Shield transparent funds by moving them to the Orchard shielded pool
-    /// This is a simplified version that doesn't use PCZT
-    pub async fn shield_funds(
-        &self,
-        account_id: AccountId,
-        usk: &UnifiedSpendingKey,
-    ) -> Result<NonEmpty<TxId>, Error> {
-        let change_strategy = MultiOutputChangeStrategy::new(
-            StandardFeeRule::Zip317,
-            None,
-            ShieldedProtocol::Orchard,
-            DustOutputPolicy::default(),
-            SplitPolicy::with_min_output_value(
-                NonZeroUsize::new(self.target_note_count)
-                    .ok_or(Error::FailedToCreateTransaction)?,
-                Zatoshis::from_u64(self.min_split_output_value)?,
-            ),
-        );
-
-        let input_selector = GreedyInputSelector::new();
-        let mut db = self.db.write().await;
-
-        // Shield all funds immediately
-        let max_height = match db.chain_height()? {
-            Some(max_height) => max_height,
-            None => {
-                return Err(Error::Generic(
-                    "Haven't scanned yet, can't shield".to_string(),
-                ));
-            }
-        };
-
-        let transparent_balances = db.get_transparent_balances(
-            account_id,
-            (max_height + 1).into(),
-            self.confirmations_policy(),
-        )?;
-        let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
-
-        if from_addrs.is_empty() {
-            return Err(Error::Generic(
-                "No transparent addresses found for this account. Make sure the account has received funds to a transparent address.".to_string()
-            ));
-        }
-
-        tracing::info!("Shielding from {} transparent addresses", from_addrs.len());
-
-        let proposal = propose_shielding::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
-            &mut *db,
-            &self.network,
-            &input_selector,
-            &change_strategy,
-            SHIELDING_THRESHOLD,
-            &from_addrs,
-            account_id,
-            ConfirmationsPolicy::new_symmetrical(NonZeroU32::new(1).unwrap(), true),
-        )
-        .map_err(|e| Error::Generic(format!("Error when proposing shielding: {:?}", e)))?;
-
-        tracing::info!("Shielding proposal created: {:#?}", proposal);
-
-        // Create and send the transaction directly
-        let prover = get_prover();
-        let spending_keys = SpendingKeys::from_unified_spending_key(usk.clone());
-
-        let transactions = create_proposed_transactions::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <StandardFeeRule as FeeRule>::Error,
-            _,
-        >(
-            &mut *db,
-            &self.network,
-            prover,
-            prover,
-            &spending_keys,
-            OvkPolicy::Sender,
-            &proposal,
-        )
-        .map_err(|e| Error::Generic(format!("Failed to create shielding transaction: {:?}", e)))?;
-
-        tracing::info!("Shielding transactions created: {:?}", transactions);
-
-        // Transactions are automatically stored in the database by create_proposed_transactions
-        // Now we need to broadcast them
-        drop(db); // Release the lock before sending
-
-        self.send_authorized_transactions(&transactions).await?;
-
-        Ok(transactions)
-    }
-
     pub async fn pczt_create(
         &self,
         account_id: AccountId,
         to_address: ZcashAddress,
         value: u64,
+        memo: Option<Vec<u8>>,
     ) -> Result<Pczt, Error> {
         // Create the PCZT.
         let change_strategy = MultiOutputChangeStrategy::new(
@@ -1271,10 +945,17 @@ where
         );
 
         let input_selector = GreedyInputSelector::new();
-        let request = TransactionRequest::new(vec![Payment::without_memo(
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let payment = Payment::new(
             to_address,
             Zatoshis::from_u64(value)?,
-        )])?;
+            memo,
+            None,
+            None,
+            vec![],
+        )
+        .ok_or(Error::UnsupportedMemoRecipient)?;
+        let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
         let proposal = propose_transfer::<_, _, _,_, <W as WalletCommitmentTrees>::Error>(
             &mut *db,
@@ -1286,7 +967,6 @@ where
             self.confirmations_policy(),
         )
             .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {:?}", e)))?;
-        tracing::info!("Proposal: {:#?}", proposal);
         let pczt = create_pczt_from_proposal::<
             _,
             _,
@@ -1424,28 +1104,49 @@ where
         tracing::info!("🎉 Transaction broadcast successfully!");
         Ok(txid.to_string())
     }
-
-    // pub fn pczt_combine(&self, pczts: Vec<Pczt>) -> Result<Pczt, Error> {
-    //     Combiner::new(pczts)
-    //         .combine()
-    //         .map_err(|e| Error::PcztCombine(format!("Failed to combine PCZT: {:?}", e)))
-    // }
 }
 
 pub(crate) fn usk_from_seed_str(
     seed: &str,
+    passphrase: &str,
     account_id: u32,
     network: &Network,
 ) -> Result<(UnifiedSpendingKey, SeedFingerprint), Error> {
     let mnemonic = <Mnemonic<English>>::from_phrase(seed).map_err(|_| Error::InvalidSeedPhrase)?;
     let seed = {
-        let mut seed = mnemonic.to_seed("");
+        let mut seed = mnemonic.to_seed(passphrase);
         let secret = seed.to_vec();
         seed.zeroize();
         SecretVec::new(secret)
     };
     let seed_fingerprint =
-        SeedFingerprint::from_seed(seed.expose_secret()).expect("seed fingerprint");
+        SeedFingerprint::from_seed(seed.expose_secret()).ok_or(Error::SeedFingerprint)?;
     let usk = UnifiedSpendingKey::from_seed(network, seed.expose_secret(), account_id.try_into()?)?;
     Ok((usk, seed_fingerprint))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usk_from_seed_str;
+    use crate::Network;
+
+    #[test]
+    fn usk_from_seed_str_uses_bip39_passphrase() {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+        let (_, empty_passphrase_fingerprint) =
+            usk_from_seed_str(phrase, "", 0, &Network::MainNetwork).unwrap();
+        let (_, protected_fingerprint) = usk_from_seed_str(
+            phrase,
+            "correct horse battery staple",
+            0,
+            &Network::MainNetwork,
+        )
+        .unwrap();
+
+        assert_ne!(
+            empty_passphrase_fingerprint.to_bytes(),
+            protected_fingerprint.to_bytes()
+        );
+    }
 }

@@ -1,6 +1,7 @@
 use crate::Error;
 use crate::bindgen::{SeedFingerprint, UnifiedSpendingKey};
 use bip0039::{Count, English, Mnemonic};
+use secrecy::Zeroize;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -19,11 +20,11 @@ pub struct UnifiedAddresses {
     pub transparent: Option<String>,
 }
 
-/// Generate a new BIP-39 mnemonic phrase with the specified word count.
+/// Generate a new 24-word BIP-39 mnemonic phrase.
 ///
 /// # Arguments
 ///
-/// * `word_count` - Number of words in the mnemonic (12, 15, 18, 21, or 24)
+/// * `word_count` - Number of words in the mnemonic. Must be 24 for new wallet generation.
 ///
 /// # Returns
 ///
@@ -38,10 +39,6 @@ pub struct UnifiedAddresses {
 #[wasm_bindgen]
 pub fn generate_mnemonic(word_count: u32) -> Result<String, Error> {
     let count = match word_count {
-        12 => Count::Words12,
-        15 => Count::Words15,
-        18 => Count::Words18,
-        21 => Count::Words21,
         24 => Count::Words24,
         _ => return Err(Error::InvalidSeedPhrase),
     };
@@ -147,8 +144,10 @@ pub fn mnemonic_to_seed(phrase: &str, passphrase: &str) -> Result<Vec<u8>, Error
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
-    Ok(seed.to_vec())
+    let mut seed = mnemonic.to_seed(passphrase);
+    let result = seed.to_vec();
+    seed.zeroize();
+    Ok(result)
 }
 
 /// Generate a UnifiedSpendingKey from a mnemonic phrase.
@@ -186,10 +185,12 @@ pub fn mnemonic_to_spending_key(
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
 
     // Create UnifiedSpendingKey from seed
-    UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)
+    let result = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index);
+    seed.zeroize();
+    result
 }
 
 /// Generate a SeedFingerprint from a mnemonic phrase.
@@ -221,10 +222,12 @@ pub fn mnemonic_to_seed_fingerprint(
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
 
     // Create SeedFingerprint from seed
-    SeedFingerprint::new(seed.to_vec().into_boxed_slice())
+    let result = SeedFingerprint::new(seed.to_vec().into_boxed_slice());
+    seed.zeroize();
+    result
 }
 
 // /// Generate a UnifiedFullViewingKey from a mnemonic phrase.
@@ -314,10 +317,12 @@ pub fn mnemonic_to_addresses(
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
 
     // Create UnifiedSpendingKey from seed
-    let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)?;
+    let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index);
+    seed.zeroize();
+    let usk = usk?;
 
     // Get UnifiedFullViewingKey
     let ufvk = usk.to_unified_full_viewing_key();
@@ -328,8 +333,8 @@ pub fn mnemonic_to_addresses(
     // Get UIVK (unified incoming viewing key) from UFVK
     let uivk = ufvk.as_inner().to_unified_incoming_viewing_key();
 
-    // Generate the default address (diversifier index 0) with all receivers
-    let (address, _) = uivk.default_address(UnifiedAddressRequest::ALLOW_ALL)?;
+    // Generate the first address that includes every receiver supported by the UIVK.
+    let (address, _) = uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
 
     // Encode the unified address
     let unified_str = address.encode(&net);
@@ -467,11 +472,8 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
                 let t_addr = TransparentAddress::PublicKeyHash(data);
                 transparent_addr = Some(t_addr.encode(&net));
             }
-            unified::Receiver::P2sh(_) => {
-                unreachable!();
-            }
-            unified::Receiver::Unknown { .. } => {
-                unreachable!();
+            unified::Receiver::P2sh(_) | unified::Receiver::Unknown { .. } => {
+                return Err(Error::InvalidAddress);
             }
         }
     }
@@ -487,4 +489,23 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
 
     // Convert to JsValue using serde_wasm_bindgen
     Ok(serde_wasm_bindgen::to_value(&result)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_mnemonic;
+    use crate::Error;
+
+    #[test]
+    fn generate_mnemonic_only_allows_24_words() {
+        for word_count in [12, 15, 18, 21] {
+            assert!(matches!(
+                generate_mnemonic(word_count),
+                Err(Error::InvalidSeedPhrase)
+            ));
+        }
+
+        let mnemonic = generate_mnemonic(24).expect("24-word mnemonic generation should succeed");
+        assert_eq!(mnemonic.split_whitespace().count(), 24);
+    }
 }

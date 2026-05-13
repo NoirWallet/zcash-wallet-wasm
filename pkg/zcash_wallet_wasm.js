@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_4833(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4833(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_3341(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_3341(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_8932(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_8932(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_7176(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_7176(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -662,8 +662,19 @@ export class PaymentRequest {
      * @returns {any}
      */
     other_params() {
-        const ret = wasm.paymentrequest_other_params(this.__wbg_ptr);
-        return takeObject(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.paymentrequest_other_params(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
 }
 if (Symbol.dispose) PaymentRequest.prototype[Symbol.dispose] = PaymentRequest.prototype.free;
@@ -691,8 +702,19 @@ export class Pczt {
      * @returns {any}
      */
     to_json() {
-        const ret = wasm.pczt_to_json(this.__wbg_ptr);
-        return takeObject(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.pczt_to_json(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * Returns a Pczt from a JSON object
@@ -700,8 +722,19 @@ export class Pczt {
      * @returns {Pczt}
      */
     static from_json(s) {
-        const ret = wasm.pczt_from_json(addHeapObject(s));
-        return Pczt.__wrap(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.pczt_from_json(retptr, addHeapObject(s));
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return Pczt.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * Returns the postcard serialization of the Pczt.
@@ -726,10 +759,21 @@ export class Pczt {
      * @returns {Pczt}
      */
     static from_bytes(bytes) {
-        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_export);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.pczt_from_bytes(ptr0, len0);
-        return Pczt.__wrap(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.pczt_from_bytes(retptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return Pczt.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
 }
 if (Symbol.dispose) Pczt.prototype[Symbol.dispose] = Pczt.prototype.free;
@@ -1211,8 +1255,19 @@ export class WalletSummary {
      * @returns {any}
      */
     get account_balances() {
-        const ret = wasm.walletsummary_account_balances(this.__wbg_ptr);
-        return takeObject(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.walletsummary_account_balances(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
 }
 if (Symbol.dispose) WalletSummary.prototype[Symbol.dispose] = WalletSummary.prototype.free;
@@ -1231,10 +1286,9 @@ export class WebWallet {
     /**
      * @param {string} network
      * @param {string} lightwalletd_url
-     * @param {number} min_confirmations
      * @param {Uint8Array | null} [db_bytes]
      */
-    constructor(network, lightwalletd_url, min_confirmations, db_bytes) {
+    constructor(network, lightwalletd_url, db_bytes) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(network, wasm.__wbindgen_export, wasm.__wbindgen_export2);
@@ -1243,7 +1297,7 @@ export class WebWallet {
             const len1 = WASM_VECTOR_LEN;
             var ptr2 = isLikeNone(db_bytes) ? 0 : passArray8ToWasm0(db_bytes, wasm.__wbindgen_export);
             var len2 = WASM_VECTOR_LEN;
-            wasm.webwallet_new(retptr, ptr0, len0, ptr1, len1, min_confirmations, ptr2, len2);
+            wasm.webwallet_new(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -1262,14 +1316,17 @@ export class WebWallet {
      * @param {string} seed_phrase
      * @param {number} account_hd_index
      * @param {number | null} [birthday_height]
+     * @param {string | null} [passphrase]
      * @returns {Promise<number>}
      */
-    create_account(account_name, seed_phrase, account_hd_index, birthday_height) {
+    create_account(account_name, seed_phrase, account_hd_index, birthday_height, passphrase) {
         const ptr0 = passStringToWasm0(account_name, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(seed_phrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.webwallet_create_account(this.__wbg_ptr, ptr0, len0, ptr1, len1, account_hd_index, isLikeNone(birthday_height) ? 0x100000001 : (birthday_height) >>> 0);
+        var ptr2 = isLikeNone(passphrase) ? 0 : passStringToWasm0(passphrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_create_account(this.__wbg_ptr, ptr0, len0, ptr1, len1, account_hd_index, isLikeNone(birthday_height) ? 0x100000001 : (birthday_height) >>> 0, ptr2, len2);
         return takeObject(ret);
     }
     /**
@@ -1281,7 +1338,7 @@ export class WebWallet {
     }
     /**
      * Runs a single batch of the sync process without looping.
-     * Returns `true` if there is more work to do, `false` if fully synced.
+     * Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
      * @param {number | null} [batch_size]
      * @returns {Promise<boolean>}
      */
@@ -1537,45 +1594,15 @@ export class WebWallet {
     }
     /**
      * @param {number} account_id
-     * @returns {Promise<Pczt>}
-     */
-    pczt_shield(account_id) {
-        const ret = wasm.webwallet_pczt_shield(this.__wbg_ptr, account_id);
-        return takeObject(ret);
-    }
-    /**
-     * Shield transparent funds by moving them to the Orchard shielded pool
-     * This is a direct method that doesn't use PCZT (works around metadata limitations)
-     *
-     * # Arguments
-     *
-     * * `account_id` - The ID of the account to shield funds from
-     * * `mnemonic` - The mnemonic phrase to derive spending keys
-     *
-     * # Returns
-     *
-     * Returns transaction IDs of the shielding transactions
-     * @param {number} account_id
-     * @param {UnifiedSpendingKey} usk
-     * @returns {Promise<any>}
-     */
-    shield_funds(account_id, usk) {
-        _assertClass(usk, UnifiedSpendingKey);
-        var ptr0 = usk.__destroy_into_raw();
-        const ret = wasm.webwallet_shield_funds(this.__wbg_ptr, account_id, ptr0);
-        return takeObject(ret);
-    }
-    /**
-     * @param {number} account_id
      * @param {string} to_address
      * @param {bigint} value
      * @param {UnifiedSpendingKey} usk
      * @param {SeedFingerprint} seed_fp
      * @param {ProofGenerationKey | null} [sapling_proof_gen_key]
-     * @param {boolean | null} [use_prove_server]
+     * @param {Uint8Array | null} [memo]
      * @returns {Promise<string>}
      */
-    oneclick_pczt_transfer(account_id, to_address, value, usk, seed_fp, sapling_proof_gen_key, use_prove_server) {
+    oneclick_pczt_transfer(account_id, to_address, value, usk, seed_fp, sapling_proof_gen_key, memo) {
         const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         _assertClass(usk, UnifiedSpendingKey);
@@ -1587,7 +1614,9 @@ export class WebWallet {
             _assertClass(sapling_proof_gen_key, ProofGenerationKey);
             ptr3 = sapling_proof_gen_key.__destroy_into_raw();
         }
-        const ret = wasm.webwallet_oneclick_pczt_transfer(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, ptr2, ptr3, isLikeNone(use_prove_server) ? 0xFFFFFF : use_prove_server ? 1 : 0);
+        var ptr4 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
+        var len4 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_oneclick_pczt_transfer(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, ptr2, ptr3, ptr4, len4);
         return takeObject(ret);
     }
     /**
@@ -1595,10 +1624,9 @@ export class WebWallet {
      * @param {UnifiedSpendingKey} usk
      * @param {SeedFingerprint} seed_fp
      * @param {ProofGenerationKey | null} [sapling_proof_gen_key]
-     * @param {boolean | null} [use_prove_server]
      * @returns {Promise<string>}
      */
-    oneclick_pczt_shield(account_id, usk, seed_fp, sapling_proof_gen_key, use_prove_server) {
+    oneclick_pczt_shield(account_id, usk, seed_fp, sapling_proof_gen_key) {
         _assertClass(usk, UnifiedSpendingKey);
         var ptr0 = usk.__destroy_into_raw();
         _assertClass(seed_fp, SeedFingerprint);
@@ -1608,45 +1636,7 @@ export class WebWallet {
             _assertClass(sapling_proof_gen_key, ProofGenerationKey);
             ptr2 = sapling_proof_gen_key.__destroy_into_raw();
         }
-        const ret = wasm.webwallet_oneclick_pczt_shield(this.__wbg_ptr, account_id, ptr0, ptr1, ptr2, isLikeNone(use_prove_server) ? 0xFFFFFF : use_prove_server ? 1 : 0);
-        return takeObject(ret);
-    }
-    /**
-     * @param {number} account_id
-     * @param {string} to_address
-     * @param {bigint} value
-     * @returns {Promise<Pczt>}
-     */
-    pczt_create(account_id, to_address, value) {
-        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.webwallet_pczt_create(this.__wbg_ptr, account_id, ptr0, len0, value);
-        return takeObject(ret);
-    }
-    /**
-     * @param {Pczt} pczt
-     * @param {ProofGenerationKey | null} [sapling_proof_gen_key]
-     * @returns {Promise<Pczt>}
-     */
-    pczt_prove(pczt, sapling_proof_gen_key) {
-        _assertClass(pczt, Pczt);
-        var ptr0 = pczt.__destroy_into_raw();
-        let ptr1 = 0;
-        if (!isLikeNone(sapling_proof_gen_key)) {
-            _assertClass(sapling_proof_gen_key, ProofGenerationKey);
-            ptr1 = sapling_proof_gen_key.__destroy_into_raw();
-        }
-        const ret = wasm.webwallet_pczt_prove(this.__wbg_ptr, ptr0, ptr1);
-        return takeObject(ret);
-    }
-    /**
-     * @param {Pczt} pczt
-     * @returns {Promise<string>}
-     */
-    pczt_send(pczt) {
-        _assertClass(pczt, Pczt);
-        var ptr0 = pczt.__destroy_into_raw();
-        const ret = wasm.webwallet_pczt_send(this.__wbg_ptr, ptr0);
+        const ret = wasm.webwallet_oneclick_pczt_shield(this.__wbg_ptr, account_id, ptr0, ptr1, ptr2);
         return takeObject(ret);
     }
     /**
@@ -1660,11 +1650,11 @@ export class WebWallet {
 if (Symbol.dispose) WebWallet.prototype[Symbol.dispose] = WebWallet.prototype.free;
 
 /**
- * Generate a new BIP-39 mnemonic phrase with the specified word count.
+ * Generate a new 24-word BIP-39 mnemonic phrase.
  *
  * # Arguments
  *
- * * `word_count` - Number of words in the mnemonic (12, 15, 18, 21, or 24)
+ * * `word_count` - Number of words in the mnemonic. Must be 24 for new wallet generation.
  *
  * # Returns
  *
@@ -1958,26 +1948,6 @@ export function parse_unified_address(network, unified_address) {
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
-}
-
-/**
- * @param {string} network
- * @param {Pczt} pczt
- * @param {UnifiedSpendingKey} usk
- * @param {SeedFingerprint} seed_fp
- * @returns {Promise<Pczt>}
- */
-export function pczt_sign(network, pczt, usk, seed_fp) {
-    const ptr0 = passStringToWasm0(network, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-    const len0 = WASM_VECTOR_LEN;
-    _assertClass(pczt, Pczt);
-    var ptr1 = pczt.__destroy_into_raw();
-    _assertClass(usk, UnifiedSpendingKey);
-    var ptr2 = usk.__destroy_into_raw();
-    _assertClass(seed_fp, SeedFingerprint);
-    var ptr3 = seed_fp.__destroy_into_raw();
-    const ret = wasm.pczt_sign(ptr0, len0, ptr1, ptr2, ptr3);
-    return takeObject(ret);
 }
 
 /**
@@ -2354,10 +2324,6 @@ function __wbg_get_imports(memory) {
         const ret = getObject(arg0).fetch(getObject(arg1), getObject(arg2));
         return addHeapObject(ret);
     };
-    imports.wbg.__wbg_fetch_a9bc66c159c18e19 = function(arg0) {
-        const ret = fetch(getObject(arg0));
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbg_fetch_f083e6da40cefe09 = function(arg0, arg1) {
         const ret = fetch(getObject(arg0), getObject(arg1));
         return addHeapObject(ret);
@@ -2417,26 +2383,6 @@ function __wbg_get_imports(memory) {
         const ret = result;
         return ret;
     };
-    imports.wbg.__wbg_instanceof_Error_3443650560328fa9 = function(arg0) {
-        let result;
-        try {
-            result = getObject(arg0) instanceof Error;
-        } catch (_) {
-            result = false;
-        }
-        const ret = result;
-        return ret;
-    };
-    imports.wbg.__wbg_instanceof_Response_cd74d1c2ac92cb0b = function(arg0) {
-        let result;
-        try {
-            result = getObject(arg0) instanceof Response;
-        } catch (_) {
-            result = false;
-        }
-        const ret = result;
-        return ret;
-    };
     imports.wbg.__wbg_instanceof_Uint8Array_da54ccc9d3e09434 = function(arg0) {
         let result;
         try {
@@ -2489,16 +2435,8 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_measure_7728846525e2cced = function() { return handleError(function (arg0, arg1, arg2, arg3) {
         getObject(arg0).measure(getStringFromWasm0(arg1, arg2), getObject(arg3));
     }, arguments) };
-    imports.wbg.__wbg_message_0305fa7903f4b3d9 = function(arg0) {
-        const ret = getObject(arg0).message;
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbg_msCrypto_a61aeb35a24c1329 = function(arg0) {
         const ret = getObject(arg0).msCrypto;
-        return addHeapObject(ret);
-    };
-    imports.wbg.__wbg_name_f33243968228ce95 = function(arg0) {
-        const ret = getObject(arg0).name;
         return addHeapObject(ret);
     };
     imports.wbg.__wbg_new_0_23cedd11d9b40c9d = function() {
@@ -2513,10 +2451,6 @@ function __wbg_get_imports(memory) {
         const ret = new Array();
         return addHeapObject(ret);
     };
-    imports.wbg.__wbg_new_3205bc992762cf38 = function() { return handleError(function () {
-        const ret = new URLSearchParams();
-        return addHeapObject(ret);
-    }, arguments) };
     imports.wbg.__wbg_new_3c79b3bb1b32b7d3 = function() { return handleError(function () {
         const ret = new Headers();
         return addHeapObject(ret);
@@ -2529,10 +2463,6 @@ function __wbg_get_imports(memory) {
         const ret = new Uint8Array(getObject(arg0));
         return addHeapObject(ret);
     };
-    imports.wbg.__wbg_new_79cb6b4c6069a31e = function() { return handleError(function (arg0, arg1) {
-        const ret = new URL(getStringFromWasm0(arg0, arg1));
-        return addHeapObject(ret);
-    }, arguments) };
     imports.wbg.__wbg_new_8a6f238a6ece86ea = function() {
         const ret = new Error();
         return addHeapObject(ret);
@@ -2556,7 +2486,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_8932(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_7176(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2587,10 +2517,6 @@ function __wbg_get_imports(memory) {
         const ret = new Request(getStringFromWasm0(arg0, arg1), getObject(arg2));
         return addHeapObject(ret);
     }, arguments) };
-    imports.wbg.__wbg_new_with_str_e8aac3eec73c239d = function() { return handleError(function (arg0, arg1) {
-        const ret = new Request(getStringFromWasm0(arg0, arg1));
-        return addHeapObject(ret);
-    }, arguments) };
     imports.wbg.__wbg_next_138a17bbf04e926c = function(arg0) {
         const ret = getObject(arg0).next;
         return addHeapObject(ret);
@@ -2618,10 +2544,6 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_paymentrequest_unwrap = function(arg0) {
         const ret = PaymentRequest.__unwrap(getObject(arg0));
         return ret;
-    };
-    imports.wbg.__wbg_pczt_new = function(arg0) {
-        const ret = Pczt.__wrap(arg0);
-        return addHeapObject(ret);
     };
     imports.wbg.__wbg_performance_121b9855d716e029 = function() {
         const ret = globalThis.performance;
@@ -2665,13 +2587,6 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_respond_9f7fc54636c4a3af = function() { return handleError(function (arg0, arg1) {
         getObject(arg0).respond(arg1 >>> 0);
     }, arguments) };
-    imports.wbg.__wbg_search_dbf031078dd8e645 = function(arg0, arg1) {
-        const ret = getObject(arg1).search;
-        const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len1 = WASM_VECTOR_LEN;
-        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
-        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
-    };
     imports.wbg.__wbg_set_169e13b608078b7b = function(arg0, arg1, arg2) {
         getObject(arg0).set(getArrayU8FromWasm0(arg1, arg2));
     };
@@ -2725,9 +2640,6 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_set_referrer_policy_06f0b942c78becbb = function(arg0, arg1) {
         getObject(arg0).referrerPolicy = __wbindgen_enum_ReferrerPolicy[arg1];
     };
-    imports.wbg.__wbg_set_search_cbba29f94329f296 = function(arg0, arg1, arg2) {
-        getObject(arg0).search = getStringFromWasm0(arg1, arg2);
-    };
     imports.wbg.__wbg_stack_0ed75d68575b0f3c = function(arg0, arg1) {
         const ret = getObject(arg1).stack;
         const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
@@ -2763,10 +2675,6 @@ function __wbg_get_imports(memory) {
         const ret = getObject(arg0).subarray(arg1 >>> 0, arg2 >>> 0);
         return addHeapObject(ret);
     };
-    imports.wbg.__wbg_text_51046bb33d257f63 = function() { return handleError(function (arg0) {
-        const ret = getObject(arg0).text();
-        return addHeapObject(ret);
-    }, arguments) };
     imports.wbg.__wbg_then_429f7caf1026411d = function(arg0, arg1, arg2) {
         const ret = getObject(arg0).then(getObject(arg1), getObject(arg2));
         return addHeapObject(ret);
@@ -2775,20 +2683,9 @@ function __wbg_get_imports(memory) {
         const ret = getObject(arg0).then(getObject(arg1));
         return addHeapObject(ret);
     };
-    imports.wbg.__wbg_toString_14b47ee7542a49ef = function(arg0) {
-        const ret = getObject(arg0).toString();
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbg_toString_f07112df359c997f = function(arg0) {
         const ret = getObject(arg0).toString();
         return addHeapObject(ret);
-    };
-    imports.wbg.__wbg_url_87f30c96ceb3baf7 = function(arg0, arg1) {
-        const ret = getObject(arg1).url;
-        const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-        const len1 = WASM_VECTOR_LEN;
-        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
-        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
     };
     imports.wbg.__wbg_value_4cd497eeadba94bd = function(arg0) {
         const ret = getObject(arg0).value;
@@ -2834,19 +2731,19 @@ function __wbg_get_imports(memory) {
         const ret = (BigInt.asUintN(64, arg0) | (arg1 << BigInt(64)));
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_cast_39baf03af472933b = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1895, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1896, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4832, __wasm_bindgen_func_elem_4833);
+    imports.wbg.__wbindgen_cast_3031707770302296 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1201, function: Function { arguments: [Externref], shim_idx: 1202, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_3340, __wasm_bindgen_func_elem_3341);
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbindgen_cast_3a0a310f8dc3a404 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1201, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1202, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_3340, __wasm_bindgen_func_elem_3341);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_4625c577ab2ec9ee = function(arg0) {
         // Cast intrinsic for `U64 -> Externref`.
         const ret = BigInt.asUintN(64, arg0);
-        return addHeapObject(ret);
-    };
-    imports.wbg.__wbindgen_cast_5d9f33d6add65e13 = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1895, function: Function { arguments: [Externref], shim_idx: 1896, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_4832, __wasm_bindgen_func_elem_4833);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_77bc3e92745e9a35 = function(arg0, arg1) {
@@ -2892,7 +2789,7 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbindgen_object_drop_ref = function(arg0) {
         takeObject(arg0);
     };
-    imports.wbg.memory = memory || new WebAssembly.Memory({initial:835,maximum:65536,shared:true});
+    imports.wbg.memory = memory || new WebAssembly.Memory({initial:833,maximum:65536,shared:true});
 
     return imports;
 }

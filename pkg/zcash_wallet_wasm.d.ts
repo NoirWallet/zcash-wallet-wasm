@@ -159,12 +159,12 @@ export class WalletSummary {
 export class WebWallet {
   free(): void;
   [Symbol.dispose](): void;
-  constructor(network: string, lightwalletd_url: string, min_confirmations: number, db_bytes?: Uint8Array | null);
-  create_account(account_name: string, seed_phrase: string, account_hd_index: number, birthday_height?: number | null): Promise<number>;
+  constructor(network: string, lightwalletd_url: string, db_bytes?: Uint8Array | null);
+  create_account(account_name: string, seed_phrase: string, account_hd_index: number, birthday_height?: number | null, passphrase?: string | null): Promise<number>;
   sync(): Promise<void>;
   /**
    * Runs a single batch of the sync process without looping.
-   * Returns `true` if there is more work to do, `false` if fully synced.
+   * Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
    */
   sync_next_batch(batch_size?: number | null): Promise<boolean>;
   get_wallet_summary(): Promise<WalletSummary | undefined>;
@@ -330,35 +330,17 @@ export class WebWallet {
    * ```
    */
   get_unified_addresses(account_id: number): Promise<any>;
-  pczt_shield(account_id: number): Promise<Pczt>;
-  /**
-   * Shield transparent funds by moving them to the Orchard shielded pool
-   * This is a direct method that doesn't use PCZT (works around metadata limitations)
-   *
-   * # Arguments
-   *
-   * * `account_id` - The ID of the account to shield funds from
-   * * `mnemonic` - The mnemonic phrase to derive spending keys
-   *
-   * # Returns
-   *
-   * Returns transaction IDs of the shielding transactions
-   */
-  shield_funds(account_id: number, usk: UnifiedSpendingKey): Promise<any>;
-  oneclick_pczt_transfer(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null, use_prove_server?: boolean | null): Promise<string>;
-  oneclick_pczt_shield(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null, use_prove_server?: boolean | null): Promise<string>;
-  pczt_create(account_id: number, to_address: string, value: bigint): Promise<Pczt>;
-  pczt_prove(pczt: Pczt, sapling_proof_gen_key?: ProofGenerationKey | null): Promise<Pczt>;
-  pczt_send(pczt: Pczt): Promise<string>;
+  oneclick_pczt_transfer(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null, memo?: Uint8Array | null): Promise<string>;
+  oneclick_pczt_shield(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null): Promise<string>;
   get_latest_block(): Promise<bigint>;
 }
 
 /**
- * Generate a new BIP-39 mnemonic phrase with the specified word count.
+ * Generate a new 24-word BIP-39 mnemonic phrase.
  *
  * # Arguments
  *
- * * `word_count` - Number of words in the mnemonic (12, 15, 18, 21, or 24)
+ * * `word_count` - Number of words in the mnemonic. Must be 24 for new wallet generation.
  *
  * # Returns
  *
@@ -506,8 +488,6 @@ export function mnemonic_to_spending_key(network: string, phrase: string, passph
  */
 export function parse_unified_address(network: string, unified_address: string): any;
 
-export function pczt_sign(network: string, pczt: Pczt, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint): Promise<Pczt>;
-
 /**
  * Sign a message with the transparent address private key
  *
@@ -598,10 +578,10 @@ export interface InitOutput {
   readonly mnemonic_to_addresses: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
   readonly parse_unified_address: (a: number, b: number, c: number, d: number, e: number) => void;
   readonly __wbg_pczt_free: (a: number, b: number) => void;
-  readonly pczt_to_json: (a: number) => number;
-  readonly pczt_from_json: (a: number) => number;
+  readonly pczt_to_json: (a: number, b: number) => void;
+  readonly pczt_from_json: (a: number, b: number) => void;
   readonly pczt_serialize: (a: number, b: number) => void;
-  readonly pczt_from_bytes: (a: number, b: number) => number;
+  readonly pczt_from_bytes: (a: number, b: number, c: number) => void;
   readonly __wbg_transactionrequest_free: (a: number, b: number) => void;
   readonly transactionrequest_new: (a: number, b: number, c: number) => void;
   readonly transactionrequest_empty: () => number;
@@ -617,12 +597,11 @@ export interface InitOutput {
   readonly paymentrequest_memo: (a: number, b: number) => void;
   readonly paymentrequest_label: (a: number, b: number) => void;
   readonly paymentrequest_message: (a: number, b: number) => void;
-  readonly paymentrequest_other_params: (a: number) => number;
-  readonly pczt_sign: (a: number, b: number, c: number, d: number, e: number) => number;
+  readonly paymentrequest_other_params: (a: number, b: number) => void;
   readonly sign_message_with_transparent: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
   readonly __wbg_webwallet_free: (a: number, b: number) => void;
-  readonly webwallet_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
-  readonly webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
+  readonly webwallet_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+  readonly webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
   readonly webwallet_sync: (a: number) => number;
   readonly webwallet_sync_next_batch: (a: number, b: number) => number;
   readonly webwallet_get_wallet_summary: (a: number) => number;
@@ -639,13 +618,8 @@ export interface InitOutput {
   readonly webwallet_get_account_id_by_name: (a: number, b: number, c: number) => number;
   readonly webwallet_get_account_hd_index: (a: number, b: number) => number;
   readonly webwallet_get_unified_addresses: (a: number, b: number) => number;
-  readonly webwallet_pczt_shield: (a: number, b: number) => number;
-  readonly webwallet_shield_funds: (a: number, b: number, c: number) => number;
-  readonly webwallet_oneclick_pczt_transfer: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number) => number;
-  readonly webwallet_oneclick_pczt_shield: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
-  readonly webwallet_pczt_create: (a: number, b: number, c: number, d: number, e: bigint) => number;
-  readonly webwallet_pczt_prove: (a: number, b: number, c: number) => number;
-  readonly webwallet_pczt_send: (a: number, b: number) => number;
+  readonly webwallet_oneclick_pczt_transfer: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number) => number;
+  readonly webwallet_oneclick_pczt_shield: (a: number, b: number, c: number, d: number, e: number) => number;
   readonly webwallet_get_latest_block: (a: number) => number;
   readonly __wbg_proposal_free: (a: number, b: number) => void;
   readonly __wbg_walletsummary_free: (a: number, b: number) => void;
@@ -657,7 +631,7 @@ export interface InitOutput {
   readonly __wbg_set_walletsummary_next_sapling_subtree_index: (a: number, b: bigint) => void;
   readonly __wbg_get_walletsummary_next_orchard_subtree_index: (a: number) => bigint;
   readonly __wbg_set_walletsummary_next_orchard_subtree_index: (a: number, b: bigint) => void;
-  readonly walletsummary_account_balances: (a: number) => number;
+  readonly walletsummary_account_balances: (a: number, b: number) => void;
   readonly start: () => void;
   readonly __wbg_blockrange_free: (a: number, b: number) => void;
   readonly __wbg_get_blockrange_0: (a: number) => number;
@@ -691,9 +665,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_4833: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_4832: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_8932: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_3341: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_3340: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_7176: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

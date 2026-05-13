@@ -1,11 +1,9 @@
-use std::{num::NonZeroU32, str::FromStr};
+use std::str::FromStr;
 
 use crate::bindgen::sign::pczt_sign_inner;
-use crate::bindgen::{Pczt, ProofGenerationKey, SeedFingerprint};
+use crate::bindgen::{ProofGenerationKey, SeedFingerprint};
 use crate::{Error, Network, PRUNING_DEPTH, Wallet};
 
-use base64::Engine;
-use base64::prelude::BASE64_STANDARD;
 use nonempty::NonEmpty;
 use serde::{Deserialize, Serialize};
 use tonic_web_wasm_client::Client;
@@ -46,12 +44,9 @@ impl WebWallet {
     pub fn new(
         network: &str,
         lightwalletd_url: &str,
-        min_confirmations: u32,
         db_bytes: Option<Box<[u8]>>,
     ) -> Result<WebWallet, Error> {
         let network = Network::from_str(network)?;
-        let min_confirmations = NonZeroU32::try_from(min_confirmations)
-            .map_err(|_| Error::InvalidMinConformations(min_confirmations))?;
         let client = Client::new(lightwalletd_url.to_string());
 
         let db = match db_bytes {
@@ -65,7 +60,7 @@ impl WebWallet {
         };
 
         Ok(Self {
-            inner: Wallet::new(db, client, network, min_confirmations)?,
+            inner: Wallet::new(db, client, network)?,
         })
     }
 
@@ -75,12 +70,14 @@ impl WebWallet {
         seed_phrase: &str,
         account_hd_index: u32,
         birthday_height: Option<u32>,
+        passphrase: Option<String>,
     ) -> Result<u32, Error> {
         tracing::info!("Create account called");
         self.inner
             .create_account(
                 account_name,
                 seed_phrase,
+                passphrase.as_deref().unwrap_or(""),
                 account_hd_index,
                 birthday_height,
                 None,
@@ -88,101 +85,6 @@ impl WebWallet {
             .await
             .map(|id| *id)
     }
-
-    // pub async fn create_account_ufvk(
-    //     &self,
-    //     account_name: &str,
-    //     encoded_ufvk: &str,
-    //     seed_fingerprint: SeedFingerprint,
-    //     account_hd_index: u32,
-    //     birthday_height: Option<u32>,
-    // ) -> Result<u32, Error> {
-    //     let ufvk = UnifiedFullViewingKey::decode(&self.inner.network, encoded_ufvk)
-    //         .map_err(Error::KeyParse)?;
-    //     let derivation = Some(Zip32Derivation::new(
-    //         seed_fingerprint.into(),
-    //         zip32::AccountId::try_from(account_hd_index)?,
-    //     ));
-    //     self.inner
-    //         .import_ufvk(
-    //             account_name,
-    //             &ufvk,
-    //             AccountPurpose::Spending { derivation },
-    //             birthday_height,
-    //             None,
-    //         )
-    //         .await
-    //         .map(|id| *id)
-    // }
-
-    // pub async fn create_account_view_ufvk(
-    //     &self,
-    //     account_name: &str,
-    //     encoded_ufvk: &str,
-    //     birthday_height: Option<u32>,
-    // ) -> Result<u32, Error> {
-    //     let ufvk = UnifiedFullViewingKey::decode(&self.inner.network, encoded_ufvk)
-    //         .map_err(Error::KeyParse)?;
-
-    //     self.inner
-    //         .import_ufvk(
-    //             account_name,
-    //             &ufvk,
-    //             AccountPurpose::ViewOnly,
-    //             birthday_height,
-    //             None,
-    //         )
-    //         .await
-    //         .map(|id| *id)
-    // }
-
-    // /// Import an account from a Sapling Extended Spending Key
-    // ///
-    // /// Creates a spending account with only Sapling key material.
-    // /// Transparent and Orchard keys will not be available.
-    // ///
-    // /// # Arguments
-    // /// * `account_name` - Name for the new account
-    // /// * `sapling_key` - Bech32-encoded Sapling Extended Spending Key (e.g., "secret-extended-key-main...")
-    // /// * `birthday_height` - Optional wallet birthday height (defaults to current chain tip)
-    // ///
-    // /// # Returns
-    // /// Account ID of the newly imported account
-    // pub async fn import_account_sapling_key(
-    //     &self,
-    //     account_name: &str,
-    //     sapling_key: &str,
-    //     birthday_height: Option<u32>,
-    // ) -> Result<u32, Error> {
-    //     self.inner
-    //         .import_sapling_spending_key(account_name, sapling_key, birthday_height, None)
-    //         .await
-    //         .map(|id| *id)
-    // }
-
-    // /// Import an account from a Sapling Extended Full Viewing Key
-    // ///
-    // /// Creates a view-only account with only Sapling key material.
-    // /// The account can view transactions but cannot spend funds.
-    // ///
-    // /// # Arguments
-    // /// * `account_name` - Name for the new account
-    // /// * `sapling_fvk` - Bech32-encoded Sapling Extended Full Viewing Key (e.g., "zxviews..." or "zxviewtestsapling...")
-    // /// * `birthday_height` - Optional wallet birthday height (defaults to current chain tip)
-    // ///
-    // /// # Returns
-    // /// Account ID of the newly imported account
-    // pub async fn import_account_sapling_fvk(
-    //     &self,
-    //     account_name: &str,
-    //     sapling_fvk: &str,
-    //     birthday_height: Option<u32>,
-    // ) -> Result<u32, Error> {
-    //     self.inner
-    //         .import_sapling_viewing_key(account_name, sapling_fvk, birthday_height, None)
-    //         .await
-    //         .map(|id| *id)
-    // }
 
     pub async fn sync(&self) -> Result<(), Error> {
         // Record start time
@@ -199,21 +101,21 @@ impl WebWallet {
     }
 
     /// Runs a single batch of the sync process without looping.
-    /// Returns `true` if there is more work to do, `false` if fully synced.
+    /// Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
     pub async fn sync_next_batch(&self, batch_size: Option<u32>) -> Result<bool, Error> {
         let start_time = js_sys::Date::now();
 
-        let has_more = self.inner.sync_next_batch(batch_size).await?;
+        let processed_batch = self.inner.sync_next_batch(batch_size).await?;
 
         let end_time = js_sys::Date::now();
         let elapsed_seconds = (end_time - start_time) / 1000.0;
         tracing::info!(
-            "⏱️ Sync next batch completed in {:.2} seconds, has_more: {}",
+            "⏱️ Sync next batch completed in {:.2} seconds, processed_batch: {}",
             elapsed_seconds,
-            has_more
+            processed_batch
         );
 
-        Ok(has_more)
+        Ok(processed_batch)
     }
 
     pub async fn get_wallet_summary(&self) -> Result<Option<WalletSummary>, Error> {
@@ -311,48 +213,6 @@ impl WebWallet {
         self.inner.get_block_by_time(time).await
     }
 
-    // pub async fn propose_transfer(
-    //     &self,
-    //     account_id: u32,
-    //     to_address: String,
-    //     value: u64,
-    // ) -> Result<Proposal, Error> {
-    //     let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-    //     let proposal = self
-    //         .inner
-    //         .propose_transfer(AccountId::from(account_id), to_address, value)
-    //         .await?;
-    //     Ok(proposal.into())
-    // }
-
-    // pub async fn create_proposed_transactions(
-    //     &self,
-    //     proposal: Proposal,
-    //     seed_phrase: &str,
-    //     account_hd_index: u32,
-    // ) -> Result<Vec<u8>, Error> {
-    //     let (usk, _) = usk_from_seed_str(seed_phrase, account_hd_index, &self.inner.network)?;
-
-    //     // Record start time
-    //     let start_time = js_sys::Date::now();
-
-    //     let txids = self
-    //         .inner
-    //         .create_proposed_transactions(proposal.into(), &usk)
-    //         .await?;
-
-    //     // Calculate elapsed time in seconds
-    //     let end_time = js_sys::Date::now();
-    //     let elapsed_seconds = (end_time - start_time) / 1000.0;
-    //     tracing::info!(
-    //         "⏱️ create_proposed_transaction completed in {:.2} seconds",
-    //         elapsed_seconds
-    //     );
-
-    //     let flattened_txid_bytes = txids.iter().flat_map(|&x| *x.as_ref()).collect();
-    //     Ok(flattened_txid_bytes)
-    // }
-
     /// Journal-aware sync: download + scan one batch, return journal data for persistence.
     /// Returns null if fully synced, or Uint8Array with journal entry data.
     pub async fn prepare_sync_batch(&self, batch_size: Option<u32>) -> Result<Option<Box<[u8]>>, Error> {
@@ -436,24 +296,6 @@ impl WebWallet {
         let txids = NonEmpty::from_vec(txids).ok_or(Error::TxIdParse)?;
         self.inner.send_authorized_transactions(&txids).await
     }
-
-    // pub async fn get_current_address(&self, account_id: u32) -> Result<String, Error> {
-    //     use zcash_client_backend::data_api::Account;
-    //     use zcash_keys::keys::UnifiedAddressRequest;
-
-    //     let db = self.inner.db.read().await;
-    //     let account = db
-    //         .get_account(account_id.into())?
-    //         .ok_or(Error::AccountNotFound(account_id))?;
-
-    //     // Get the unified incoming viewing key from the account
-    //     let uivk = account.uivk();
-
-    //     // Generate the default address (diversifier index 0) with all receivers
-    //     let (address, _) = uivk.default_address(UnifiedAddressRequest::ALLOW_ALL)?;
-
-    //     Ok(address.encode(&self.inner.network))
-    // }
 
     /// Get account ID by account name
     ///
@@ -540,7 +382,7 @@ impl WebWallet {
         use zcash_address::unified::{self, Container};
         use zcash_client_backend::data_api::Account;
         use zcash_client_backend::encoding::AddressCodec;
-        use zcash_keys::keys::UnifiedAddressRequest as UAR;
+        use zcash_keys::keys::UnifiedAddressRequest;
         use zcash_primitives::consensus::Parameters;
         use zcash_primitives::legacy::TransparentAddress;
 
@@ -552,8 +394,8 @@ impl WebWallet {
         // Get the unified incoming viewing key from the account
         let uivk = account.uivk();
 
-        // Generate the full unified address with all available receivers
-        let (full_address, _) = uivk.default_address(UAR::ALLOW_ALL)?;
+        // Generate the first address that includes every receiver supported by the UIVK.
+        let (full_address, _) = uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
         let unified_str = full_address.encode(&self.inner.network);
 
         // Parse the unified address to extract individual receivers
@@ -608,40 +450,6 @@ impl WebWallet {
         Ok(serde_wasm_bindgen::to_value(&result)?)
     }
 
-    pub async fn pczt_shield(&self, account_id: u32) -> Result<Pczt, Error> {
-        self.inner
-            .pczt_shield(account_id.into())
-            .await
-            .map(Into::into)
-    }
-
-    /// Shield transparent funds by moving them to the Orchard shielded pool
-    /// This is a direct method that doesn't use PCZT (works around metadata limitations)
-    ///
-    /// # Arguments
-    ///
-    /// * `account_id` - The ID of the account to shield funds from
-    /// * `mnemonic` - The mnemonic phrase to derive spending keys
-    ///
-    /// # Returns
-    ///
-    /// Returns transaction IDs of the shielding transactions
-    pub async fn shield_funds(
-        &self,
-        account_id: u32,
-        usk: super::UnifiedSpendingKey,
-    ) -> Result<JsValue, Error> {
-        let txids = self
-            .inner
-            .shield_funds(account_id.into(), usk.as_inner())
-            .await?;
-
-        // Convert NonEmpty<TxId> to Vec<String>
-        let txid_strings: Vec<String> = txids.iter().map(|txid| txid.to_string()).collect();
-
-        serde_wasm_bindgen::to_value(&txid_strings).map_err(Error::from)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub async fn oneclick_pczt_transfer(
         &self,
@@ -651,15 +459,15 @@ impl WebWallet {
         usk: super::UnifiedSpendingKey,
         seed_fp: SeedFingerprint,
         sapling_proof_gen_key: Option<ProofGenerationKey>,
-        use_prove_server: Option<bool>,
+        memo: Option<Vec<u8>>,
     ) -> Result<String, Error> {
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
         let pczt = self
             .inner
-            .pczt_create(AccountId::from(account_id), to_address, value)
+            .pczt_create(AccountId::from(account_id), to_address, value, memo)
             .await?;
 
-        self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key, use_prove_server)
+        self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
             .await
     }
 
@@ -669,19 +477,18 @@ impl WebWallet {
         usk: super::UnifiedSpendingKey,
         seed_fp: SeedFingerprint,
         sapling_proof_gen_key: Option<ProofGenerationKey>,
-        use_prove_server: Option<bool>,
     ) -> Result<String, Error> {
         let pczt = self.inner.pczt_shield(account_id.into()).await?;
 
-        self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key, use_prove_server)
+        self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
             .await
     }
 
-    /// Sign, prove (optionally using remote server), and send a PCZT transaction.
+    /// Sign, prove locally, and send a PCZT transaction.
     ///
     /// This helper method encapsulates the common workflow of:
     /// 1. Signing a PCZT with the provided spending key
-    /// 2. Proving the PCZT (using remote server if requested, falling back to local)
+    /// 2. Proving the PCZT locally
     /// 3. Sending the proven PCZT to the network
     ///
     /// # Arguments
@@ -689,7 +496,6 @@ impl WebWallet {
     /// * `usk` - Unified spending key for signing
     /// * `seed_fp` - Seed fingerprint for signing
     /// * `sapling_proof_gen_key` - Optional Sapling proof generation key
-    /// * `use_prove_server` - Whether to attempt using remote proving server
     ///
     /// # Returns
     /// Transaction ID string on success
@@ -699,7 +505,6 @@ impl WebWallet {
         usk: super::UnifiedSpendingKey,
         seed_fp: SeedFingerprint,
         sapling_proof_gen_key: Option<ProofGenerationKey>,
-        use_prove_server: Option<bool>,
     ) -> Result<String, Error> {
         let proof_gen_key = sapling_proof_gen_key.map(Into::into);
 
@@ -707,96 +512,13 @@ impl WebWallet {
         let signed_pczt =
             pczt_sign_inner(self.inner.network, pczt, usk.into(), seed_fp.into()).await?;
 
-        // Prove the PCZT (remote or local)
-        let proved_pczt = if use_prove_server.unwrap_or(false) {
-            let signed_pczt_string = BASE64_STANDARD.encode(signed_pczt.serialize());
-            match send_pczt_to_prove_server(signed_pczt_string).await {
-                Ok(ProveResponse { proved_pczt }) => {
-                    let proved_pczt_bytes = BASE64_STANDARD.decode(&proved_pczt).unwrap();
-                    pczt::Pczt::parse(&proved_pczt_bytes).unwrap()
-                }
-                Err(e) => {
-                    tracing::error!("send_pczt_to_prove_server failed: {e}, try inner.pczt_prove.");
-                    self.inner.pczt_prove(signed_pczt, proof_gen_key).await?
-                }
-            }
-        } else {
-            self.inner.pczt_prove(signed_pczt, proof_gen_key).await?
-        };
+        // Prove the PCZT locally.
+        let proved_pczt = self.inner.pczt_prove(signed_pczt, proof_gen_key).await?;
 
         // Send the proven PCZT
         let txid = self.inner.pczt_send(proved_pczt).await?;
         Ok(txid)
     }
-
-    pub async fn pczt_create(
-        &self,
-        account_id: u32,
-        to_address: String,
-        value: u64,
-    ) -> Result<Pczt, Error> {
-        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        self.inner
-            .pczt_create(AccountId::from(account_id), to_address, value)
-            .await
-            .map(Into::into)
-    }
-
-    pub async fn pczt_prove(
-        &self,
-        pczt: Pczt,
-        sapling_proof_gen_key: Option<ProofGenerationKey>,
-    ) -> Result<Pczt, Error> {
-        let pczt_inner = pczt.into();
-        let proof_gen_key = sapling_proof_gen_key.map(Into::into);
-
-        // Record start time
-        let start_time = js_sys::Date::now();
-
-        let result_pczt = self.inner.pczt_prove(pczt_inner, proof_gen_key).await?;
-
-        // Calculate elapsed time in seconds
-        let end_time = js_sys::Date::now();
-        let elapsed_seconds = (end_time - start_time) / 1000.0;
-
-        tracing::info!("⏱️ pczt_prove completed in {:.2} seconds", elapsed_seconds);
-
-        Ok(result_pczt.into())
-    }
-
-    pub async fn pczt_send(&self, pczt: Pczt) -> Result<String, Error> {
-        self.inner.pczt_send(pczt.into()).await
-    }
-
-    // pub fn pczt_combine(&self, pczts: Vec<Pczt>) -> Result<Pczt, Error> {
-    //     self.inner
-    //         .pczt_combine(pczts.into_iter().map(Into::into).collect())
-    //         .map(Into::into)
-    // }
-
-    // pub async fn get_current_address_transparent(&self, account_id: u32) -> Result<String, Error> {
-    //     use zcash_client_backend::data_api::Account;
-    //     use zcash_client_backend::encoding::AddressCodec;
-    //     use zcash_keys::keys::UnifiedAddressRequest;
-
-    //     let db = self.inner.db.read().await;
-    //     let account = db
-    //         .get_account(account_id.into())?
-    //         .ok_or(Error::AccountNotFound(account_id))?;
-
-    //     // Get the unified incoming viewing key from the account
-    //     let uivk = account.uivk();
-
-    //     // Generate the default address (diversifier index 0) with all receivers
-    //     let (address, _) = uivk.default_address(UnifiedAddressRequest::ALLOW_ALL)?;
-
-    //     // Extract the transparent receiver from the unified address
-    //     let transparent_addr = address.transparent().ok_or_else(|| {
-    //         Error::Generic("No transparent receiver in unified address".to_string())
-    //     })?;
-
-    //     Ok(transparent_addr.encode(&self.inner.network))
-    // }
 
     pub async fn get_latest_block(&self) -> Result<u64, Error> {
         self.client()
@@ -838,8 +560,8 @@ pub struct WalletSummary {
 #[wasm_bindgen]
 impl WalletSummary {
     #[wasm_bindgen(getter)]
-    pub fn account_balances(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.account_balances).unwrap()
+    pub fn account_balances(&self) -> Result<JsValue, Error> {
+        serde_wasm_bindgen::to_value(&self.account_balances).map_err(Error::from)
     }
 }
 
@@ -881,24 +603,4 @@ where
             next_orchard_subtree_index: summary.next_orchard_subtree_index(),
         }
     }
-}
-
-#[derive(Serialize)]
-pub struct ProveRequest {
-    pub pczt: String,
-}
-
-#[derive(Deserialize)]
-pub struct ProveResponse {
-    pub proved_pczt: String,
-}
-
-pub async fn send_pczt_to_prove_server(pczt: String) -> Result<ProveResponse, gloo_net::Error> {
-    use gloo_net::http::Request;
-    let resp = Request::post("https://api.ref.finance/proxy/prove")
-        .header("Content-Type", "application/json")
-        .json(&ProveRequest { pczt })?
-        .send()
-        .await?;
-    resp.json::<ProveResponse>().await
 }

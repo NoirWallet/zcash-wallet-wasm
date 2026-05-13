@@ -155,8 +155,6 @@
             </select>
             <label>Lightwalletd URL:</label>
             <input type="text" id="lightwalletdUrl" value="https://zcash-testnet.chainsafe.dev" placeholder="https://zcash-testnet.chainsafe.dev">
-            <label>Min Confirmations:</label>
-            <input type="number" id="minConfirmations" value="1" min="1">
             <button onclick="initWallet()">Initialize Wallet</button>
             <div class="result" id="initResult"></div>
         </div>
@@ -166,7 +164,6 @@
             <h2>2. Generate Mnemonic</h2>
             <label>Word Count:</label>
             <select id="wordCount">
-                <option value="12">12 words</option>
                 <option value="24" selected>24 words</option>
             </select>
             <button onclick="generateMnemonic()">Generate Mnemonic</button>
@@ -182,6 +179,8 @@
             <input type="text" id="accountName" value="My Account" placeholder="My Account">
             <label>Mnemonic (from step 2):</label>
             <textarea id="accountMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
+            <label>BIP39 Passphrase (optional):</label>
+            <input type="password" id="accountPassphrase" placeholder="Leave empty if none">
             <label>Account HD Index:</label>
             <input type="number" id="accountHdIndex" value="0" min="0">
             <label>Birthday Height (optional):</label>
@@ -273,8 +272,10 @@
                     <input type="text" id="toAddress" placeholder="Recipient Zcash address">
                     <label>Amount (zatoshi):</label>
                     <input type="number" id="amount" value="10000" min="1" placeholder="Amount in zatoshi (1 ZEC = 100,000,000 zatoshi)">
-                    <label>Mnemonic for signing:</label>
-                    <textarea id="sendMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
+            <label>Mnemonic for signing:</label>
+            <textarea id="sendMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
+            <label>BIP39 Passphrase (optional):</label>
+            <input type="password" id="sendPassphrase" placeholder="Leave empty if none">
                 </div>
                 <div>
                     <h3>Transaction Steps:</h3>
@@ -287,45 +288,12 @@
             <div class="result" id="sendResult"></div>
         </div>
 
-        <!-- Send Transaction (PCZT Method) -->
-        <div class="section full-width">
-            <h2>6b. Send Transaction (PCZT Method - Faster)</h2>
-            <div class="info" style="margin-bottom: 15px; padding: 10px; background-color: #e3f2fd; border-left: 4px solid #2196f3;">
-                <strong>✨ New PCZT Method</strong><br>
-                Separates transaction creation into steps: Create → Prove → Sign → Send<br>
-                This allows you to see timing for each step separately.<br>
-                <strong>Note:</strong> If you created the account in this session, the mnemonic will be used automatically. Otherwise, enter it below.
-            </div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-                <div>
-                    <label>From Account ID:</label>
-                    <input type="number" id="pcztSendAccountId" value="0" min="0">
-                    <label>To Address:</label>
-                    <input type="text" id="pcztToAddress" placeholder="Recipient Zcash address">
-                    <label>Amount (zatoshi):</label>
-                    <input type="number" id="pcztAmount" value="10000" min="1" placeholder="Amount in zatoshi (1 ZEC = 100,000,000 zatoshi)">
-                    <label>Mnemonic for signing (optional if account was created in this session):</label>
-                    <textarea id="pcztSendMnemonic" rows="3" placeholder="Leave empty to use stored mnemonic, or paste manually"></textarea>
-                </div>
-                <div>
-                    <h3>PCZT Steps:</h3>
-                    <button onclick="pcztTransferCreate()">1. Create PCZT (Fast)</button>
-                    <button onclick="pcztTransferSign()">2. Sign PCZT (Fast)</button>
-                    <button onclick="pcztTransferProve()">3. Prove PCZT (Slow)</button>
-                    <button onclick="pcztTransferSend()">4. Send PCZT</button>
-                    <button onclick="pcztTransferComplete()" style="background-color: #4caf50;">Send (All Steps)</button>
-                </div>
-            </div>
-            <div class="result" id="pcztSendResult"></div>
-        </div>
-
         <!-- One-Click PCZT Transfer -->
         <div class="section full-width">
-            <h2>6c. One-Click PCZT Transfer (Fastest)</h2>
+            <h2>6b. One-Click PCZT Transfer (Fastest)</h2>
             <div class="info" style="margin-bottom: 15px; padding: 10px; background-color: #d4edda; border-left: 4px solid #28a745;">
                 <strong>🚀 Fastest Method - All in One!</strong><br>
                 Combines all PCZT steps (Create → Sign → Prove → Send) into a single call.<br>
-                Optionally uses a remote proving server for faster proving.<br>
                 <strong>Note:</strong> Requires mnemonic for signing.
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
@@ -336,12 +304,12 @@
                     <input type="text" id="oneclickToAddress" placeholder="Recipient Zcash address">
                     <label>Amount (zatoshi):</label>
                     <input type="number" id="oneclickAmount" value="10000" min="1" placeholder="Amount in zatoshi (1 ZEC = 100,000,000 zatoshi)">
+                    <label>Memo (optional, shielded recipients only):</label>
+                    <textarea id="oneclickMemo" rows="2" placeholder="Leave empty for no memo"></textarea>
                     <label>Mnemonic for signing:</label>
                     <textarea id="oneclickMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
-                    <label style="margin-top: 10px;">
-                        <input type="checkbox" id="useProveServer" checked>
-                        Use remote proving server (faster)
-                    </label>
+                    <label>BIP39 Passphrase (optional):</label>
+                    <input type="password" id="oneclickPassphrase" placeholder="Leave empty if none">
                 </div>
                 <div>
                     <h3>Status:</h3>
@@ -390,40 +358,13 @@
             <div class="result" id="hdIndexResult"></div>
         </div>
 
-        <!-- PCZT Shield (Shield Transparent Funds) -->
-        <div class="section">
-            <h2>9. PCZT Shield (Shield Transparent Funds)</h2>
-            <div class="info" style="margin-bottom: 15px; padding: 10px; background-color: #e3f2fd; border-left: 4px solid #2196f3;">
-                <strong>What is PCZT Shield?</strong><br>
-                Shields all transparent funds in an account by moving them to the Orchard shielded pool.
-                This is useful for privacy - transparent transactions are public like Bitcoin, while shielded transactions are private.
-            </div>
-            <label>Account ID:</label>
-            <input type="number" id="shieldAccountId" value="0">
-            <div style="margin-top: 15px;">
-                <h3>PCZT Steps:</h3>
-                <button onclick="pcztShieldPropose()">1. Propose Shield</button>
-                <button onclick="pcztShieldCreate()">2. Create PCZT</button>
-                <button onclick="pcztShieldSign()">3. Sign PCZT (Manual)</button>
-                <button onclick="pcztShieldProve()">4. Prove PCZT</button>
-                <button onclick="pcztShieldSend()">5. Send PCZT</button>
-                <button onclick="pcztShieldComplete()" style="background-color: #4caf50;">Shield (All Steps)</button>
-            </div>
-            <div style="margin-top: 10px;">
-                <label>Mnemonic (for signing):</label>
-                <textarea id="shieldMnemonic" rows="3" placeholder="Paste mnemonic here for signing"></textarea>
-            </div>
-            <div class="result" id="shieldResult"></div>
-        </div>
-
         <!-- One-Click PCZT Shield -->
         <div class="section">
-            <h2>9b. One-Click PCZT Shield (Fastest)</h2>
+            <h2>9. One-Click PCZT Shield (Fastest)</h2>
             <div class="info" style="margin-bottom: 15px; padding: 10px; background-color: #d4edda; border-left: 4px solid #28a745;">
                 <strong>🚀 Fastest Shield Method - All in One!</strong><br>
                 Shields all transparent funds in your account by moving them to the Orchard shielded pool.<br>
                 Combines all PCZT steps (Create → Sign → Prove → Send) into a single call.<br>
-                Optionally uses a remote proving server for faster proving.<br>
                 <strong>Note:</strong> Requires mnemonic for signing. This improves privacy by hiding your funds.
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
@@ -432,10 +373,8 @@
                     <input type="number" id="oneclickShieldAccountId" value="0" min="0">
                     <label>Mnemonic for signing:</label>
                     <textarea id="oneclickShieldMnemonic" rows="3" placeholder="Paste mnemonic here"></textarea>
-                    <label style="margin-top: 10px;">
-                        <input type="checkbox" id="shieldUseProveServer" checked>
-                        Use remote proving server (faster)
-                    </label>
+                    <label>BIP39 Passphrase (optional):</label>
+                    <input type="password" id="oneclickShieldPassphrase" placeholder="Leave empty if none">
                 </div>
                 <div>
                     <h3>Status:</h3>
@@ -450,29 +389,6 @@
             <div class="result" id="oneclickShieldResult"></div>
         </div>
 
-        <!-- Shield Funds (Non-PCZT) -->
-        <div class="section">
-            <h2>10. Shield Funds (Direct Method)</h2>
-            <div class="info" style="margin-bottom: 15px; padding: 10px; background-color: #fff3cd; border-left: 4px solid #ffc107;">
-                <strong>Alternative to PCZT Shield</strong><br>
-                This method shields transparent funds directly without using PCZT format.
-                It creates and broadcasts the shielding transaction in one step.
-                <br><br>
-                <strong>Note:</strong> This method requires your mnemonic phrase to derive spending keys.
-                The keys are only used temporarily in memory and are never stored.
-                <br><br>
-                <strong>Important:</strong> Make sure to use the same mnemonic that was used to create the account.
-                The account HD index is assumed to be 0 (the first account from this seed).
-            </div>
-            <label>Account ID:</label>
-            <input type="number" id="directShieldAccountId" value="0">
-            <div style="margin-top: 10px;">
-                <label>Mnemonic (required for signing):</label>
-                <textarea id="directShieldMnemonic" rows="3" placeholder="Enter your 24-word mnemonic phrase"></textarea>
-            </div>
-            <button onclick="shieldFundsDirect()" style="background-color: #4caf50;">Shield Transparent Funds</button>
-            <div class="result" id="directShieldResult"></div>
-        </div>
     </div>
 
     <script type="module">
@@ -482,7 +398,6 @@
             validate_mnemonic,
             mnemonic_to_spending_key,
             mnemonic_to_seed_fingerprint,
-            pczt_sign,
             initThreadPool
         } from './pkg/zcash_wallet_wasm.js';
 
@@ -490,7 +405,30 @@
         let wallet = null;
         let currentProposal = null;
         let currentTxIds = null;
-        let accountMnemonics = {}; // Store mnemonic for each account: { accountId: mnemonic }
+        let accountMnemonics = {}; // Store signing material for each account: { accountId: { mnemonic, passphrase } }
+
+        function getStoredSigningMaterial(accountId) {
+            const stored = accountMnemonics[accountId];
+            if (!stored) {
+                return null;
+            }
+
+            if (typeof stored === 'string') {
+                return { mnemonic: stored, passphrase: "" };
+            }
+
+            return {
+                mnemonic: stored.mnemonic,
+                passphrase: stored.passphrase || ""
+            };
+        }
+
+        function deriveSigningKeys(network, mnemonic, passphrase, hdIndex) {
+            return {
+                usk: mnemonic_to_spending_key(network, mnemonic, passphrase, hdIndex),
+                seedFp: mnemonic_to_seed_fingerprint(mnemonic, passphrase)
+            };
+        }
 
         // Show loading indicator
         function showLoading(message) {
@@ -585,20 +523,18 @@
             try {
                 const network = document.getElementById('network').value;
                 const lightwalletdUrl = document.getElementById('lightwalletdUrl').value;
-                const minConfirmations = parseInt(document.getElementById('minConfirmations').value);
 
                 if (!lightwalletdUrl) {
                     throw new Error('Please enter lightwalletd URL');
                 }
 
-                wallet = new WebWallet(network, lightwalletdUrl, minConfirmations, null);
+                wallet = new WebWallet(network, lightwalletdUrl, null);
 
                 updateStatus();
                 showResult('initResult',
                     'Wallet initialized successfully!\n' +
                     'Network: ' + network + '\n' +
-                    'Lightwalletd: ' + lightwalletdUrl + '\n' +
-                    'Min Confirmations: ' + minConfirmations,
+                    'Lightwalletd: ' + lightwalletdUrl,
                     'success'
                 );
             } catch (e) {
@@ -636,6 +572,7 @@
 
                 const accountName = document.getElementById('accountName').value;
                 const mnemonic = document.getElementById('accountMnemonic').value.trim();
+                const passphrase = document.getElementById('accountPassphrase').value;
                 const hdIndex = parseInt(document.getElementById('accountHdIndex').value);
                 const birthdayHeightStr = document.getElementById('birthdayHeight').value;
                 const birthdayHeight = birthdayHeightStr ? parseInt(birthdayHeightStr) : null;
@@ -650,15 +587,14 @@
                 // Validate mnemonic
                 validate_mnemonic(mnemonic);
 
-                const accountId = await wallet.create_account(accountName, mnemonic, hdIndex, birthdayHeight);
+                const accountId = await wallet.create_account(accountName, mnemonic, hdIndex, birthdayHeight, passphrase);
 
-                // Store the mnemonic for this account
-                accountMnemonics[accountId] = mnemonic;
-                console.log(`💾 Stored mnemonic for account ${accountId}`);
+                // Store the signing material for this account
+                accountMnemonics[accountId] = { mnemonic, passphrase };
+                console.log(`💾 Stored mnemonic and passphrase for account ${accountId}`);
 
                 document.getElementById('addressAccountId').value = accountId;
                 document.getElementById('sendAccountId').value = accountId;
-                document.getElementById('pcztSendAccountId').value = accountId;
                 document.getElementById('accountStatus').textContent = accountName + ' (ID: ' + accountId + ')';
 
                 showResult('accountResult',
@@ -667,7 +603,8 @@
                     'Account ID: ' + accountId + '\n' +
                     'HD Index: ' + hdIndex +
                     (birthdayHeight ? '\nBirthday Height: ' + birthdayHeight : '') +
-                    '\n✅ Mnemonic stored for PCZT signing',
+                    (passphrase ? '\nBIP39 Passphrase: set' : '\nBIP39 Passphrase: none') +
+                    '\n✅ Signing material stored for PCZT signing',
                     'success'
                 );
             } catch (e) {
@@ -1058,200 +995,7 @@
             }
         };
 
-        // 6b. PCZT Transfer Functions
-        let currentPcztTransfer = null;
-
-        window.pcztTransferCreate = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-
-                const accountId = parseInt(document.getElementById('pcztSendAccountId').value);
-                const toAddress = document.getElementById('pcztToAddress').value.trim();
-                const amount = BigInt(document.getElementById('pcztAmount').value);
-
-                if (!toAddress) {
-                    throw new Error('Please enter recipient address');
-                }
-
-                showResult('pcztSendResult', '⏳ Creating PCZT...', 'info');
-                const startTime = performance.now();
-
-                currentPcztTransfer = await wallet.pczt_create(accountId, toAddress, amount);
-
-                const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-
-                showResult('pcztSendResult',
-                    `✅ Step 1: PCZT created in ${elapsed}s!\n` +
-                    'PCZT object created (not yet proven)\n' +
-                    'Next: Click "2. Sign PCZT"',
-                    'success'
-                );
-            } catch (e) {
-                showResult('pcztSendResult', '❌ Error in step 1: ' + e, 'error');
-            }
-        };
-
-        window.pcztTransferProve = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-
-                if (!currentPcztTransfer) {
-                    throw new Error('Please create and sign PCZT first (steps 1-2)');
-                }
-
-                showResult('pcztSendResult', '⏳ Generating proofs (this will take ~70-80 seconds)...', 'info');
-                const startTime = performance.now();
-
-                console.log('🔐 Generating zero-knowledge proofs...');
-
-                // Prove
-                currentPcztTransfer = await wallet.pczt_prove(currentPcztTransfer);
-
-                const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-
-                showResult('pcztSendResult',
-                    `✅ Step 3: PCZT proven in ${elapsed}s!\n` +
-                    'Zero-knowledge proofs generated\n' +
-                    'Next: Click "4. Send PCZT" to broadcast to network',
-                    'success'
-                );
-            } catch (e) {
-                showResult('pcztSendResult', '❌ Error in step 3: ' + e, 'error');
-            }
-        };
-
-        window.pcztTransferSign = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-
-                if (!currentPcztTransfer) {
-                    throw new Error('Please create PCZT first (step 1)');
-                }
-
-                showResult('pcztSendResult', '⏳ Signing PCZT...', 'info');
-                const startTime = performance.now();
-
-                const network = document.getElementById('network').value;
-                const accountId = parseInt(document.getElementById('pcztSendAccountId').value);
-
-                // Get stored mnemonic
-                let mnemonic = accountMnemonics[accountId];
-                if (!mnemonic) {
-                    mnemonic = document.getElementById('pcztSendMnemonic').value.trim();
-                    if (!mnemonic) {
-                        throw new Error('Please enter mnemonic for signing (no stored mnemonic found for this account)');
-                    }
-                    console.log('⚠️ Using mnemonic from input field (not stored)');
-                } else {
-                    console.log(`✅ Using stored mnemonic for account ${accountId}`);
-                }
-
-                const hdIndex = await wallet.get_account_hd_index(accountId);
-                if (hdIndex === null) {
-                    throw new Error('This account was imported and cannot be signed with a mnemonic. HD index not available.');
-                }
-
-                console.log(`📝 Signing PCZT for account ${accountId}, HD index ${hdIndex}`);
-
-                // Get spending key and seed fingerprint
-                const usk = mnemonic_to_spending_key(
-                    network,
-                    mnemonic,
-                    "",  // passphrase
-                    hdIndex
-                );
-                const seedFp = mnemonic_to_seed_fingerprint(
-                    mnemonic,
-                    ""  // passphrase
-                );
-
-                // Sign 
-                console.log('🔑 Signing PCZT...');
-                currentPcztTransfer = await pczt_sign(network, currentPcztTransfer, usk, seedFp);
-                console.log('✅ PCZT signed successfully');
-
-                // Serialize and print signed PCZT hex
-                const signedPcztBytes = currentPcztTransfer.serialize();
-                const signedPcztHex = Array.from(signedPcztBytes)
-                    .map(b => b.toString(16).padStart(2, '0'))
-                    .join('');
-                console.log('📋 Signed Transfer PCZT Hex:', signedPcztHex);
-                console.log('📏 Signed Transfer PCZT Size:', signedPcztBytes.length, 'bytes');
-
-                const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-
-                showResult('pcztSendResult',
-                    `✅ Step 2: PCZT signed in ${elapsed}s!\n` +
-                    'Signatures added to transaction\n' +
-                    `PCZT size: ${signedPcztBytes.length} bytes\n` +
-                    `PCZT hex: ${signedPcztHex.substring(0, 100)}...\n` +
-                    'Next: Click "3. Prove PCZT" to generate zero-knowledge proofs',
-                    'success'
-                );
-            } catch (e) {
-                showResult('pcztSendResult', '❌ Error in step 2: ' + e, 'error');
-            }
-        };
-
-        window.pcztTransferSend = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-
-                if (!currentPcztTransfer) {
-                    throw new Error('Please create, sign, and prove PCZT first (steps 1-3)');
-                }
-
-                showResult('pcztSendResult', '⏳ Broadcasting transaction...', 'info');
-                const startTime = performance.now();
-
-                await wallet.pczt_send(currentPcztTransfer);
-
-                const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-
-                showResult('pcztSendResult',
-                    `✅ Step 4: Transaction sent in ${elapsed}s!\n` +
-                    'Transaction broadcast to network\n' +
-                    'Your transaction has been submitted!',
-                    'success'
-                );
-
-                currentPcztTransfer = null;
-            } catch (e) {
-                showResult('pcztSendResult', '❌ Error in step 4: ' + e, 'error');
-            }
-        };
-
-        window.pcztTransferComplete = async function() {
-            const totalStartTime = performance.now();
-
-            await pcztTransferCreate();
-            if (currentPcztTransfer) {
-                await pcztTransferSign();
-                if (currentPcztTransfer) {
-                    await pcztTransferProve();
-                    if (currentPcztTransfer) {
-                        await pcztTransferSend();
-
-                        const totalElapsed = ((performance.now() - totalStartTime) / 1000).toFixed(2);
-                        showResult('pcztSendResult',
-                            `🎉 Complete! Total time: ${totalElapsed}s\n` +
-                            'Transaction created, signed, proven, and sent successfully!',
-                            'success'
-                        );
-                    }
-                }
-            }
-        };
-
-        // 6c. One-Click PCZT Transfer
+        // 6b. One-Click PCZT Transfer
         window.oneclickPcztTransfer = async function() {
             try {
                 if (!wallet) {
@@ -1261,8 +1005,10 @@
                 const accountId = parseInt(document.getElementById('oneclickAccountId').value);
                 const toAddress = document.getElementById('oneclickToAddress').value.trim();
                 const amount = BigInt(document.getElementById('oneclickAmount').value);
+                const memoText = document.getElementById('oneclickMemo').value;
+                const memo = memoText ? new TextEncoder().encode(memoText) : null;
                 const mnemonic = document.getElementById('oneclickMnemonic').value.trim();
-                const useProveServer = document.getElementById('useProveServer').checked;
+                const passphrase = document.getElementById('oneclickPassphrase').value;
 
                 if (!toAddress) {
                     throw new Error('Please enter recipient address');
@@ -1288,27 +1034,14 @@
 
                 // Get spending key and seed fingerprint
                 statusDiv.innerHTML += '<br>🔑 Generating spending key and seed fingerprint...';
-                const usk = mnemonic_to_spending_key(
-                    network,
-                    mnemonic,
-                    "",  // passphrase
-                    hdIndex
-                );
-                const seedFp = mnemonic_to_seed_fingerprint(
-                    mnemonic,
-                    ""  // passphrase
-                );
+                const { usk, seedFp } = deriveSigningKeys(network, mnemonic, passphrase, hdIndex);
 
                 // Get Sapling proof generation key
                 statusDiv.innerHTML += '<br>🌱 Getting Sapling proof generation key...';
 
                 // Call one-click transfer
                 statusDiv.innerHTML += '<br>🚀 Executing one-click transfer...';
-                if (useProveServer) {
-                    statusDiv.innerHTML += '<br>🌐 Using remote proving server (faster)...';
-                } else {
-                    statusDiv.innerHTML += '<br>💻 Using local proving (slower, ~70-80s)...';
-                }
+                statusDiv.innerHTML += '<br>💻 Using local proving...';
 
                 const txid = await wallet.oneclick_pczt_transfer(
                     accountId,
@@ -1317,7 +1050,7 @@
                     usk,
                     seedFp,
                     null,
-                    useProveServer
+                    memo
                 );
 
                 const totalElapsed = ((performance.now() - totalStartTime) / 1000).toFixed(2);
@@ -1330,7 +1063,8 @@
                     `From Account: ${accountId}\n` +
                     `To Address: ${toAddress}\n` +
                     `Amount: ${amount} zatoshi\n` +
-                    `Prove Server: ${useProveServer ? 'Remote (faster)' : 'Local'}\n\n` +
+                    `Memo: ${memoText ? 'yes' : 'none'}\n` +
+                    `Proving: Local\n\n` +
                     `✅ Transaction created, signed, proven, and sent in a single call!`,
                     'success'
                 );
@@ -1345,7 +1079,7 @@
             }
         };
 
-        // 9b. One-Click PCZT Shield
+        // 9. One-Click PCZT Shield
         window.oneclickPcztShield = async function() {
             try {
                 if (!wallet) {
@@ -1354,7 +1088,7 @@
 
                 const accountId = parseInt(document.getElementById('oneclickShieldAccountId').value);
                 const mnemonic = document.getElementById('oneclickShieldMnemonic').value.trim();
-                const useProveServer = document.getElementById('shieldUseProveServer').checked;
+                const passphrase = document.getElementById('oneclickShieldPassphrase').value;
 
                 if (!mnemonic) {
                     throw new Error('Please enter mnemonic for signing');
@@ -1377,34 +1111,20 @@
 
                 // Get spending key and seed fingerprint
                 statusDiv.innerHTML += '<br>🔑 Generating spending key and seed fingerprint...';
-                const usk = mnemonic_to_spending_key(
-                    network,
-                    mnemonic,
-                    "",  // passphrase
-                    hdIndex
-                );
-                const seedFp = mnemonic_to_seed_fingerprint(
-                    mnemonic,
-                    ""  // passphrase
-                );
+                const { usk, seedFp } = deriveSigningKeys(network, mnemonic, passphrase, hdIndex);
 
                 // Get Sapling proof generation key
                 statusDiv.innerHTML += '<br>🌱 Getting Sapling proof generation key...';
 
                 // Call one-click shield
                 statusDiv.innerHTML += '<br>🛡️ Executing one-click shield...';
-                if (useProveServer) {
-                    statusDiv.innerHTML += '<br>🌐 Using remote proving server (faster)...';
-                } else {
-                    statusDiv.innerHTML += '<br>💻 Using local proving (slower, ~70-80s)...';
-                }
+                statusDiv.innerHTML += '<br>💻 Using local proving...';
 
                 const txid = await wallet.oneclick_pczt_shield(
                     accountId,
                     usk,
                     seedFp,
-                    null,
-                    useProveServer
+                    null
                 );
 
                 const totalElapsed = ((performance.now() - totalStartTime) / 1000).toFixed(2);
@@ -1415,7 +1135,7 @@
                     `Transaction ID: ${txid}\n` +
                     `Total Time: ${totalElapsed}s\n` +
                     `Account ID: ${accountId}\n` +
-                    `Prove Server: ${useProveServer ? 'Remote (faster)' : 'Local'}\n\n` +
+                    `Proving: Local\n\n` +
                     `✅ All transparent funds have been shielded!\n` +
                     `Your funds are now private in the Orchard shielded pool.\n\n` +
                     `Transaction created, signed, proven, and sent in a single call!`,
@@ -1472,9 +1192,8 @@
 
                 const network = document.getElementById('network').value;
                 const lightwalletdUrl = document.getElementById('lightwalletdUrl').value;
-                const minConfirmations = parseInt(document.getElementById('minConfirmations').value);
 
-                wallet = new WebWallet(network, lightwalletdUrl, minConfirmations, bytes);
+                wallet = new WebWallet(network, lightwalletdUrl, bytes);
 
                 updateStatus();
                 showResult('saveLoadResult',
@@ -1537,324 +1256,6 @@
                 }
             } catch (e) {
                 showResult('hdIndexResult', 'Error: ' + e, 'error');
-            }
-        };
-
-        // 9. PCZT Shield Functions
-        let currentShieldPczt = null;
-
-        window.pcztShieldPropose = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-
-                const accountId = parseInt(document.getElementById('shieldAccountId').value);
-
-                showResult('shieldResult', 'Checking transparent balance...', 'info');
-
-                // Get transparent balance to show user
-                const summary = await wallet.get_wallet_summary();
-
-                if (!summary) {
-                    throw new Error('No wallet summary available. Please sync wallet first.');
-                }
-
-                // account_balances is an array of [accountId, balance] pairs
-                const balances = summary.account_balances;
-                let accountBalance = null;
-
-                // Find the account in the array
-                for (let i = 0; i < balances.length; i++) {
-                    if (balances[i][0] === accountId) {
-                        accountBalance = balances[i][1];
-                        break;
-                    }
-                }
-
-                if (!accountBalance) {
-                    throw new Error('Account not found. Make sure the account exists and wallet is synced.');
-                }
-
-                const transparentBalance = accountBalance.unshielded_balance;
-                const saplingBalance = accountBalance.sapling_balance;
-                const orchardBalance = accountBalance.orchard_balance;
-
-                // Convert to BigInt for accurate addition
-                const totalBalance = BigInt(transparentBalance) + BigInt(saplingBalance) + BigInt(orchardBalance);
-
-                showResult('shieldResult',
-                    '✓ Proposal created\n\n' +
-                    'Account ID: ' + accountId + '\n' +
-                    'Transparent Balance: ' + transparentBalance + ' zatoshis (' + (Number(transparentBalance) / 100000000).toFixed(8) + ' ZEC)\n' +
-                    'Sapling Balance: ' + saplingBalance + ' zatoshis (' + (Number(saplingBalance) / 100000000).toFixed(8) + ' ZEC)\n' +
-                    'Orchard Balance: ' + orchardBalance + ' zatoshis (' + (Number(orchardBalance) / 100000000).toFixed(8) + ' ZEC)\n' +
-                    'Total Balance: ' + totalBalance + ' zatoshis (' + (Number(totalBalance) / 100000000).toFixed(8) + ' ZEC)\n\n' +
-                    'Target Pool: Orchard (shielded)\n' +
-                    'Minimum Threshold: 100,000 zatoshis (0.001 ZEC)\n' +
-                    (Number(transparentBalance) >= 100000 ?
-                        '✓ Sufficient balance for shielding\n\n' :
-                        '⚠ Warning: Balance below minimum threshold\n\n') +
-                    'Next: Click "2. Create PCZT" to create the shielding transaction',
-                    Number(transparentBalance) >= 100000 ? 'success' : 'info'
-                );
-            } catch (e) {
-                showResult('shieldResult', 'Error: ' + e, 'error');
-            }
-        };
-
-        window.pcztShieldCreate = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-
-                const accountId = parseInt(document.getElementById('shieldAccountId').value);
-
-                showResult('shieldResult', 'Creating PCZT for shielding...', 'info');
-
-                currentShieldPczt = await wallet.pczt_shield(accountId);
-
-                const pcztBytes = currentShieldPczt.serialize();
-                const pcztHex = Array.from(pcztBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-
-                showResult('shieldResult',
-                    '✓ PCZT created successfully\n\n' +
-                    'PCZT Size: ' + pcztBytes.length + ' bytes\n' +
-                    'PCZT (hex): ' + pcztHex.substring(0, 100) + '...\n\n' +
-                    'Next: Click "3. Sign PCZT" (requires mnemonic) or "4. Prove PCZT" if already signed',
-                    'success'
-                );
-            } catch (e) {
-                showResult('shieldResult', 'Error: ' + e, 'error');
-                console.error('Full error:', e);
-            }
-        };
-
-        window.pcztShieldSign = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-                if (!currentShieldPczt) {
-                    throw new Error('Please create PCZT first (step 2)');
-                }
-
-                showResult('shieldResult', '⏳ Signing PCZT...', 'info');
-                const startTime = performance.now();
-
-                // Get account info
-                const accountId = parseInt(document.getElementById('shieldAccountId').value);
-
-                // Try to get stored mnemonic first, fallback to input field
-                let mnemonic = accountMnemonics[accountId];
-                if (!mnemonic) {
-                    mnemonic = document.getElementById('shieldMnemonic').value.trim();
-                    if (!mnemonic) {
-                        throw new Error('Please enter mnemonic for signing (no stored mnemonic found for this account)');
-                    }
-                    console.log('⚠️ Using mnemonic from input field for shield signing (not stored)');
-                } else {
-                    console.log(`✅ Using stored mnemonic for shield signing account ${accountId}`);
-                }
-
-                const hdIndex = await wallet.get_account_hd_index(accountId);
-                if (hdIndex === null) {
-                    throw new Error('This account was imported and cannot be signed with a mnemonic. HD index not available.');
-                }
-
-                console.log(`📝 Signing shield PCZT for account ${accountId}, HD index ${hdIndex}`);
-
-                // Get spending key and seed fingerprint from mnemonic using the correct HD index
-                const network = document.getElementById('network').value;
-                const usk = mnemonic_to_spending_key(
-                    network,
-                    mnemonic,
-                    "",  // passphrase (empty string)
-                    hdIndex
-                );
-                const seedFp = mnemonic_to_seed_fingerprint(
-                    mnemonic,
-                    ""  // passphrase (empty string)
-                );
-
-                // Sign
-                console.log('🔑 Calling pczt_sign for shield...');
-                currentShieldPczt = await pczt_sign(network, currentShieldPczt, usk, seedFp);
-                console.log('✅ Shield PCZT signed successfully');
-
-                // Serialize and print signed PCZT hex
-                const signedPcztBytes = currentShieldPczt.serialize();
-                const signedPcztHex = Array.from(signedPcztBytes)
-                    .map(b => b.toString(16).padStart(2, '0'))
-                    .join('');
-                console.log('📋 Signed Shield PCZT Hex:', signedPcztHex);
-                console.log('📏 Signed Shield PCZT Size:', signedPcztBytes.length, 'bytes');
-
-                const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-
-                showResult('shieldResult',
-                    `✅ PCZT signed in ${elapsed}s!\n` +
-                    'Signatures added to shield transaction\n' +
-                    `PCZT size: ${signedPcztBytes.length} bytes\n` +
-                    `PCZT hex: ${signedPcztHex.substring(0, 100)}...\n` +
-                    'Next: Click "4. Prove PCZT" to generate proofs',
-                    'success'
-                );
-            } catch (e) {
-                showResult('shieldResult', 'Error: ' + e, 'error');
-            }
-        };
-
-        window.pcztShieldProve = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-                if (!currentShieldPczt) {
-                    throw new Error('Please create PCZT first (step 2)');
-                }
-
-                showResult('shieldResult', 'Generating zero-knowledge proofs...', 'info');
-
-                currentShieldPczt = await wallet.pczt_prove(currentShieldPczt);
-
-                showResult('shieldResult',
-                    '✓ Proofs generated successfully\n\n' +
-                    'The PCZT now contains valid zero-knowledge proofs\n' +
-                    'Next: Click "5. Send PCZT" to broadcast to network',
-                    'success'
-                );
-            } catch (e) {
-                showResult('shieldResult', 'Error: ' + e, 'error');
-                console.error('Full error:', e);
-            }
-        };
-
-        window.pcztShieldSend = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-                if (!currentShieldPczt) {
-                    throw new Error('Please create and prove PCZT first');
-                }
-
-                showResult('shieldResult', 'Broadcasting transaction to network...', 'info');
-
-                await wallet.pczt_send(currentShieldPczt);
-
-                showResult('shieldResult',
-                    '✓ Transaction sent successfully!\n\n' +
-                    'Your transparent funds are now being shielded.\n' +
-                    'The transaction has been broadcast to the Zcash network.\n' +
-                    'Sync your wallet to see the updated balance.',
-                    'success'
-                );
-
-                currentShieldPczt = null;
-            } catch (e) {
-                showResult('shieldResult', 'Error: ' + e, 'error');
-                console.error('Full error:', e);
-            }
-        };
-
-        window.pcztShieldComplete = async function() {
-            try {
-                showResult('shieldResult', 'Starting complete shield process...', 'info');
-
-                await pcztShieldPropose();
-                await new Promise(resolve => setTimeout(resolve, 1000));
-
-                await pcztShieldCreate();
-                if (!currentShieldPczt) return;
-                await new Promise(resolve => setTimeout(resolve, 1000));
-
-                // Note: Signing step skipped in automated flow
-                // In production, you'd integrate with a key management system
-                showResult('shieldResult',
-                    'Note: Automated signing not yet implemented.\n' +
-                    'Please use individual steps (1-5) for manual signing.\n\n' +
-                    'For automated flow, integration with hardware wallet or\n' +
-                    'secure key management is required.',
-                    'info'
-                );
-
-                // Uncomment when signing is implemented:
-                // await pcztShieldProve();
-                // if (!currentShieldPczt) return;
-                // await new Promise(resolve => setTimeout(resolve, 1000));
-                //
-                // await pcztShieldSend();
-
-            } catch (e) {
-                showResult('shieldResult', 'Error: ' + e, 'error');
-            }
-        };
-
-        // 10. Shield Funds Direct (Non-PCZT)
-        window.shieldFundsDirect = async function() {
-            try {
-                if (!wallet) {
-                    throw new Error('Please initialize wallet first');
-                }
-
-                const accountId = parseInt(document.getElementById('directShieldAccountId').value);
-                const mnemonic = document.getElementById('directShieldMnemonic').value.trim();
-
-                if (!mnemonic) {
-                    throw new Error('Please enter your mnemonic phrase');
-                }
-
-                // Validate mnemonic
-                try {
-                    validate_mnemonic(mnemonic);
-                } catch (e) {
-                    throw new Error('Invalid mnemonic phrase');
-                }
-
-                showResult('directShieldResult',
-                    'Shielding transparent funds...\n\n' +
-                    '1. Deriving spending keys from mnemonic\n' +
-                    '2. Creating shielding proposal\n' +
-                    '3. Building transaction\n' +
-                    '4. Generating zero-knowledge proofs (this may take 10-30 seconds)\n' +
-                    '5. Broadcasting to network\n\n' +
-                    'Please wait...',
-                    'info'
-                );
-
-                // Get network from wallet
-                const network = document.getElementById('network').value;
-
-                // Derive UnifiedSpendingKey from mnemonic
-                // account_hd_index should match the index used when creating the account
-                // For most cases, this is 0 for the first account
-                const accountHdIndex = 0; // TODO: This should be stored with the account
-                const usk = mnemonic_to_spending_key(
-                    network,
-                    mnemonic,
-                    "",  // passphrase (empty string)
-                    accountHdIndex
-                );
-
-                const txids = await wallet.shield_funds(accountId, usk);
-
-                showResult('directShieldResult',
-                    '✓ Transparent funds shielded successfully!\n\n' +
-                    'Transaction ID(s):\n' + JSON.stringify(txids, null, 2) + '\n\n' +
-                    'Your transparent funds have been moved to the Orchard shielded pool.\n' +
-                    'The transaction has been broadcast to the network.\n\n' +
-                    'Wait 1-2 minutes for confirmation, then sync your wallet to see the updated balance.',
-                    'success'
-                );
-
-                // Clear mnemonic for security
-                document.getElementById('directShieldMnemonic').value = '';
-
-            } catch (e) {
-                showResult('directShieldResult', 'Error: ' + e, 'error');
-                console.error('Full error:', e);
             }
         };
 

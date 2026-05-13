@@ -101,7 +101,7 @@ impl PaymentRequest {
         self.0.message().cloned()
     }
 
-    pub fn other_params(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.0.other_params()).unwrap()
+    pub fn other_params(&self) -> Result<JsValue, Error> {
+        serde_wasm_bindgen::to_value(&self.0.other_params()).map_err(Error::from)
     }
 }

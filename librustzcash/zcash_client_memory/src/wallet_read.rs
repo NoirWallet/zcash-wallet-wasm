@@ -801,17 +801,59 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
     }
 
     #[cfg(feature = "transparent-inputs")]
-    fn utxo_query_height(&self, _account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
-        // Return the height of the first block in the wallet, or a default starting height
-        // This tells the wallet to query for transparent UTXOs starting from the earliest
-        // block we've scanned. For a more sophisticated implementation, this should track
-        // transparent address usage and gaps similar to zcash_client_sqlite.
-        Ok(self
-            .blocks
-            .keys()
-            .next()
-            .copied()
-            .unwrap_or_else(|| BlockHeight::from_u32(0)))
+    fn utxo_query_height(&self, account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
+        // This memory backend does not track transparent address usage history, so the
+        // conservative lower bound is the account birthday. This avoids missing UTXOs for
+        // accounts imported after the wallet has already scanned later blocks.
+        self.get_account_birthday(account)
+    }
+}
+
+#[cfg(all(test, feature = "transparent-inputs"))]
+mod tests {
+    use secrecy::SecretVec;
+    use zcash_client_backend::data_api::{
+        chain::ChainState, testing::TestBuilder, AccountBirthday, WalletRead, WalletWrite,
+    };
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::consensus::BlockHeight;
+
+    use crate::{Error, MemoryWalletDb};
+
+    #[test]
+    fn utxo_query_height_uses_account_birthday() {
+        let network = TestBuilder::DEFAULT_NETWORK;
+        let mut wallet = MemoryWalletDb::new(network, 100);
+        let seed = SecretVec::new(vec![7; 32]);
+
+        let early_birthday = AccountBirthday::from_parts(
+            ChainState::empty(BlockHeight::from_u32(119_999), BlockHash([0; 32])),
+            None,
+        );
+        let late_birthday = AccountBirthday::from_parts(
+            ChainState::empty(BlockHeight::from_u32(149_999), BlockHash([1; 32])),
+            None,
+        );
+
+        let (early_account, _) = wallet
+            .create_account("early", &seed, &early_birthday, None)
+            .unwrap();
+        let (late_account, _) = wallet
+            .create_account("late", &seed, &late_birthday, None)
+            .unwrap();
+
+        assert_eq!(
+            wallet.utxo_query_height(early_account).unwrap(),
+            early_birthday.height()
+        );
+        assert_eq!(
+            wallet.utxo_query_height(late_account).unwrap(),
+            late_birthday.height()
+        );
+        assert!(matches!(
+            wallet.utxo_query_height(999.into()),
+            Err(Error::AccountUnknown(id)) if id == 999.into()
+        ));
     }
 }
 

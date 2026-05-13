@@ -3,6 +3,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::Network;
 use crate::error::Error;
+use secrecy::Zeroize;
 use zcash_primitives::zip32::AccountId;
 
 #[wasm_bindgen]
@@ -12,11 +13,12 @@ pub struct SeedFingerprint {
 #[wasm_bindgen]
 impl SeedFingerprint {
     #[wasm_bindgen(constructor)]
-    pub fn new(seed: Box<[u8]>) -> Result<SeedFingerprint, Error> {
-        Ok(Self {
-            inner: zip32::fingerprint::SeedFingerprint::from_seed(&seed)
-                .ok_or(Error::SeedFingerprint)?,
-        })
+    pub fn new(mut seed: Box<[u8]>) -> Result<SeedFingerprint, Error> {
+        let result = zip32::fingerprint::SeedFingerprint::from_seed(&seed)
+            .ok_or(Error::SeedFingerprint)
+            .map(|inner| Self { inner });
+        seed.zeroize();
+        result
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -76,15 +78,18 @@ impl UnifiedSpendingKey {
     /// * `hd_index` - [ZIP32](https://zips.z.cash/zip-0032) hierarchical deterministic index of the account
     ///
     #[wasm_bindgen(constructor)]
-    pub fn new(network: &str, seed: Box<[u8]>, hd_index: u32) -> Result<UnifiedSpendingKey, Error> {
+    pub fn new(
+        network: &str,
+        mut seed: Box<[u8]>,
+        hd_index: u32,
+    ) -> Result<UnifiedSpendingKey, Error> {
         let network = Network::from_str(network)?;
-        Ok(Self {
-            inner: zcash_keys::keys::UnifiedSpendingKey::from_seed(
-                &network,
-                &seed,
-                AccountId::try_from(hd_index)?,
-            )?,
-        })
+        let account_id = AccountId::try_from(hd_index)?;
+        let result = zcash_keys::keys::UnifiedSpendingKey::from_seed(&network, &seed, account_id)
+            .map(|inner| Self { inner })
+            .map_err(Error::from);
+        seed.zeroize();
+        result
     }
 
     /// Obtain the UFVK corresponding to this spending key
@@ -180,13 +185,6 @@ impl UnifiedSpendingKey {
 
     //     Ok(bs58::encode(data).into_string())
     // }
-}
-
-impl UnifiedSpendingKey {
-    /// Get a reference to the inner UnifiedSpendingKey
-    pub(crate) fn as_inner(&self) -> &zcash_keys::keys::UnifiedSpendingKey {
-        &self.inner
-    }
 }
 
 impl From<UnifiedSpendingKey> for zcash_keys::keys::UnifiedSpendingKey {
