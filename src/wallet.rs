@@ -359,7 +359,10 @@ where
     ///
     /// This method handles step 1: network operations + data capture.
     /// Returns None if fully synced, Some(journal_bytes) with captured data.
-    pub async fn prepare_sync_batch(&self, batch_size: Option<u32>) -> Result<Option<Vec<u8>>, Error> {
+    pub async fn prepare_sync_batch(
+        &self,
+        batch_size: Option<u32>,
+    ) -> Result<Option<Vec<u8>>, Error> {
         use prost::Message;
         use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
         use zcash_client_backend::proto::compact_formats::CompactBlock;
@@ -386,6 +389,10 @@ where
         db.update_chain_tip(tip_height)
             .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
 
+        // 2.5. Refresh transparent UTXOs for all accounts
+        self.refresh_transparent_utxos_for_all_accounts(&mut client, &mut *db)
+            .await?;
+
         // 3. Handle verify-priority ranges inline (not journaled, they're small)
         {
             let db_cache = MemBlockCache::new();
@@ -395,8 +402,13 @@ where
                     .map_err(|e| Error::Generic(format!("{e}")))?;
                 match scan_ranges.first() {
                     Some(scan_range) if scan_range.priority() == ScanPriority::Verify => {
-                        Self::download_and_insert_blocks(&mut client, &db_cache, scan_range).await?;
-                        let chain_state = Self::fetch_chain_state(&mut client, scan_range.block_range().start - 1).await?;
+                        Self::download_and_insert_blocks(&mut client, &db_cache, scan_range)
+                            .await?;
+                        let chain_state = Self::fetch_chain_state(
+                            &mut client,
+                            scan_range.block_range().start - 1,
+                        )
+                        .await?;
                         zcash_client_backend::data_api::chain::scan_cached_blocks(
                             &self.network,
                             &db_cache,
@@ -404,8 +416,12 @@ where
                             scan_range.block_range().start,
                             &chain_state,
                             scan_range.len(),
-                        ).map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
-                        db_cache.delete(scan_range.clone()).await.map_err(|e| Error::Generic(format!("{e}")))?;
+                        )
+                        .map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
+                        db_cache
+                            .delete(scan_range.clone())
+                            .await
+                            .map_err(|e| Error::Generic(format!("{e}")))?;
                     }
                     _ => break,
                 }
@@ -413,14 +429,18 @@ where
         }
 
         // 4. Get next scan range
-        let scan_ranges = db.suggest_scan_ranges().map_err(|e| Error::Generic(format!("{e}")))?;
+        let scan_ranges = db
+            .suggest_scan_ranges()
+            .map_err(|e| Error::Generic(format!("{e}")))?;
         let first_batch = scan_ranges
             .into_iter()
             .flat_map(|r| {
                 (0..).scan(r, |acc, _| {
                     if acc.is_empty() {
                         None
-                    } else if let Some((cur, next)) = acc.split_at(acc.block_range().start + batch_size) {
+                    } else if let Some((cur, next)) =
+                        acc.split_at(acc.block_range().start + batch_size)
+                    {
                         *acc = next;
                         Some(cur)
                     } else {
@@ -444,7 +464,10 @@ where
         let mut end_id = service::BlockId::default();
         end_id.height = (scan_range.block_range().end - 1).into();
         let compact_blocks: Vec<CompactBlock> = client
-            .get_block_range(service::BlockRange { start: Some(start_id), end: Some(end_id) })
+            .get_block_range(service::BlockRange {
+                start: Some(start_id),
+                end: Some(end_id),
+            })
             .await
             .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
             .into_inner()
@@ -454,7 +477,10 @@ where
 
         // 6. Download tree state for range.start - 1
         let tree_state_proto = client
-            .get_tree_state(BlockId { height: (scan_range.block_range().start - 1).into(), hash: vec![] })
+            .get_tree_state(BlockId {
+                height: (scan_range.block_range().start - 1).into(),
+                hash: vec![],
+            })
             .await
             .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
             .into_inner();
@@ -482,8 +508,13 @@ where
 
         // 8. Now scan the blocks we just downloaded
         let db_cache = MemBlockCache::new();
-        db_cache.insert(compact_blocks).await.map_err(|e| Error::Generic(format!("{e}")))?;
-        let chain_state = tree_state_proto.to_chain_state().map_err(|e| Error::Generic(format!("{e}")))?;
+        db_cache
+            .insert(compact_blocks)
+            .await
+            .map_err(|e| Error::Generic(format!("{e}")))?;
+        let chain_state = tree_state_proto
+            .to_chain_state()
+            .map_err(|e| Error::Generic(format!("{e}")))?;
         zcash_client_backend::data_api::chain::scan_cached_blocks(
             &self.network,
             &db_cache,
@@ -491,7 +522,8 @@ where
             scan_range.block_range().start,
             &chain_state,
             scan_range.len(),
-        ).map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
+        )
+        .map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
 
         Ok(Some(journal_data))
     }
@@ -507,12 +539,9 @@ where
             return Err(Error::Generic("Journal data too short".into()));
         }
 
-        let range_start =
-            u32::from_le_bytes(journal_data[0..4].try_into().unwrap());
-        let range_end =
-            u32::from_le_bytes(journal_data[4..8].try_into().unwrap());
-        let ts_len =
-            u32::from_le_bytes(journal_data[8..12].try_into().unwrap()) as usize;
+        let range_start = u32::from_le_bytes(journal_data[0..4].try_into().unwrap());
+        let range_end = u32::from_le_bytes(journal_data[4..8].try_into().unwrap());
+        let ts_len = u32::from_le_bytes(journal_data[8..12].try_into().unwrap()) as usize;
 
         if journal_data.len() < 12 + ts_len {
             return Err(Error::Generic("Journal data truncated (tree state)".into()));
@@ -521,9 +550,8 @@ where
         let tree_state_bytes = &journal_data[12..12 + ts_len];
         let blocks_data = &journal_data[12 + ts_len..];
 
-        let tree_state_proto =
-            service::TreeState::decode(tree_state_bytes)
-                .map_err(|e| Error::Generic(format!("Failed to decode TreeState: {e}")))?;
+        let tree_state_proto = service::TreeState::decode(tree_state_bytes)
+            .map_err(|e| Error::Generic(format!("Failed to decode TreeState: {e}")))?;
         let chain_state = tree_state_proto
             .to_chain_state()
             .map_err(|e| Error::Generic(format!("Failed to parse ChainState: {e}")))?;
@@ -568,9 +596,7 @@ where
         let remaining = db
             .suggest_scan_ranges()
             .map_err(|e| Error::Generic(format!("{e}")))?;
-        let has_more = remaining
-            .iter()
-            .any(|r| !r.is_empty());
+        let has_more = remaining.iter().any(|r| !r.is_empty());
 
         Ok(has_more)
     }
@@ -687,6 +713,42 @@ where
             .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
         db.put_orchard_subtree_roots(0, &orchard_roots)
             .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn refresh_transparent_utxos_for_all_accounts(
+        &self,
+        client: &mut CompactTxStreamerClient<T>,
+        db: &mut W,
+    ) -> Result<(), Error> {
+        let account_ids = db
+            .get_account_ids()
+            .map_err(|e| Error::Generic(format!("Failed to get account IDs: {e}")))?;
+
+        for account_id in account_ids {
+            let start_height = db
+                .utxo_query_height(account_id)
+                .map_err(|e| Error::Generic(format!("Failed to get UTXO query height: {e}")))?;
+
+            tracing::info!(
+                "Refreshing UTXOs for {:?} from height {}",
+                account_id,
+                start_height,
+            );
+
+            zcash_client_backend::sync::refresh_utxos(
+                &self.network,
+                client,
+                db,
+                account_id,
+                start_height,
+            )
+            .await
+            .map_err(|e: zcash_client_backend::sync::Error<(), _, ()>| {
+                Error::Generic(format!("Failed to refresh UTXOs: {e:?}"))
+            })?;
+        }
 
         Ok(())
     }

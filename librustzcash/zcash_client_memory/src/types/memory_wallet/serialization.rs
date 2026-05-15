@@ -763,9 +763,13 @@ unsafe impl<F: FnMut(&[u8])> BufMut for ChunkedWriter<F> {
         if spare.is_empty() {
             self.buf.reserve(self.flush_threshold);
             let spare = self.buf.spare_capacity_mut();
-            unsafe { bytes::buf::UninitSlice::from_raw_parts_mut(spare.as_mut_ptr().cast(), spare.len()) }
+            unsafe {
+                bytes::buf::UninitSlice::from_raw_parts_mut(spare.as_mut_ptr().cast(), spare.len())
+            }
         } else {
-            unsafe { bytes::buf::UninitSlice::from_raw_parts_mut(spare.as_mut_ptr().cast(), spare.len()) }
+            unsafe {
+                bytes::buf::UninitSlice::from_raw_parts_mut(spare.as_mut_ptr().cast(), spare.len())
+            }
         }
     }
 

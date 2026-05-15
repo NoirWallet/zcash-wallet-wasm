@@ -599,7 +599,7 @@ where
 ///
 /// [a comment in the Android SDK]: https://github.com/Electric-Coin-Company/zcash-android-wallet-sdk/blob/855204fc8ae4057fdac939f98df4aa38c8e662f1/sdk-lib/src/main/java/cash/z/ecc/android/sdk/block/processor/CompactBlockProcessor.kt#L979-L991
 #[cfg(feature = "transparent-inputs")]
-async fn refresh_utxos<P, ChT, DbT, CaErr, TrErr>(
+pub async fn refresh_utxos<P, ChT, DbT, CaErr, TrErr>(
     params: &P,
     client: &mut CompactTxStreamerClient<ChT>,
     db_data: &mut DbT,

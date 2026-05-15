@@ -219,7 +219,10 @@ impl WebWallet {
 
     /// Journal-aware sync: download + scan one batch, return journal data for persistence.
     /// Returns null if fully synced, or Uint8Array with journal entry data.
-    pub async fn prepare_sync_batch(&self, batch_size: Option<u32>) -> Result<Option<Box<[u8]>>, Error> {
+    pub async fn prepare_sync_batch(
+        &self,
+        batch_size: Option<u32>,
+    ) -> Result<Option<Box<[u8]>>, Error> {
         let start_time = js_sys::Date::now();
 
         let result = self.inner.prepare_sync_batch(batch_size).await?;
@@ -234,7 +237,10 @@ impl WebWallet {
                 );
             }
             None => {
-                tracing::info!("⏱️ prepare_sync_batch: fully synced ({:.2}s)", elapsed_seconds);
+                tracing::info!(
+                    "⏱️ prepare_sync_batch: fully synced ({:.2}s)",
+                    elapsed_seconds
+                );
             }
         }
 
@@ -259,7 +265,10 @@ impl WebWallet {
     }
 
     /// Replay multiple journal entries in sequence (for recovery).
-    pub async fn replay_journal_entries(&self, entries: Vec<js_sys::Uint8Array>) -> Result<(), Error> {
+    pub async fn replay_journal_entries(
+        &self,
+        entries: Vec<js_sys::Uint8Array>,
+    ) -> Result<(), Error> {
         let entries: Vec<Vec<u8>> = entries.iter().map(|e| e.to_vec()).collect();
 
         let start_time = js_sys::Date::now();
