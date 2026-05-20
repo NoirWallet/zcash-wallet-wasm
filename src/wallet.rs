@@ -359,6 +359,43 @@ where
     ///
     /// This method handles step 1: network operations + data capture.
     /// Returns None if fully synced, Some(journal_bytes) with captured data.
+    fn scan_with_reorg_handling<CaT: zcash_client_backend::data_api::chain::BlockCache>(
+        network: &crate::Network,
+        db_cache: &CaT,
+        db: &mut W,
+        start_height: zcash_protocol::consensus::BlockHeight,
+        chain_state: &zcash_client_backend::data_api::chain::ChainState,
+        limit: usize,
+    ) -> Result<bool, Error>
+    where
+        CaT::Error: std::fmt::Display + Send,
+    {
+        use zcash_client_backend::data_api::chain::error::Error as ChainError;
+
+        match zcash_client_backend::data_api::chain::scan_cached_blocks(
+            network,
+            db_cache,
+            db,
+            start_height,
+            chain_state,
+            limit,
+        ) {
+            Ok(_) => Ok(false),
+            Err(ChainError::Scan(ref scan_err)) if scan_err.is_continuity_error() => {
+                let rewind_height = scan_err.at_height().saturating_sub(10);
+                tracing::warn!(
+                    "Chain reorg detected at {}, rewinding to {}",
+                    scan_err.at_height(),
+                    rewind_height,
+                );
+                db.truncate_to_height(rewind_height)
+                    .map_err(|e| Error::Generic(format!("Truncate failed: {e}")))?;
+                Ok(true)
+            }
+            Err(e) => Err(Error::Generic(format!("Scan error: {e}"))),
+        }
+    }
+
     pub async fn prepare_sync_batch(
         &self,
         batch_size: Option<u32>,
@@ -409,19 +446,21 @@ where
                             scan_range.block_range().start - 1,
                         )
                         .await?;
-                        zcash_client_backend::data_api::chain::scan_cached_blocks(
+                        let rewound = Self::scan_with_reorg_handling(
                             &self.network,
                             &db_cache,
                             &mut *db,
                             scan_range.block_range().start,
                             &chain_state,
                             scan_range.len(),
-                        )
-                        .map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
+                        )?;
                         db_cache
                             .delete(scan_range.clone())
                             .await
                             .map_err(|e| Error::Generic(format!("{e}")))?;
+                        if rewound {
+                            continue;
+                        }
                     }
                     _ => break,
                 }
@@ -506,7 +545,7 @@ where
         journal_data.extend_from_slice(&tree_state_bytes);
         journal_data.extend_from_slice(&blocks_bytes);
 
-        // 8. Now scan the blocks we just downloaded
+        // 8. Now scan the blocks we just downloaded (with reorg handling)
         let db_cache = MemBlockCache::new();
         db_cache
             .insert(compact_blocks)
@@ -515,15 +554,17 @@ where
         let chain_state = tree_state_proto
             .to_chain_state()
             .map_err(|e| Error::Generic(format!("{e}")))?;
-        zcash_client_backend::data_api::chain::scan_cached_blocks(
+        let rewound = Self::scan_with_reorg_handling(
             &self.network,
             &db_cache,
             &mut *db,
             scan_range.block_range().start,
             &chain_state,
             scan_range.len(),
-        )
-        .map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
+        )?;
+        if rewound {
+            return Ok(None);
+        }
 
         Ok(Some(journal_data))
     }
@@ -582,15 +623,17 @@ where
         let block_count = (range_end - range_start) as usize;
 
         let mut db = self.db.write().await;
-        zcash_client_backend::data_api::chain::scan_cached_blocks(
+        let rewound = Self::scan_with_reorg_handling(
             &self.network,
             &db_cache,
             &mut *db,
             from_height,
             &chain_state,
             block_count,
-        )
-        .map_err(|e| Error::Generic(format!("Scan error: {e}")))?;
+        )?;
+        if rewound {
+            return Ok(true);
+        }
 
         // Check if more work remains
         let remaining = db
