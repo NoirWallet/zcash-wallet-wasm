@@ -665,9 +665,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_3353: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_3352: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_7188: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_3361: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_3360: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_7196: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

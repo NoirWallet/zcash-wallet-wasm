@@ -296,7 +296,8 @@ pub fn sign_message_with_transparent(
     use secp256k1::{Message as Secp256k1Message, Secp256k1, SecretKey};
     use serde::{Deserialize, Serialize};
     use zcash_client_backend::encoding::AddressCodec;
-    use zcash_primitives::legacy::keys::{IncomingViewingKey, NonHardenedChildIndex};
+    use zcash_keys::keys::UnifiedAddressRequest;
+    use zcash_primitives::legacy::keys::NonHardenedChildIndex;
 
     #[derive(Serialize, Deserialize)]
     struct SignatureResult {
@@ -308,24 +309,30 @@ pub fn sign_message_with_transparent(
     let net = Network::from_str(network)?;
     let usk_inner: zcash_keys::keys::UnifiedSpendingKey = usk.into();
 
-    // Get transparent private key
-    let transparent_key = usk_inner.transparent();
+    let ufvk = usk_inner.to_unified_full_viewing_key();
+    let uivk = ufvk.to_unified_incoming_viewing_key();
 
-    // Derive the external address at index 0 (default receiving address)
-    let address_index = NonHardenedChildIndex::ZERO;
+    let (ua, diversifier_idx) = uivk
+        .default_address(UnifiedAddressRequest::AllAvailableKeys)
+        .map_err(|e| Error::Generic(format!("Failed to derive default address: {:?}", e)))?;
+
+    let address_obj = ua
+        .transparent()
+        .ok_or_else(|| Error::Generic("No transparent receiver in unified address".into()))?;
+    let address_str = address_obj.encode(&net);
+
+    let transparent_j = u32::from_le_bytes(
+        diversifier_idx.as_bytes()[..4]
+            .try_into()
+            .map_err(|_| Error::Generic("Invalid diversifier index".into()))?,
+    );
+    let address_index = NonHardenedChildIndex::from_index(transparent_j)
+        .ok_or_else(|| Error::Generic("Invalid transparent child index".into()))?;
+
+    let transparent_key = usk_inner.transparent();
     let privkey = transparent_key
         .derive_external_secret_key(address_index)
         .map_err(|e| Error::Generic(format!("Failed to derive private key: {:?}", e)))?;
-
-    // Get the address
-    let address_obj = transparent_key
-        .to_account_pubkey()
-        .derive_external_ivk()
-        .map_err(|e| Error::Generic(format!("Failed to derive IVK: {:?}", e)))?
-        .derive_address(address_index)
-        .map_err(|e| Error::Generic(format!("Failed to derive address: {:?}", e)))?;
-
-    let address_str = address_obj.encode(&net);
 
     // Convert to secp256k1 SecretKey
     let secret_key = SecretKey::from_slice(privkey.as_ref())
