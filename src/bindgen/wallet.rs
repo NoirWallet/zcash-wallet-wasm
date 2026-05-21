@@ -368,7 +368,7 @@ impl WebWallet {
         }
     }
 
-    /// Get unified addresses for an account
+    /// Get addresses for an account
     ///
     /// # Arguments
     ///
@@ -377,7 +377,7 @@ impl WebWallet {
     /// # Returns
     ///
     /// Returns a UnifiedAddresses object containing:
-    /// - unified: The full unified address (u1 format with all receivers)
+    /// - unified: The shielded unified address (u1 format with Orchard/Sapling receivers only)
     /// - orchard: Orchard-only unified address (if available)
     /// - sapling: Sapling-only unified address (u1 format, if available)
     /// - sapling_zs: Sapling traditional address (zs format, if available)
@@ -392,12 +392,8 @@ impl WebWallet {
     /// console.log("Transparent:", addresses.transparent);
     /// ```
     pub async fn get_unified_addresses(&self, account_id: u32) -> Result<JsValue, Error> {
-        use zcash_address::unified::{self, Container};
         use zcash_client_backend::data_api::Account;
-        use zcash_client_backend::encoding::AddressCodec;
         use zcash_keys::keys::UnifiedAddressRequest;
-        use zcash_primitives::consensus::Parameters;
-        use zcash_primitives::legacy::TransparentAddress;
 
         let db = self.inner.db.read().await;
         let account = db
@@ -409,56 +405,10 @@ impl WebWallet {
 
         // Generate the first address that includes every receiver supported by the UIVK.
         let (full_address, _) = uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
-        let unified_str = full_address.encode(&self.inner.network);
-
-        // Parse the unified address to extract individual receivers
-        use zcash_address::unified::Encoding;
-        let (_, ua) = unified::Address::decode(&unified_str).map_err(|_| Error::InvalidAddress)?;
-
-        let mut orchard_addr: Option<String> = None;
-        let mut sapling_addr: Option<String> = None;
-        let mut sapling_zs_addr: Option<String> = None;
-        let mut transparent_addr: Option<String> = None;
-
-        // Extract each receiver type
-        for receiver in ua.items() {
-            match receiver {
-                unified::Receiver::Orchard(data) => {
-                    // Create Orchard-only unified address
-                    let single_ua =
-                        unified::Address::try_from_items(vec![unified::Receiver::Orchard(data)])
-                            .map_err(|_| Error::InvalidAddress)?;
-                    orchard_addr = Some(single_ua.encode(&self.inner.network.network_type()));
-                }
-                unified::Receiver::Sapling(data) => {
-                    // Create Sapling-only unified address (u1 format)
-                    let single_ua =
-                        unified::Address::try_from_items(vec![unified::Receiver::Sapling(data)])
-                            .map_err(|_| Error::InvalidAddress)?;
-                    sapling_addr = Some(single_ua.encode(&self.inner.network.network_type()));
-
-                    // Also generate traditional zs format address
-                    use sapling::PaymentAddress;
-                    if let Some(payment_addr) = PaymentAddress::from_bytes(&data) {
-                        sapling_zs_addr = Some(payment_addr.encode(&self.inner.network));
-                    }
-                }
-                unified::Receiver::P2pkh(data) => {
-                    let t_addr = TransparentAddress::PublicKeyHash(data);
-                    transparent_addr = Some(t_addr.encode(&self.inner.network));
-                }
-                _ => {}
-            }
-        }
-
-        // Create the result structure
-        let result = crate::bindgen::mnemonic::UnifiedAddresses {
-            unified: unified_str,
-            orchard: orchard_addr,
-            sapling: sapling_addr,
-            sapling_zs: sapling_zs_addr,
-            transparent: transparent_addr,
-        };
+        let result = crate::bindgen::mnemonic::unified_addresses_from_full(
+            &full_address,
+            &self.inner.network,
+        );
 
         Ok(serde_wasm_bindgen::to_value(&result)?)
     }

@@ -5,11 +5,13 @@ use secrecy::Zeroize;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-/// Unified addresses for all Zcash pools
+/// Addresses for all Zcash pools.
 #[derive(Serialize, Deserialize)]
 pub struct UnifiedAddresses {
-    /// The full unified address (contains all available receivers)
+    /// The shielded-only unified address (contains Orchard/Sapling receivers only)
     pub unified: String,
+    /// The full unified address (contains all available receivers)
+    pub full_unified: String,
     /// The Orchard receiver address (if available)
     pub orchard: Option<String>,
     /// The Sapling receiver unified address (u1 format, if available)
@@ -18,6 +20,45 @@ pub struct UnifiedAddresses {
     pub sapling_zs: Option<String>,
     /// The Transparent receiver address (if available)
     pub transparent: Option<String>,
+}
+
+pub(crate) fn unified_addresses_from_full<P>(
+    address: &zcash_keys::address::UnifiedAddress,
+    params: &P,
+) -> UnifiedAddresses
+where
+    P: zcash_primitives::consensus::Parameters,
+{
+    use zcash_client_backend::encoding::AddressCodec;
+    use zcash_keys::address::UnifiedAddress as ZcashUnifiedAddress;
+
+    let orchard_receiver = address.orchard().cloned();
+    let sapling_receiver = address.sapling().cloned();
+    let shielded_unified = ZcashUnifiedAddress::from_receivers(
+        orchard_receiver.clone(),
+        sapling_receiver.clone(),
+        None,
+    )
+    .expect("all-available unified address should include a shielded receiver");
+
+    let orchard = orchard_receiver.as_ref().and_then(|receiver| {
+        ZcashUnifiedAddress::from_receivers(Some(receiver.clone()), None, None)
+            .map(|ua| ua.encode(params))
+    });
+
+    let sapling = sapling_receiver.as_ref().and_then(|receiver| {
+        ZcashUnifiedAddress::from_receivers(None, Some(receiver.clone()), None)
+            .map(|ua| ua.encode(params))
+    });
+
+    UnifiedAddresses {
+        unified: shielded_unified.encode(params),
+        full_unified: address.encode(params),
+        orchard,
+        sapling,
+        sapling_zs: address.sapling().map(|addr| addr.encode(params)),
+        transparent: address.transparent().map(|addr| addr.encode(params)),
+    }
 }
 
 /// Generate a new 24-word BIP-39 mnemonic phrase.
@@ -274,7 +315,7 @@ pub fn mnemonic_to_seed_fingerprint(
 //     Ok(usk.to_unified_full_viewing_key())
 // }
 
-/// Get all addresses (unified, orchard, sapling, transparent) from a mnemonic phrase.
+/// Get all addresses (shielded unified, orchard, sapling, transparent) from a mnemonic phrase.
 ///
 /// # Arguments
 ///
@@ -310,7 +351,6 @@ pub fn mnemonic_to_addresses(
     account_index: u32,
 ) -> Result<JsValue, Error> {
     use std::str::FromStr;
-    use zcash_client_backend::encoding::AddressCodec;
     use zcash_keys::keys::UnifiedAddressRequest;
 
     // Convert mnemonic to seed
@@ -336,58 +376,7 @@ pub fn mnemonic_to_addresses(
     // Generate the first address that includes every receiver supported by the UIVK.
     let (address, _) = uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
 
-    // Encode the unified address
-    let unified_str = address.encode(&net);
-
-    // Extract individual receiver addresses
-    // For Orchard and Sapling, we generate unified addresses with only that receiver type
-    use zcash_keys::keys::{ReceiverRequirement as RR, UnifiedAddressRequest as UAR};
-
-    let orchard_addr = if address.orchard().is_some() {
-        // Request a unified address with only Orchard receiver
-        // unsafe_custom allows creating requests with any combination
-        let ua_request = UAR::unsafe_custom(
-            RR::Require, // Orchard
-            RR::Omit,    // Sapling
-            RR::Omit,    // Transparent
-        );
-        uivk.default_address(ua_request)
-            .ok()
-            .map(|(addr, _)| addr.encode(&net))
-    } else {
-        None
-    };
-
-    let (sapling_addr, sapling_zs_addr) = if let Some(sapling_receiver) = address.sapling() {
-        // Generate unified address with only Sapling receiver
-        let ua_request = UAR::unsafe_custom(
-            RR::Omit,    // Orchard
-            RR::Require, // Sapling
-            RR::Omit,    // Transparent
-        );
-        let sapling_ua = uivk
-            .default_address(ua_request)
-            .ok()
-            .map(|(addr, _)| addr.encode(&net));
-
-        // Also generate traditional zs format address (directly encode the PaymentAddress)
-        let sapling_zs = Some(sapling_receiver.encode(&net));
-
-        (sapling_ua, sapling_zs)
-    } else {
-        (None, None)
-    };
-
-    let transparent_addr = address.transparent().map(|addr| addr.encode(&net));
-
-    // Create the result structure
-    let result = UnifiedAddresses {
-        unified: unified_str,
-        orchard: orchard_addr,
-        sapling: sapling_addr,
-        sapling_zs: sapling_zs_addr,
-        transparent: transparent_addr,
-    };
+    let result = unified_addresses_from_full(&address, &net);
 
     // Convert to JsValue using serde_wasm_bindgen
     Ok(serde_wasm_bindgen::to_value(&result)?)
@@ -418,7 +407,7 @@ pub fn mnemonic_to_addresses(
 #[wasm_bindgen]
 pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsValue, Error> {
     use std::str::FromStr;
-    use zcash_address::unified::{self, Container};
+    use zcash_address::unified::{self, Container, Encoding};
     use zcash_client_backend::encoding::AddressCodec;
     use zcash_primitives::consensus::Parameters;
     use zcash_primitives::legacy::TransparentAddress;
@@ -426,8 +415,6 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
     // Get the network
     let net = crate::Network::from_str(network)?;
 
-    // Parse the unified address directly
-    use zcash_address::unified::Encoding;
     let (parsed_net, ua) =
         unified::Address::decode(unified_address).map_err(|_| Error::InvalidAddress)?;
 
@@ -441,11 +428,13 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
     let mut sapling_addr: Option<String> = None;
     let mut sapling_zs_addr: Option<String> = None;
     let mut transparent_addr: Option<String> = None;
+    let mut shielded_receivers = Vec::new();
 
     // Iterate through receivers to extract each type
     for receiver in ua.items() {
         match receiver {
             unified::Receiver::Orchard(data) => {
+                shielded_receivers.push(unified::Receiver::Orchard(data));
                 // Create a unified address with only Orchard receiver
                 let single_ua =
                     unified::Address::try_from_items(vec![unified::Receiver::Orchard(data)])
@@ -454,6 +443,7 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
                 orchard_addr = Some(single_ua.encode(&parsed_net));
             }
             unified::Receiver::Sapling(data) => {
+                shielded_receivers.push(unified::Receiver::Sapling(data));
                 // Create a unified address with only Sapling receiver
                 let single_ua =
                     unified::Address::try_from_items(vec![unified::Receiver::Sapling(data)])
@@ -478,9 +468,13 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
         }
     }
 
+    let shielded_ua =
+        unified::Address::try_from_items(shielded_receivers).map_err(|_| Error::InvalidAddress)?;
+
     // Create the result structure
     let result = UnifiedAddresses {
-        unified: unified_address.to_string(),
+        unified: shielded_ua.encode(&parsed_net),
+        full_unified: unified_address.to_string(),
         orchard: orchard_addr,
         sapling: sapling_addr,
         sapling_zs: sapling_zs_addr,

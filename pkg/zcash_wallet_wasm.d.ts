@@ -305,7 +305,7 @@ export class WebWallet {
    */
   get_account_hd_index(account_id: number): Promise<number | undefined>;
   /**
-   * Get unified addresses for an account
+   * Get addresses for an account
    *
    * # Arguments
    *
@@ -314,7 +314,7 @@ export class WebWallet {
    * # Returns
    *
    * Returns a UnifiedAddresses object containing:
-   * - unified: The full unified address (u1 format with all receivers)
+   * - unified: The shielded unified address (u1 format with Orchard/Sapling receivers only)
    * - orchard: Orchard-only unified address (if available)
    * - sapling: Sapling-only unified address (u1 format, if available)
    * - sapling_zs: Sapling traditional address (zs format, if available)
@@ -358,7 +358,7 @@ export function generate_mnemonic(word_count: number): string;
 export function initThreadPool(num_threads: number): Promise<any>;
 
 /**
- * Get all addresses (unified, orchard, sapling, transparent) from a mnemonic phrase.
+ * Get all addresses (shielded unified, orchard, sapling, transparent) from a mnemonic phrase.
  *
  * # Arguments
  *
@@ -665,9 +665,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_3362: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_3361: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_7197: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_2964: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_2963: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_7196: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

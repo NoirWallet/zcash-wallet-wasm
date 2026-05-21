@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_3362(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_3362(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_2964(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_2964(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7197(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_7197(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_7196(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_7196(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -1562,7 +1562,7 @@ export class WebWallet {
         return takeObject(ret);
     }
     /**
-     * Get unified addresses for an account
+     * Get addresses for an account
      *
      * # Arguments
      *
@@ -1571,7 +1571,7 @@ export class WebWallet {
      * # Returns
      *
      * Returns a UnifiedAddresses object containing:
-     * - unified: The full unified address (u1 format with all receivers)
+     * - unified: The shielded unified address (u1 format with Orchard/Sapling receivers only)
      * - orchard: Orchard-only unified address (if available)
      * - sapling: Sapling-only unified address (u1 format, if available)
      * - sapling_zs: Sapling traditional address (zs format, if available)
@@ -1704,7 +1704,7 @@ export function initThreadPool(num_threads) {
 }
 
 /**
- * Get all addresses (unified, orchard, sapling, transparent) from a mnemonic phrase.
+ * Get all addresses (shielded unified, orchard, sapling, transparent) from a mnemonic phrase.
  *
  * # Arguments
  *
@@ -2486,7 +2486,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_7197(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_7196(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2736,9 +2736,9 @@ function __wbg_get_imports(memory) {
         const ret = BigInt.asUintN(64, arg0);
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_cast_6aadb58670da180e = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1205, function: Function { arguments: [Externref], shim_idx: 1206, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_3361, __wasm_bindgen_func_elem_3362);
+    imports.wbg.__wbindgen_cast_4a9507dc0a5f1dc3 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1031, function: Function { arguments: [Externref], shim_idx: 1032, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2963, __wasm_bindgen_func_elem_2964);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_77bc3e92745e9a35 = function(arg0, arg1) {
@@ -2746,6 +2746,11 @@ function __wbg_get_imports(memory) {
         wasm.__wbindgen_export4(arg0, arg1 * 1, 1);
         // Cast intrinsic for `Vector(U8) -> Externref`.
         const ret = v0;
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbindgen_cast_7babc8f5608d4e86 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1031, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1032, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2963, __wasm_bindgen_func_elem_2964);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_9ae0607507abb057 = function(arg0) {
@@ -2761,11 +2766,6 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {
         // Cast intrinsic for `F64 -> Externref`.
         const ret = arg0;
-        return addHeapObject(ret);
-    };
-    imports.wbg.__wbindgen_cast_f29352b3c43ad8ee = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1205, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1206, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_3361, __wasm_bindgen_func_elem_3362);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_link_203404ece0e9bab9 = function(arg0) {
