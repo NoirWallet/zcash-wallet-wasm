@@ -921,12 +921,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
-            let max_tree_size = Some(min_idx << SAPLING_SHARD_HEIGHT);
-            let min_tree_size = Some((max_idx + 1) << SAPLING_SHARD_HEIGHT);
+            let min_tree_size = Some(min_idx << SAPLING_SHARD_HEIGHT);
+            let max_tree_size = Some((max_idx + 1) << SAPLING_SHARD_HEIGHT);
 
-            Ok(start_size.or(min_tree_size).zip(max_tree_size).map(
+            Ok(start_size.or(min_tree_size).zip(max_tree_size).and_then(
                 |(min_tree_size, max_tree_size)| {
-                    Ratio::new(scanned_count, max_tree_size - min_tree_size)
+                    max_tree_size
+                        .checked_sub(min_tree_size)
+                        .map(|tree_size| Ratio::new(scanned_count, tree_size))
                 },
             ))
         }
@@ -956,7 +958,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 .iter()
                 .filter_map(|(_, account)| {
                     if account.birthday().height() == *birthday_height {
-                        Some(account.birthday().sapling_frontier().tree_size())
+                        Some(account.birthday().orchard_frontier().tree_size())
                     } else {
                         None
                     }
@@ -999,12 +1001,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
-            let max_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
-            let min_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
+            let min_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
+            let max_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
 
-            Ok(start_size.or(min_tree_size).zip(max_tree_size).map(
+            Ok(start_size.or(min_tree_size).zip(max_tree_size).and_then(
                 |(min_tree_size, max_tree_size)| {
-                    Ratio::new(scanned_count, max_tree_size - min_tree_size)
+                    max_tree_size
+                        .checked_sub(min_tree_size)
+                        .map(|tree_size| Ratio::new(scanned_count, tree_size))
                 },
             ))
         }
