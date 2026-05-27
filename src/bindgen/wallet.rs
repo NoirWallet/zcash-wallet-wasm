@@ -217,6 +217,13 @@ impl WebWallet {
         self.inner.get_block_by_time(time).await
     }
 
+    pub async fn get_transaction_history(&self, account_id: u32) -> Result<JsValue, Error> {
+        let db = self.inner.db.read().await;
+        let entries = db.get_transaction_history(AccountId::from(account_id));
+        serde_wasm_bindgen::to_value(&entries)
+            .map_err(Error::from)
+    }
+
     /// Journal-aware sync: download + scan one batch, return journal data for persistence.
     /// Returns null if fully synced, or Uint8Array with journal entry data.
     pub async fn prepare_sync_batch(

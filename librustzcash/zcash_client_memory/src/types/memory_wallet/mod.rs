@@ -1129,4 +1129,124 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
         Ok(output.outpoint().clone())
     }
+
+    pub fn get_transaction_history(
+        &self,
+        account_id: AccountId,
+    ) -> Vec<TransactionHistoryEntry> {
+        let mut entries: Vec<TransactionHistoryEntry> = Vec::new();
+        let mut seen_txids = BTreeSet::new();
+
+        for (txid, tx_entry) in self.tx_table.iter() {
+            let mined_height = tx_entry.mined_height();
+            let block_time = mined_height
+                .and_then(|h| self.blocks.get(&h))
+                .map(|b| b.block_time);
+
+            let received_zatoshis: i64 = self
+                .received_notes
+                .iter()
+                .filter(|n| n.txid() == *txid && n.account_id() == account_id && !n.is_change)
+                .map(|n| n.note.value().into_u64() as i64)
+                .sum();
+
+            let sent_zatoshis: i64 = self
+                .sent_notes
+                .iter()
+                .filter(|(note_id, note)| {
+                    *note_id.txid() == *txid && note.from_account_id == account_id
+                })
+                .map(|(_, note)| note.value.into_u64() as i64)
+                .sum();
+
+            let change_zatoshis: i64 = self
+                .received_notes
+                .iter()
+                .filter(|n| n.txid() == *txid && n.account_id() == account_id && n.is_change)
+                .map(|n| n.note.value().into_u64() as i64)
+                .sum();
+
+            let spent_input_zatoshis: i64 = self
+                .received_note_spends
+                .iter()
+                .filter(|(_, spend_txid)| **spend_txid == *txid)
+                .filter_map(|(note_id, _)| {
+                    self.received_notes
+                        .iter()
+                        .find(|n| n.note_id() == *note_id && n.account_id() == account_id)
+                        .map(|n| n.note.value().into_u64() as i64)
+                })
+                .sum();
+
+            if received_zatoshis == 0 && sent_zatoshis == 0
+                && change_zatoshis == 0 && spent_input_zatoshis == 0 {
+                continue;
+            }
+
+            seen_txids.insert(*txid);
+
+            let fee_zatoshis = tx_entry.fee().map(|f| f.into_u64() as i64);
+
+            let (kind, amount_zatoshis) = if sent_zatoshis > 0 && received_zatoshis > 0 {
+                ("shield".to_string(), received_zatoshis)
+            } else if sent_zatoshis > 0 {
+                let net = sent_zatoshis - change_zatoshis;
+                ("send".to_string(), net)
+            } else if spent_input_zatoshis > 0 && received_zatoshis == 0 {
+                let net_send = spent_input_zatoshis - change_zatoshis
+                    - fee_zatoshis.unwrap_or(0);
+                ("send".to_string(), net_send.max(0))
+            } else if change_zatoshis > 0 && received_zatoshis == 0 {
+                ("send".to_string(), 0)
+            } else {
+                ("receive".to_string(), received_zatoshis)
+            };
+
+            let status = match tx_entry.status() {
+                TransactionStatus::Mined(_) => "mined".to_string(),
+                TransactionStatus::NotInMainChain => "pending".to_string(),
+                TransactionStatus::TxidNotRecognized => "unknown".to_string(),
+            };
+
+            let memo = self
+                .received_notes
+                .iter()
+                .filter(|n| n.txid() == *txid && n.account_id() == account_id && !n.is_change)
+                .find_map(|n| match &n.memo {
+                    zcash_protocol::memo::Memo::Text(t) => Some(t.to_string()),
+                    _ => None,
+                });
+
+            entries.push(TransactionHistoryEntry {
+                txid: txid.as_ref().to_vec(),
+                kind,
+                amount_zatoshis: amount_zatoshis.unsigned_abs(),
+                fee_zatoshis: fee_zatoshis.map(|f| f.unsigned_abs()),
+                mined_height: mined_height.map(|h| u32::from(h)),
+                status,
+                timestamp: block_time.map(|t| t as u64),
+                memo,
+            });
+        }
+
+        entries.sort_by(|a, b| {
+            b.mined_height
+                .unwrap_or(u32::MAX)
+                .cmp(&a.mined_height.unwrap_or(u32::MAX))
+        });
+
+        entries
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TransactionHistoryEntry {
+    pub txid: Vec<u8>,
+    pub kind: String,
+    pub amount_zatoshis: u64,
+    pub fee_zatoshis: Option<u64>,
+    pub mined_height: Option<u32>,
+    pub status: String,
+    pub timestamp: Option<u64>,
+    pub memo: Option<String>,
 }

@@ -253,6 +253,7 @@ export class WebWallet {
    * ```
    */
   get_block_by_time(time: number): Promise<number>;
+  get_transaction_history(account_id: number): Promise<any>;
   /**
    * Journal-aware sync: download + scan one batch, return journal data for persistence.
    * Returns null if fully synced, or Uint8Array with journal entry data.
@@ -609,6 +610,7 @@ export interface InitOutput {
   readonly webwallet_get_block_time: (a: number, b: number) => number;
   readonly webwallet_get_latest_height: (a: number) => number;
   readonly webwallet_get_block_by_time: (a: number, b: number) => number;
+  readonly webwallet_get_transaction_history: (a: number, b: number) => number;
   readonly webwallet_prepare_sync_batch: (a: number, b: number) => number;
   readonly webwallet_scan_journal_entry: (a: number, b: number, c: number) => number;
   readonly webwallet_replay_journal_entries: (a: number, b: number, c: number) => number;
@@ -665,9 +667,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_2964: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_2963: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_7196: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_2975: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_2974: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_7207: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
