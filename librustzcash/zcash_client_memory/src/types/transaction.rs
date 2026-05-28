@@ -72,7 +72,6 @@ impl TransactionEntry {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn fee(&self) -> Option<Zatoshis> {
         self.fee
     }
