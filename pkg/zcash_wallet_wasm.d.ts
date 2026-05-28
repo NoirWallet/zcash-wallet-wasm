@@ -464,6 +464,19 @@ export function mnemonic_to_seed_fingerprint(phrase: string, passphrase: string)
 export function mnemonic_to_spending_key(network: string, phrase: string, passphrase: string, account_index: number): UnifiedSpendingKey;
 
 /**
+ * Get a transparent address and public key from a mnemonic at a specific external address index.
+ *
+ * # Arguments
+ *
+ * * `network` - Network name ("main" or "test")
+ * * `phrase` - The mnemonic phrase
+ * * `passphrase` - Optional passphrase (use empty string "" if none)
+ * * `account_index` - The account index for HD derivation (usually 0)
+ * * `address_index` - The external transparent child address index
+ */
+export function mnemonic_to_transparent_address(network: string, phrase: string, passphrase: string, account_index: number, address_index: number): any;
+
+/**
  * Parse a unified address string and extract individual receiver addresses.
  *
  * # Arguments
@@ -500,6 +513,7 @@ export function parse_unified_address(network: string, unified_address: string):
  * * `network` - Network type ("main" or "test")
  * * `usk` - The Unified Spending Key
  * * `message` - The message to sign
+ * * `address_index` - Optional external transparent address index to sign with. If omitted, the default full unified address index is used.
  *
  * # Returns
  *
@@ -511,13 +525,13 @@ export function parse_unified_address(network: string, unified_address: string):
  * # Example
  *
  * ```javascript
- * const result = await sign_message_with_transparent("main", usk, "Hello Zcash!");
+ * const result = await sign_message_with_transparent("main", usk, "Hello Zcash!", undefined);
  * console.log("Signature:", result.signature);  // hex format
  * console.log("Public Key:", result.pubkey);     // uncompressed hex (65 bytes)
  * console.log("Address:", result.address);       // t-address
  * ```
  */
-export function sign_message_with_transparent(network: string, usk: UnifiedSpendingKey, message: string): any;
+export function sign_message_with_transparent(network: string, usk: UnifiedSpendingKey, message: string, address_index?: number | null): any;
 
 export function start(): void;
 
@@ -576,6 +590,7 @@ export interface InitOutput {
   readonly mnemonic_to_seed: (a: number, b: number, c: number, d: number, e: number) => void;
   readonly mnemonic_to_spending_key: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
   readonly mnemonic_to_seed_fingerprint: (a: number, b: number, c: number, d: number, e: number) => void;
+  readonly mnemonic_to_transparent_address: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
   readonly mnemonic_to_addresses: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
   readonly parse_unified_address: (a: number, b: number, c: number, d: number, e: number) => void;
   readonly __wbg_pczt_free: (a: number, b: number) => void;
@@ -599,7 +614,7 @@ export interface InitOutput {
   readonly paymentrequest_label: (a: number, b: number) => void;
   readonly paymentrequest_message: (a: number, b: number) => void;
   readonly paymentrequest_other_params: (a: number, b: number) => void;
-  readonly sign_message_with_transparent: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+  readonly sign_message_with_transparent: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
   readonly __wbg_webwallet_free: (a: number, b: number) => void;
   readonly webwallet_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
   readonly webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
@@ -667,9 +682,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_2975: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_2974: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_7207: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_2981: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_2980: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_7220: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

@@ -270,6 +270,7 @@ fn encode_compact_size(size: usize) -> Vec<u8> {
 /// * `network` - Network type ("main" or "test")
 /// * `usk` - The Unified Spending Key
 /// * `message` - The message to sign
+/// * `address_index` - Optional external transparent address index to sign with. If omitted, the default full unified address index is used.
 ///
 /// # Returns
 ///
@@ -281,7 +282,7 @@ fn encode_compact_size(size: usize) -> Vec<u8> {
 /// # Example
 ///
 /// ```javascript
-/// const result = await sign_message_with_transparent("main", usk, "Hello Zcash!");
+/// const result = await sign_message_with_transparent("main", usk, "Hello Zcash!", undefined);
 /// console.log("Signature:", result.signature);  // hex format
 /// console.log("Public Key:", result.pubkey);     // uncompressed hex (65 bytes)
 /// console.log("Address:", result.address);       // t-address
@@ -291,13 +292,14 @@ pub fn sign_message_with_transparent(
     network: &str,
     usk: UnifiedSpendingKey,
     message: &str,
+    address_index: Option<u32>,
 ) -> Result<wasm_bindgen::JsValue, Error> {
     use bitcoin_hashes::{Hash, sha256d};
     use secp256k1::{Message as Secp256k1Message, Secp256k1, SecretKey};
     use serde::{Deserialize, Serialize};
     use zcash_client_backend::encoding::AddressCodec;
     use zcash_keys::keys::UnifiedAddressRequest;
-    use zcash_primitives::legacy::keys::NonHardenedChildIndex;
+    use zcash_primitives::legacy::keys::{IncomingViewingKey, NonHardenedChildIndex};
 
     #[derive(Serialize, Deserialize)]
     struct SignatureResult {
@@ -308,28 +310,35 @@ pub fn sign_message_with_transparent(
 
     let net = Network::from_str(network)?;
     let usk_inner: zcash_keys::keys::UnifiedSpendingKey = usk.into();
+    let transparent_key = usk_inner.transparent();
 
-    let ufvk = usk_inner.to_unified_full_viewing_key();
-    let uivk = ufvk.to_unified_incoming_viewing_key();
+    let address_index = match address_index {
+        Some(index) => NonHardenedChildIndex::from_index(index)
+            .ok_or_else(|| Error::Generic("Invalid transparent child index".into()))?,
+        None => {
+            let ufvk = usk_inner.to_unified_full_viewing_key();
+            let uivk = ufvk.to_unified_incoming_viewing_key();
+            let (ua, diversifier_idx) = uivk
+                .default_address(UnifiedAddressRequest::AllAvailableKeys)
+                .map_err(|e| {
+                    Error::Generic(format!("Failed to derive default address: {:?}", e))
+                })?;
+            let transparent_j =
+                crate::bindgen::mnemonic::transparent_address_index(&ua, diversifier_idx)
+                    .ok_or_else(|| Error::Generic("Invalid transparent child index".into()))?;
+            NonHardenedChildIndex::from_index(transparent_j)
+                .expect("transparent_address_index returns a valid non-hardened child index")
+        }
+    };
 
-    let (ua, diversifier_idx) = uivk
-        .default_address(UnifiedAddressRequest::AllAvailableKeys)
-        .map_err(|e| Error::Generic(format!("Failed to derive default address: {:?}", e)))?;
-
-    let address_obj = ua
-        .transparent()
-        .ok_or_else(|| Error::Generic("No transparent receiver in unified address".into()))?;
+    let address_obj = transparent_key
+        .to_account_pubkey()
+        .derive_external_ivk()
+        .map_err(|e| Error::Generic(format!("Failed to derive IVK: {:?}", e)))?
+        .derive_address(address_index)
+        .map_err(|e| Error::Generic(format!("Failed to derive address: {:?}", e)))?;
     let address_str = address_obj.encode(&net);
 
-    let transparent_j = u32::from_le_bytes(
-        diversifier_idx.as_bytes()[..4]
-            .try_into()
-            .map_err(|_| Error::Generic("Invalid diversifier index".into()))?,
-    );
-    let address_index = NonHardenedChildIndex::from_index(transparent_j)
-        .ok_or_else(|| Error::Generic("Invalid transparent child index".into()))?;
-
-    let transparent_key = usk_inner.transparent();
     let privkey = transparent_key
         .derive_external_secret_key(address_index)
         .map_err(|e| Error::Generic(format!("Failed to derive private key: {:?}", e)))?;

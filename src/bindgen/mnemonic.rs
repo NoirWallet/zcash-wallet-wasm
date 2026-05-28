@@ -20,11 +20,14 @@ pub struct UnifiedAddresses {
     pub sapling_zs: Option<String>,
     /// The Transparent receiver address (if available)
     pub transparent: Option<String>,
+    /// Transparent child address index corresponding to the full unified address.
+    pub address_index: Option<u32>,
 }
 
 pub(crate) fn unified_addresses_from_full<P>(
     address: &zcash_keys::address::UnifiedAddress,
     params: &P,
+    address_index: Option<u32>,
 ) -> UnifiedAddresses
 where
     P: zcash_primitives::consensus::Parameters,
@@ -34,21 +37,16 @@ where
 
     let orchard_receiver = address.orchard().cloned();
     let sapling_receiver = address.sapling().cloned();
-    let shielded_unified = ZcashUnifiedAddress::from_receivers(
-        orchard_receiver.clone(),
-        sapling_receiver.clone(),
-        None,
-    )
-    .expect("all-available unified address should include a shielded receiver");
+    let shielded_unified =
+        ZcashUnifiedAddress::from_receivers(orchard_receiver, sapling_receiver, None)
+            .expect("all-available unified address should include a shielded receiver");
 
     let orchard = orchard_receiver.as_ref().and_then(|receiver| {
-        ZcashUnifiedAddress::from_receivers(Some(receiver.clone()), None, None)
-            .map(|ua| ua.encode(params))
+        ZcashUnifiedAddress::from_receivers(Some(*receiver), None, None).map(|ua| ua.encode(params))
     });
 
     let sapling = sapling_receiver.as_ref().and_then(|receiver| {
-        ZcashUnifiedAddress::from_receivers(None, Some(receiver.clone()), None)
-            .map(|ua| ua.encode(params))
+        ZcashUnifiedAddress::from_receivers(None, Some(*receiver), None).map(|ua| ua.encode(params))
     });
 
     UnifiedAddresses {
@@ -58,7 +56,23 @@ where
         sapling,
         sapling_zs: address.sapling().map(|addr| addr.encode(params)),
         transparent: address.transparent().map(|addr| addr.encode(params)),
+        address_index,
     }
+}
+
+pub(crate) fn transparent_address_index(
+    address: &zcash_keys::address::UnifiedAddress,
+    diversifier_index: zip32::DiversifierIndex,
+) -> Option<u32> {
+    address.transparent()?;
+
+    let (low_4_bytes, rest) = diversifier_index.as_bytes().split_at(4);
+    if rest.iter().any(|byte| *byte != 0) {
+        return None;
+    }
+
+    let index = u32::from_le_bytes(low_4_bytes.try_into().ok()?);
+    zcash_primitives::legacy::keys::NonHardenedChildIndex::from_index(index).map(|_| index)
 }
 
 /// Generate a new 24-word BIP-39 mnemonic phrase.
@@ -112,56 +126,6 @@ pub fn generate_mnemonic(word_count: u32) -> Result<String, Error> {
 pub fn validate_mnemonic(phrase: &str) -> Result<(), Error> {
     Mnemonic::<English>::validate(phrase).map_err(|_| Error::InvalidSeedPhrase)
 }
-
-// /// Convert a mnemonic phrase to its entropy bytes.
-// ///
-// /// # Arguments
-// ///
-// /// * `phrase` - The mnemonic phrase
-// ///
-// /// # Returns
-// ///
-// /// A vector of bytes representing the entropy
-// ///
-// /// # Example
-// ///
-// /// ```javascript
-// /// const entropy = mnemonic_to_entropy("abandon abandon abandon ... art");
-// /// console.log(entropy); // Uint8Array
-// /// ```
-// #[wasm_bindgen]
-// pub fn mnemonic_to_entropy(phrase: &str) -> Result<Vec<u8>, Error> {
-//     let mnemonic: Mnemonic<English> =
-//         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
-
-//     Ok(mnemonic.entropy().to_vec())
-// }
-
-// /// Convert entropy bytes to a mnemonic phrase.
-// ///
-// /// # Arguments
-// ///
-// /// * `entropy` - The entropy bytes (16, 20, 24, 28, or 32 bytes)
-// ///
-// /// # Returns
-// ///
-// /// A string containing the mnemonic phrase
-// ///
-// /// # Example
-// ///
-// /// ```javascript
-// /// const entropy = new Uint8Array(32); // 32 bytes for 24 words
-// /// crypto.getRandomValues(entropy);
-// /// const mnemonic = entropy_to_mnemonic(entropy);
-// /// console.log(mnemonic);
-// /// ```
-// #[wasm_bindgen]
-// pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, Error> {
-//     let mnemonic: Mnemonic<English> =
-//         Mnemonic::from_entropy(entropy).map_err(|_| Error::InvalidSeedPhrase)?;
-
-//     Ok(mnemonic.phrase().to_string())
-// }
 
 /// Convert a mnemonic phrase to a seed with an optional passphrase.
 ///
@@ -271,49 +235,70 @@ pub fn mnemonic_to_seed_fingerprint(
     result
 }
 
-// /// Generate a UnifiedFullViewingKey from a mnemonic phrase.
-// ///
-// /// # Arguments
-// ///
-// /// * `network` - Network name ("main" or "test")
-// /// * `phrase` - The mnemonic phrase
-// /// * `passphrase` - Optional passphrase (use empty string "" if none)
-// /// * `account_index` - The account index for HD derivation (usually 0)
-// ///
-// /// # Returns
-// ///
-// /// A UnifiedFullViewingKey that can be used for viewing transactions
-// ///
-// /// # Example
-// ///
-// /// ```javascript
-// /// const mnemonic = generate_mnemonic(24);
-// /// const ufvk = mnemonic_to_viewing_key(
-// ///     "main",
-// ///     mnemonic,
-// ///     "",  // no passphrase
-// ///     0    // first account
-// /// );
-// /// ```
-// #[wasm_bindgen]
-// pub fn mnemonic_to_viewing_key(
-//     network: &str,
-//     phrase: &str,
-//     passphrase: &str,
-//     account_index: u32,
-// ) -> Result<UnifiedFullViewingKey, Error> {
-//     // Convert mnemonic to seed
-//     let mnemonic: Mnemonic<English> =
-//         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
+/// Transparent address data for a specific external address index.
+#[derive(Serialize, Deserialize)]
+pub struct TransparentAddressInfo {
+    /// The transparent P2PKH address for the given index.
+    pub address: String,
+    /// Hex-encoded uncompressed public key (65 bytes: 04 + x + y).
+    pub pubkey: String,
+}
 
-//     let seed = mnemonic.to_seed(passphrase);
+/// Get a transparent address and public key from a mnemonic at a specific external address index.
+///
+/// # Arguments
+///
+/// * `network` - Network name ("main" or "test")
+/// * `phrase` - The mnemonic phrase
+/// * `passphrase` - Optional passphrase (use empty string "" if none)
+/// * `account_index` - The account index for HD derivation (usually 0)
+/// * `address_index` - The external transparent child address index
+#[wasm_bindgen]
+pub fn mnemonic_to_transparent_address(
+    network: &str,
+    phrase: &str,
+    passphrase: &str,
+    account_index: u32,
+    address_index: u32,
+) -> Result<JsValue, Error> {
+    use std::str::FromStr;
+    use zcash_client_backend::encoding::AddressCodec;
+    use zcash_primitives::legacy::keys::{
+        IncomingViewingKey, NonHardenedChildIndex, TransparentKeyScope,
+    };
 
-//     // Create UnifiedSpendingKey from seed
-//     let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)?;
+    let mnemonic: Mnemonic<English> =
+        Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
+    let mut seed = mnemonic.to_seed(passphrase);
+    let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index);
+    seed.zeroize();
+    let usk = usk?;
 
-//     // Derive UnifiedFullViewingKey from spending key
-//     Ok(usk.to_unified_full_viewing_key())
-// }
+    let net = crate::Network::from_str(network)?;
+    let address_index = NonHardenedChildIndex::from_index(address_index)
+        .ok_or_else(|| Error::Generic("Invalid transparent child index".into()))?;
+    let usk_inner: zcash_keys::keys::UnifiedSpendingKey = usk.into();
+    let transparent_key = usk_inner.transparent();
+
+    let address = transparent_key
+        .to_account_pubkey()
+        .derive_external_ivk()
+        .map_err(|e| Error::Generic(format!("Failed to derive IVK: {:?}", e)))?
+        .derive_address(address_index)
+        .map_err(|e| Error::Generic(format!("Failed to derive address: {:?}", e)))?
+        .encode(&net);
+
+    let public_key = transparent_key
+        .to_account_pubkey()
+        .derive_address_pubkey(TransparentKeyScope::EXTERNAL, address_index)
+        .map_err(|e| Error::Generic(format!("Failed to derive public key: {:?}", e)))?;
+    let pubkey = hex::encode(public_key.serialize_uncompressed());
+
+    Ok(serde_wasm_bindgen::to_value(&TransparentAddressInfo {
+        address,
+        pubkey,
+    })?)
+}
 
 /// Get all addresses (shielded unified, orchard, sapling, transparent) from a mnemonic phrase.
 ///
@@ -374,9 +359,11 @@ pub fn mnemonic_to_addresses(
     let uivk = ufvk.as_inner().to_unified_incoming_viewing_key();
 
     // Generate the first address that includes every receiver supported by the UIVK.
-    let (address, _) = uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
+    let (address, diversifier_index) =
+        uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
+    let address_index = transparent_address_index(&address, diversifier_index);
 
-    let result = unified_addresses_from_full(&address, &net);
+    let result = unified_addresses_from_full(&address, &net, address_index);
 
     // Convert to JsValue using serde_wasm_bindgen
     Ok(serde_wasm_bindgen::to_value(&result)?)
@@ -479,6 +466,7 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
         sapling: sapling_addr,
         sapling_zs: sapling_zs_addr,
         transparent: transparent_addr,
+        address_index: None,
     };
 
     // Convert to JsValue using serde_wasm_bindgen

@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_2975(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_2975(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_2981(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_2981(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7207(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_7207(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_7220(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_7220(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -1912,6 +1912,45 @@ export function mnemonic_to_spending_key(network, phrase, passphrase, account_in
 }
 
 /**
+ * Get a transparent address and public key from a mnemonic at a specific external address index.
+ *
+ * # Arguments
+ *
+ * * `network` - Network name ("main" or "test")
+ * * `phrase` - The mnemonic phrase
+ * * `passphrase` - Optional passphrase (use empty string "" if none)
+ * * `account_index` - The account index for HD derivation (usually 0)
+ * * `address_index` - The external transparent child address index
+ * @param {string} network
+ * @param {string} phrase
+ * @param {string} passphrase
+ * @param {number} account_index
+ * @param {number} address_index
+ * @returns {any}
+ */
+export function mnemonic_to_transparent_address(network, phrase, passphrase, account_index, address_index) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(network, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(phrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(passphrase, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.mnemonic_to_transparent_address(retptr, ptr0, len0, ptr1, len1, ptr2, len2, account_index, address_index);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return takeObject(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * Parse a unified address string and extract individual receiver addresses.
  *
  * # Arguments
@@ -1969,6 +2008,7 @@ export function parse_unified_address(network, unified_address) {
  * * `network` - Network type ("main" or "test")
  * * `usk` - The Unified Spending Key
  * * `message` - The message to sign
+ * * `address_index` - Optional external transparent address index to sign with. If omitted, the default full unified address index is used.
  *
  * # Returns
  *
@@ -1980,7 +2020,7 @@ export function parse_unified_address(network, unified_address) {
  * # Example
  *
  * ```javascript
- * const result = await sign_message_with_transparent("main", usk, "Hello Zcash!");
+ * const result = await sign_message_with_transparent("main", usk, "Hello Zcash!", undefined);
  * console.log("Signature:", result.signature);  // hex format
  * console.log("Public Key:", result.pubkey);     // uncompressed hex (65 bytes)
  * console.log("Address:", result.address);       // t-address
@@ -1988,9 +2028,10 @@ export function parse_unified_address(network, unified_address) {
  * @param {string} network
  * @param {UnifiedSpendingKey} usk
  * @param {string} message
+ * @param {number | null} [address_index]
  * @returns {any}
  */
-export function sign_message_with_transparent(network, usk, message) {
+export function sign_message_with_transparent(network, usk, message, address_index) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
         const ptr0 = passStringToWasm0(network, wasm.__wbindgen_export, wasm.__wbindgen_export2);
@@ -1999,7 +2040,7 @@ export function sign_message_with_transparent(network, usk, message) {
         var ptr1 = usk.__destroy_into_raw();
         const ptr2 = passStringToWasm0(message, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len2 = WASM_VECTOR_LEN;
-        wasm.sign_message_with_transparent(retptr, ptr0, len0, ptr1, ptr2, len2);
+        wasm.sign_message_with_transparent(retptr, ptr0, len0, ptr1, ptr2, len2, isLikeNone(address_index) ? 0x100000001 : (address_index) >>> 0);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -2494,7 +2535,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_7207(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_7220(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2753,7 +2794,7 @@ function __wbg_get_imports(memory) {
     };
     imports.wbg.__wbindgen_cast_94ef0f56707f22c3 = function(arg0, arg1) {
         // Cast intrinsic for `Closure(Closure { dtor_idx: 1034, function: Function { arguments: [Externref], shim_idx: 1035, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2974, __wasm_bindgen_func_elem_2975);
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2980, __wasm_bindgen_func_elem_2981);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_9ae0607507abb057 = function(arg0) {
@@ -2763,7 +2804,7 @@ function __wbg_get_imports(memory) {
     };
     imports.wbg.__wbindgen_cast_ac2aa53157682d85 = function(arg0, arg1) {
         // Cast intrinsic for `Closure(Closure { dtor_idx: 1034, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1035, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2974, __wasm_bindgen_func_elem_2975);
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2980, __wasm_bindgen_func_elem_2981);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_cb9088102bce6b30 = function(arg0, arg1) {

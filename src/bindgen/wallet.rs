@@ -220,8 +220,7 @@ impl WebWallet {
     pub async fn get_transaction_history(&self, account_id: u32) -> Result<JsValue, Error> {
         let db = self.inner.db.read().await;
         let entries = db.get_transaction_history(AccountId::from(account_id));
-        serde_wasm_bindgen::to_value(&entries)
-            .map_err(Error::from)
+        serde_wasm_bindgen::to_value(&entries).map_err(Error::from)
     }
 
     /// Journal-aware sync: download + scan one batch, return journal data for persistence.
@@ -411,10 +410,14 @@ impl WebWallet {
         let uivk = account.uivk();
 
         // Generate the first address that includes every receiver supported by the UIVK.
-        let (full_address, _) = uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
+        let (full_address, diversifier_index) =
+            uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
+        let address_index =
+            crate::bindgen::mnemonic::transparent_address_index(&full_address, diversifier_index);
         let result = crate::bindgen::mnemonic::unified_addresses_from_full(
             &full_address,
             &self.inner.network,
+            address_index,
         );
 
         Ok(serde_wasm_bindgen::to_value(&result)?)
