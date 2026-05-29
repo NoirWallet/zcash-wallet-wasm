@@ -1130,12 +1130,9 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         Ok(output.outpoint().clone())
     }
 
-    pub fn get_transaction_history(
-        &self,
-        account_id: AccountId,
-    ) -> Vec<TransactionHistoryEntry> {
+    pub fn get_transaction_history(&self, account_id: AccountId) -> Vec<TransactionHistoryEntry> {
         let mut entries: Vec<TransactionHistoryEntry> = Vec::new();
-        let mut seen_txids = BTreeSet::new();
+        let chain_height = self.chain_height().ok().flatten();
 
         for (txid, tx_entry) in self.tx_table.iter() {
             let mined_height = tx_entry.mined_height();
@@ -1178,12 +1175,13 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 })
                 .sum();
 
-            if received_zatoshis == 0 && sent_zatoshis == 0
-                && change_zatoshis == 0 && spent_input_zatoshis == 0 {
+            if received_zatoshis == 0
+                && sent_zatoshis == 0
+                && change_zatoshis == 0
+                && spent_input_zatoshis == 0
+            {
                 continue;
             }
-
-            seen_txids.insert(*txid);
 
             let fee_zatoshis = tx_entry.fee().map(|f| f.into_u64() as i64);
 
@@ -1193,8 +1191,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 let net = sent_zatoshis - change_zatoshis;
                 ("send".to_string(), net)
             } else if spent_input_zatoshis > 0 && received_zatoshis == 0 {
-                let net_send = spent_input_zatoshis - change_zatoshis
-                    - fee_zatoshis.unwrap_or(0);
+                let net_send = spent_input_zatoshis - change_zatoshis - fee_zatoshis.unwrap_or(0);
                 ("send".to_string(), net_send.max(0))
             } else if change_zatoshis > 0 && received_zatoshis == 0 {
                 ("send".to_string(), 0)
@@ -1204,7 +1201,13 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
             let status = match tx_entry.status() {
                 TransactionStatus::Mined(_) => "mined".to_string(),
-                TransactionStatus::NotInMainChain => "pending".to_string(),
+                TransactionStatus::NotInMainChain => match (tx_entry.expiry_height(), chain_height)
+                {
+                    (Some(expiry_height), Some(chain_height)) if expiry_height <= chain_height => {
+                        "expired".to_string()
+                    }
+                    _ => "pending".to_string(),
+                },
                 TransactionStatus::TxidNotRecognized => "unknown".to_string(),
             };
 
@@ -1223,6 +1226,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 amount_zatoshis: amount_zatoshis.unsigned_abs(),
                 fee_zatoshis: fee_zatoshis.map(|f| f.unsigned_abs()),
                 mined_height: mined_height.map(|h| u32::from(h)),
+                expiry_height: tx_entry.expiry_height().map(|h| u32::from(h)),
                 status,
                 timestamp: block_time.map(|t| t as u64),
                 memo,
@@ -1246,6 +1250,7 @@ pub struct TransactionHistoryEntry {
     pub amount_zatoshis: u64,
     pub fee_zatoshis: Option<u64>,
     pub mined_height: Option<u32>,
+    pub expiry_height: Option<u32>,
     pub status: String,
     pub timestamp: Option<u64>,
     pub memo: Option<String>,
