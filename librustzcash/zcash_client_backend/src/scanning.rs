@@ -247,6 +247,14 @@ impl<AccountId: Copy + Eq + Hash + 'static> ScanningKeys<AccountId, (AccountId, 
     pub fn from_account_ufvks(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
     ) -> Self {
+        Self::from_account_ufvks_with_scopes(ufvks, &[Scope::External, Scope::Internal])
+    }
+
+    /// Constructs a [`ScanningKeys`] from UFVKs, deriving keys only for the specified scopes.
+    pub(crate) fn from_account_ufvks_with_scopes(
+        ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
+        scopes: &[Scope],
+    ) -> Self {
         #![allow(clippy::type_complexity)]
 
         let mut sapling: HashMap<
@@ -261,7 +269,7 @@ impl<AccountId: Copy + Eq + Hash + 'static> ScanningKeys<AccountId, (AccountId, 
 
         for (account_id, ufvk) in ufvks {
             if let Some(dfvk) = ufvk.sapling() {
-                for scope in [Scope::External, Scope::Internal] {
+                for &scope in scopes {
                     sapling.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
@@ -276,7 +284,7 @@ impl<AccountId: Copy + Eq + Hash + 'static> ScanningKeys<AccountId, (AccountId, 
 
             #[cfg(feature = "orchard")]
             if let Some(fvk) = ufvk.orchard() {
-                for scope in [Scope::External, Scope::Internal] {
+                for &scope in scopes {
                     orchard.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
@@ -492,10 +500,12 @@ where
     AccountId: Default + Eq + Hash + ConditionallySelectable + Send + 'static,
     IvkTag: Copy + std::hash::Hash + Eq + Send + 'static,
 {
+    let empty_internal_keys = ScanningKeys::empty();
     scan_block_with_runners::<_, _, _, (), ()>(
         params,
         block,
         scanning_keys,
+        &empty_internal_keys,
         nullifiers,
         prior_block_metadata,
         None,
@@ -648,6 +658,7 @@ pub(crate) fn scan_block_with_runners<P, AccountId, IvkTag, TS, TO>(
     params: &P,
     block: CompactBlock,
     scanning_keys: &ScanningKeys<AccountId, IvkTag>,
+    internal_keys: &ScanningKeys<AccountId, IvkTag>,
     nullifiers: &Nullifiers<AccountId>,
     prior_block_metadata: Option<&BlockMetadata>,
     mut batch_runners: Option<&mut BatchRunners<IvkTag, TS, TO>>,
@@ -853,7 +864,26 @@ where
             spent_from_accounts.chain(orchard_spends.iter().map(|spend| spend.account_id()));
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
-        let (sapling_outputs, mut sapling_nc) = find_received(
+        let decoded_sapling = tx
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(i, output)| {
+                Ok((
+                    SaplingDomain::new(zip212_enforcement),
+                    CompactOutputDescription::try_from(output).map_err(|_| {
+                        ScanError::EncodingInvalid {
+                            at_height: cur_height,
+                            txid,
+                            pool_type: ShieldedProtocol::Sapling,
+                            index: i,
+                        }
+                    })?,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let (mut sapling_outputs, mut sapling_nc) = find_received(
             cur_height,
             sapling_final_tree_size
                 == sapling_commitment_tree_size + u32::try_from(tx.outputs.len()).unwrap(),
@@ -861,33 +891,33 @@ where
             sapling_commitment_tree_size,
             &scanning_keys.sapling,
             &spent_from_accounts,
-            &tx.outputs
-                .iter()
-                .enumerate()
-                .map(|(i, output)| {
-                    Ok((
-                        SaplingDomain::new(zip212_enforcement),
-                        CompactOutputDescription::try_from(output).map_err(|_| {
-                            ScanError::EncodingInvalid {
-                                at_height: cur_height,
-                                txid,
-                                pool_type: ShieldedProtocol::Sapling,
-                                index: i,
-                            }
-                        })?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            &decoded_sapling,
             batch_runners
                 .as_mut()
                 .map(|runners| |txid| runners.sapling.collect_results(cur_hash, txid)),
             |output| sapling::Node::from_cmu(&output.cmu),
         );
         sapling_note_commitments.append(&mut sapling_nc);
-        let has_sapling = !(sapling_spends.is_empty() && sapling_outputs.is_empty());
 
         #[cfg(feature = "orchard")]
-        let (orchard_outputs, mut orchard_nc) = find_received(
+        let decoded_orchard = tx
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(i, action)| {
+                let action =
+                    CompactAction::try_from(action).map_err(|_| ScanError::EncodingInvalid {
+                        at_height: cur_height,
+                        txid,
+                        pool_type: ShieldedProtocol::Orchard,
+                        index: i,
+                    })?;
+                Ok((OrchardDomain::for_compact_action(&action), action))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        #[cfg(feature = "orchard")]
+        let (mut orchard_outputs, mut orchard_nc) = find_received(
             cur_height,
             orchard_final_tree_size
                 == orchard_commitment_tree_size + u32::try_from(tx.actions.len()).unwrap(),
@@ -895,21 +925,7 @@ where
             orchard_commitment_tree_size,
             &scanning_keys.orchard,
             &spent_from_accounts,
-            &tx.actions
-                .iter()
-                .enumerate()
-                .map(|(i, action)| {
-                    let action = CompactAction::try_from(action).map_err(|_| {
-                        ScanError::EncodingInvalid {
-                            at_height: cur_height,
-                            txid,
-                            pool_type: ShieldedProtocol::Orchard,
-                            index: i,
-                        }
-                    })?;
-                    Ok((OrchardDomain::for_compact_action(&action), action))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            &decoded_orchard,
             batch_runners
                 .as_mut()
                 .map(|runners| |txid| runners.orchard.collect_results(cur_hash, txid)),
@@ -918,6 +934,100 @@ where
         #[cfg(feature = "orchard")]
         orchard_note_commitments.append(&mut orchard_nc);
 
+        let has_internal_keys = !internal_keys.sapling.is_empty();
+        #[cfg(feature = "orchard")]
+        let has_internal_keys = has_internal_keys || !internal_keys.orchard.is_empty();
+
+        let has_shielded_outputs = !tx.outputs.is_empty();
+        #[cfg(feature = "orchard")]
+        let has_shielded_outputs = has_shielded_outputs || !tx.actions.is_empty();
+
+        let trigger_nullifier = !sapling_spends.is_empty();
+        #[cfg(feature = "orchard")]
+        let trigger_nullifier = trigger_nullifier || !orchard_spends.is_empty();
+
+        let trigger_external = !sapling_outputs.is_empty();
+        #[cfg(feature = "orchard")]
+        let trigger_external = trigger_external || !orchard_outputs.is_empty();
+
+        let has_no_shielded_spends = tx.spends.is_empty();
+        #[cfg(feature = "orchard")]
+        let has_no_shielded_spends = has_no_shielded_spends && orchard_spends.is_empty();
+
+        // This compact format version does not expose transparent inputs, so use a
+        // conservative shielding trigger. It may do extra Internal-IVK work, but avoids
+        // missing transparent-to-shielded notes sent to Internal scope.
+        let trigger_shielding = has_no_shielded_spends;
+
+        if has_internal_keys
+            && has_shielded_outputs
+            && (trigger_nullifier || trigger_external || trigger_shielding)
+        {
+            if !decoded_sapling.is_empty() {
+                let (mut internal_sapling_outputs, _) = find_received(
+                    cur_height,
+                    false,
+                    txid,
+                    sapling_commitment_tree_size,
+                    &internal_keys.sapling,
+                    &spent_from_accounts,
+                    &decoded_sapling,
+                    None::<
+                        fn(
+                            zcash_primitives::transaction::TxId,
+                        ) -> std::collections::HashMap<
+                            (zcash_primitives::transaction::TxId, usize),
+                            DecryptedOutput<IvkTag, SaplingDomain, ()>,
+                        >,
+                    >,
+                    |output| sapling::Node::from_cmu(&output.cmu),
+                );
+
+                let nc_offset = sapling_note_commitments.len() - decoded_sapling.len();
+                for output in &internal_sapling_outputs {
+                    let idx = nc_offset + output.index();
+                    if let Some((_, retention)) = sapling_note_commitments.get_mut(idx) {
+                        mark_retention(retention);
+                    }
+                }
+
+                sapling_outputs.append(&mut internal_sapling_outputs);
+            }
+
+            #[cfg(feature = "orchard")]
+            if !decoded_orchard.is_empty() {
+                let (mut internal_orchard_outputs, _) = find_received(
+                    cur_height,
+                    false,
+                    txid,
+                    orchard_commitment_tree_size,
+                    &internal_keys.orchard,
+                    &spent_from_accounts,
+                    &decoded_orchard,
+                    None::<
+                        fn(
+                            zcash_primitives::transaction::TxId,
+                        ) -> std::collections::HashMap<
+                            (zcash_primitives::transaction::TxId, usize),
+                            DecryptedOutput<IvkTag, OrchardDomain, ()>,
+                        >,
+                    >,
+                    |output| MerkleHashOrchard::from_cmx(&output.cmx()),
+                );
+
+                let nc_offset = orchard_note_commitments.len() - decoded_orchard.len();
+                for output in &internal_orchard_outputs {
+                    let idx = nc_offset + output.index();
+                    if let Some((_, retention)) = orchard_note_commitments.get_mut(idx) {
+                        mark_retention(retention);
+                    }
+                }
+
+                orchard_outputs.append(&mut internal_orchard_outputs);
+            }
+        }
+
+        let has_sapling = !(sapling_spends.is_empty() && sapling_outputs.is_empty());
         #[cfg(feature = "orchard")]
         let has_orchard = !(orchard_spends.is_empty() && orchard_outputs.is_empty());
         #[cfg(not(feature = "orchard"))]
@@ -983,6 +1093,16 @@ where
             orchard_nullifier_map,
         ),
     ))
+}
+
+fn mark_retention(retention: &mut Retention<BlockHeight>) {
+    match retention {
+        Retention::Ephemeral => *retention = Retention::Marked,
+        Retention::Checkpoint { marking, .. } => {
+            *marking = Marking::Marked;
+        }
+        _ => {}
+    }
 }
 
 /// Check for spent notes. The comparison against known-unspent nullifiers is done
@@ -1224,8 +1344,30 @@ pub mod testing {
         tx_after: bool,
         initial_tree_sizes: Option<(u32, u32)>,
     ) -> CompactBlock {
-        let zip212_enforcement = zip212_enforcement(&Network::TestNetwork, height);
         let to = dfvk.default_address().1;
+        fake_compact_block_to_address(
+            height,
+            prev_hash,
+            nf,
+            dfvk,
+            to,
+            value,
+            tx_after,
+            initial_tree_sizes,
+        )
+    }
+
+    pub fn fake_compact_block_to_address(
+        height: BlockHeight,
+        prev_hash: BlockHash,
+        nf: Nullifier,
+        dfvk: &DiversifiableFullViewingKey,
+        to: sapling::PaymentAddress,
+        value: Zatoshis,
+        tx_after: bool,
+        initial_tree_sizes: Option<(u32, u32)>,
+    ) -> CompactBlock {
+        let zip212_enforcement = zip212_enforcement(&Network::TestNetwork, height);
 
         // Create a fake Note for the account
         let mut rng = OsRng;
@@ -1316,7 +1458,11 @@ mod tests {
         scanning::{BatchRunners, ScanningKeys},
     };
 
-    use super::{scan_block, scan_block_with_runners, testing::fake_compact_block, Nullifiers};
+    use super::{
+        scan_block, scan_block_with_runners,
+        testing::{fake_compact_block, fake_compact_block_to_address},
+        Nullifiers,
+    };
 
     #[test]
     fn scan_block_with_my_tx() {
@@ -1352,10 +1498,12 @@ mod tests {
                 None
             };
 
+            let empty_internal_keys = ScanningKeys::empty();
             let scanned_block = scan_block_with_runners(
                 &network,
                 cb,
                 &scanning_keys,
+                &empty_internal_keys,
                 &Nullifiers::empty(),
                 Some(&BlockMetadata::from_parts(
                     BlockHeight::from(0),
@@ -1438,10 +1586,12 @@ mod tests {
                 None
             };
 
+            let empty_internal_keys = ScanningKeys::empty();
             let scanned_block = scan_block_with_runners(
                 &network,
                 cb,
                 &scanning_keys,
+                &empty_internal_keys,
                 &Nullifiers::empty(),
                 None,
                 batch_runners.as_mut(),
@@ -1478,6 +1628,65 @@ mod tests {
 
         go(false);
         go(true);
+    }
+
+    #[test]
+    fn scan_block_with_internal_fallback() {
+        let network = Network::TestNetwork;
+        let account = AccountId::ZERO;
+        let usk = UnifiedSpendingKey::from_seed(&network, &[0u8; 32], account).expect("Valid USK");
+        let ufvk = usk.to_unified_full_viewing_key();
+        let sapling_dfvk = ufvk.sapling().expect("Sapling key is present").clone();
+        let (_, internal_address) = sapling_dfvk.change_address();
+
+        let mut cb = fake_compact_block_to_address(
+            1u32.into(),
+            BlockHash([0; 32]),
+            Nullifier([0; 32]),
+            &sapling_dfvk,
+            internal_address,
+            Zatoshis::const_from_u64(5),
+            false,
+            Some((0, 0)),
+        );
+        cb.vtx[1].spends.clear();
+
+        let scanning_keys = ScanningKeys::from_account_ufvks_with_scopes(
+            [(account, ufvk.clone())],
+            &[zip32::Scope::External],
+        );
+        let internal_keys = ScanningKeys::from_account_ufvks_with_scopes(
+            [(account, ufvk)],
+            &[zip32::Scope::Internal],
+        );
+        let mut runners = BatchRunners::<_, (), ()>::for_keys(10, &scanning_keys);
+        runners.add_block(&network, cb.clone()).unwrap();
+        runners.flush();
+
+        let scanned_block = scan_block_with_runners(
+            &network,
+            cb,
+            &scanning_keys,
+            &internal_keys,
+            &Nullifiers::empty(),
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([0u8; 32]),
+                Some(0),
+                #[cfg(feature = "orchard")]
+                Some(0),
+            )),
+            Some(&mut runners),
+        )
+        .unwrap();
+
+        let txs = scanned_block.transactions();
+        assert_eq!(txs.len(), 1);
+        let output = &txs[0].sapling_outputs()[0];
+        assert_eq!(output.account_id(), &account);
+        assert_eq!(output.recipient_key_scope(), Some(zip32::Scope::Internal));
+        assert_eq!(output.note().value().inner(), 5);
+        assert_eq!(output.note_commitment_tree_position(), Position::from(1));
     }
 
     #[test]

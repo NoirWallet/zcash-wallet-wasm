@@ -27,8 +27,8 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use crate::{
     data_api::{
         chain::{
-            error::Error as ChainError, scan_cached_blocks, BlockCache, ChainState,
-            CommitmentTreeRoot,
+            error::Error as ChainError, scan_cached_blocks, scan_cached_blocks_optimized,
+            BlockCache, ChainState, CommitmentTreeRoot,
         },
         scanning::{ScanPriority, ScanRange},
         WalletCommitmentTrees, WalletRead, WalletWrite,
@@ -113,6 +113,131 @@ where
 {
     update_subtree_roots(client, db_data).await?;
     running_single_batch(client, params, db_cache, db_data, batch_size).await
+}
+
+/// Syncs a single batch using the optimized scanner.
+///
+/// This has the same return semantics as [`run_next_batch`], but uses
+/// External-only batch trial decryption with targeted Internal IVK fallback for
+/// contiguous scan ranges.
+pub async fn run_next_batch_optimized<P, ChT, CaT, DbT>(
+    client: &mut CompactTxStreamerClient<ChT>,
+    params: &P,
+    db_cache: &CaT,
+    db_data: &mut DbT,
+    batch_size: u32,
+) -> Result<
+    bool,
+    Error<CaT::Error, <DbT as WalletRead>::Error, <DbT as WalletCommitmentTrees>::Error>,
+>
+where
+    P: Parameters + Send + 'static,
+    ChT: GrpcService<TonicBody>,
+    ChT::Error: Into<StdError>,
+    ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
+    CaT: BlockCache,
+    CaT::Error: std::error::Error + Send + Sync + 'static,
+    DbT: WalletWrite + WalletCommitmentTrees,
+    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
+    <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
+{
+    update_subtree_roots(client, db_data).await?;
+    running_single_batch_optimized(client, params, db_cache, db_data, batch_size).await
+}
+
+async fn running_single_batch_optimized<P, ChT, CaT, DbT, TrErr>(
+    client: &mut CompactTxStreamerClient<ChT>,
+    params: &P,
+    db_cache: &CaT,
+    db_data: &mut DbT,
+    batch_size: u32,
+) -> Result<bool, Error<CaT::Error, <DbT as WalletRead>::Error, TrErr>>
+where
+    P: Parameters + Send + 'static,
+    ChT: GrpcService<TonicBody>,
+    ChT::Error: Into<StdError>,
+    ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
+    CaT: BlockCache,
+    CaT::Error: std::error::Error + Send + Sync + 'static,
+    DbT: WalletWrite,
+    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::Error: std::error::Error + Send + Sync + 'static,
+{
+    update_chain_tip(client, db_data).await?;
+
+    #[cfg(feature = "transparent-inputs")]
+    for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
+        let start_height = db_data
+            .utxo_query_height(account_id)
+            .map_err(Error::Wallet)?;
+        info!(
+            "Refreshing UTXOs for {:?} from height {}",
+            account_id, start_height,
+        );
+        refresh_utxos(params, client, db_data, account_id, start_height).await?;
+    }
+
+    let mut scan_ranges = db_data.suggest_scan_ranges().map_err(Error::Wallet)?;
+    loop {
+        match scan_ranges.first() {
+            Some(scan_range) if scan_range.priority() == ScanPriority::Verify => {
+                download_blocks(client, db_cache, scan_range).await?;
+                let chain_state =
+                    download_chain_state(client, scan_range.block_range().start - 1).await?;
+                let scan_ranges_updated =
+                    scan_blocks_optimized(params, db_cache, db_data, &chain_state, scan_range)
+                        .await?;
+                db_cache
+                    .delete(scan_range.clone())
+                    .await
+                    .map_err(Error::Cache)?;
+                if scan_ranges_updated {
+                    scan_ranges = db_data.suggest_scan_ranges().map_err(Error::Wallet)?;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let scan_ranges = db_data.suggest_scan_ranges().map_err(Error::Wallet)?;
+    debug!("Suggested ranges: {:?}", scan_ranges);
+
+    let first_batch = scan_ranges
+        .into_iter()
+        .flat_map(|r| {
+            (0..).scan(r, |acc, _| {
+                if acc.is_empty() {
+                    None
+                } else if let Some((cur, next)) = acc.split_at(acc.block_range().start + batch_size)
+                {
+                    *acc = next;
+                    Some(cur)
+                } else {
+                    let cur = acc.clone();
+                    let end = acc.block_range().end;
+                    *acc = ScanRange::from_parts(end..end, acc.priority());
+                    Some(cur)
+                }
+            })
+        })
+        .next();
+
+    match first_batch {
+        Some(scan_range) => {
+            download_blocks(client, db_cache, &scan_range).await?;
+            let chain_state =
+                download_chain_state(client, scan_range.block_range().start - 1).await?;
+            scan_blocks_optimized(params, db_cache, db_data, &chain_state, &scan_range).await?;
+            db_cache.delete(scan_range).await.map_err(Error::Cache)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 async fn running_single_batch<P, ChT, CaT, DbT, TrErr>(
@@ -561,6 +686,63 @@ where
         Ok(_) => {
             // If scanning these blocks caused a suggested range to be added that has a
             // higher priority than the current range, invalidate the current ranges.
+            let latest_ranges = db_data.suggest_scan_ranges().map_err(Error::Wallet)?;
+
+            Ok(if let Some(range) = latest_ranges.first() {
+                range.priority() > scan_range.priority()
+            } else {
+                false
+            })
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn scan_blocks_optimized<P, CaT, DbT, TrErr>(
+    params: &P,
+    db_cache: &CaT,
+    db_data: &mut DbT,
+    initial_chain_state: &ChainState,
+    scan_range: &ScanRange,
+) -> Result<bool, Error<CaT::Error, <DbT as WalletRead>::Error, TrErr>>
+where
+    P: Parameters + Send + 'static,
+    CaT: BlockCache,
+    CaT::Error: std::error::Error + Send + Sync + 'static,
+    DbT: WalletWrite,
+    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::Error: std::error::Error + Send + Sync + 'static,
+{
+    info!("Scanning {} with optimized scanner", scan_range);
+    let scan_result = scan_cached_blocks_optimized(
+        params,
+        db_cache,
+        db_data,
+        scan_range.block_range().start,
+        initial_chain_state,
+        scan_range.len(),
+    );
+
+    match scan_result {
+        Err(ChainError::Scan(err)) if err.is_continuity_error() => {
+            let rewind_height = err.at_height().saturating_sub(10);
+            info!(
+                "Chain reorg detected at {}, rewinding to {}",
+                err.at_height(),
+                rewind_height,
+            );
+
+            db_data
+                .truncate_to_height(rewind_height)
+                .map_err(Error::Wallet)?;
+            db_cache
+                .truncate(rewind_height)
+                .await
+                .map_err(Error::Cache)?;
+
+            Ok(true)
+        }
+        Ok(_) => {
             let latest_ranges = db_data.suggest_scan_ranges().map_err(Error::Wallet)?;
 
             Ok(if let Some(range) = latest_ranges.first() {
