@@ -196,6 +196,7 @@
             <input type="number" id="addressAccountId" value="0" min="0">
             <button onclick="getCurrentAddress()">Get Address</button>
             <button onclick="getUnifiedAddresses()">Get All Addresses</button>
+            <button onclick="testNextShieldedAddress()">Test Next Shielded Address</button>
             <div class="result" id="addressResult"></div>
         </div>
 
@@ -646,6 +647,60 @@
                 );
             } catch (e) {
                 showResult('addressResult', 'Error: ' + e, 'error');
+            }
+        };
+
+        window.testNextShieldedAddress = async function() {
+            try {
+                if (!wallet) {
+                    throw new Error('Please initialize wallet first');
+                }
+
+                const accountId = parseInt(document.getElementById('addressAccountId').value);
+                showResult('addressResult', 'Generating two next shielded addresses...', 'info');
+
+                const first = await wallet.get_next_shielded_address(accountId);
+                const second = await wallet.get_next_shielded_address(accountId);
+
+                const failures = [];
+                if (!first.unified || !second.unified) {
+                    failures.push('Missing unified shielded address');
+                }
+                if (!first.full_unified || !second.full_unified) {
+                    failures.push('Missing full_unified address');
+                }
+                if (first.transparent != null || second.transparent != null) {
+                    failures.push('Shielded address unexpectedly contains a transparent receiver');
+                }
+                if (first.address_index != null || second.address_index != null) {
+                    failures.push('Shielded address unexpectedly has address_index');
+                }
+                if (first.unified === second.unified) {
+                    failures.push('Two generated shielded addresses are identical');
+                }
+                if (first.full_unified === second.full_unified) {
+                    failures.push('Two generated full_unified addresses are identical');
+                }
+
+                const details =
+                    'First next shielded address:\n' + stringifyWithBigInt(first, 2) +
+                    '\n\nSecond next shielded address:\n' + stringifyWithBigInt(second, 2);
+
+                if (failures.length > 0) {
+                    throw new Error(failures.join('\n') + '\n\n' + details);
+                }
+
+                showResult('addressResult',
+                    '✅ get_next_shielded_address test passed!\n' +
+                    '• Consecutive calls returned different addresses\n' +
+                    '• No transparent receiver was returned\n' +
+                    '• address_index is null as expected\n\n' +
+                    details,
+                    'success'
+                );
+            } catch (e) {
+                showResult('addressResult', '❌ get_next_shielded_address test failed:\n' + e, 'error');
+                console.error('Next shielded address test error:', e);
             }
         };
 

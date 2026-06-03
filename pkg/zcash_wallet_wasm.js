@@ -265,12 +265,12 @@ if (cachedTextEncoder) {
 
 let WASM_VECTOR_LEN = 0;
 
-function __wasm_bindgen_func_elem_2980(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_2980(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_2987(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_2987(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7219(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_7219(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_7227(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_7227(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 const __wbindgen_enum_ReadableStreamType = ["bytes"];
@@ -1601,6 +1601,27 @@ export class WebWallet {
         return takeObject(ret);
     }
     /**
+     * Generate and persist the next shielded receiving address for an account.
+     *
+     * This returns a unified address containing the account's available shielded receivers
+     * (Orchard/Sapling) and no transparent receiver. It advances the wallet's stored address
+     * position, so callers should persist the wallet DB after using this method.
+     *
+     * # Arguments
+     *
+     * * `account_id` - The account ID to generate the next shielded address for
+     *
+     * # Returns
+     *
+     * Returns a UnifiedAddresses object. `transparent` and `address_index` will be null.
+     * @param {number} account_id
+     * @returns {Promise<any>}
+     */
+    get_next_shielded_address(account_id) {
+        const ret = wasm.webwallet_get_next_shielded_address(this.__wbg_ptr, account_id);
+        return takeObject(ret);
+    }
+    /**
      * @param {number} account_id
      * @param {string} to_address
      * @param {bigint} value
@@ -2535,7 +2556,7 @@ function __wbg_get_imports(memory) {
                 const a = state0.a;
                 state0.a = 0;
                 try {
-                    return __wasm_bindgen_func_elem_7219(a, state0.b, arg0, arg1);
+                    return __wasm_bindgen_func_elem_7227(a, state0.b, arg0, arg1);
                 } finally {
                     state0.a = a;
                 }
@@ -2770,6 +2791,11 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg_warn_6e567d0d926ff881 = function(arg0) {
         console.warn(getObject(arg0));
     };
+    imports.wbg.__wbindgen_cast_1145c60d8e5ddb5c = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1038, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1039, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2986, __wasm_bindgen_func_elem_2987);
+        return addHeapObject(ret);
+    };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
         // Cast intrinsic for `Ref(String) -> Externref`.
         const ret = getStringFromWasm0(arg0, arg1);
@@ -2792,19 +2818,9 @@ function __wbg_get_imports(memory) {
         const ret = v0;
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_cast_94ef0f56707f22c3 = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1034, function: Function { arguments: [Externref], shim_idx: 1035, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2979, __wasm_bindgen_func_elem_2980);
-        return addHeapObject(ret);
-    };
     imports.wbg.__wbindgen_cast_9ae0607507abb057 = function(arg0) {
         // Cast intrinsic for `I64 -> Externref`.
         const ret = arg0;
-        return addHeapObject(ret);
-    };
-    imports.wbg.__wbindgen_cast_ac2aa53157682d85 = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 1034, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1035, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2979, __wasm_bindgen_func_elem_2980);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_cast_cb9088102bce6b30 = function(arg0, arg1) {
@@ -2815,6 +2831,11 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {
         // Cast intrinsic for `F64 -> Externref`.
         const ret = arg0;
+        return addHeapObject(ret);
+    };
+    imports.wbg.__wbindgen_cast_e01e66d4b4305c5a = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 1038, function: Function { arguments: [Externref], shim_idx: 1039, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2986, __wasm_bindgen_func_elem_2987);
         return addHeapObject(ret);
     };
     imports.wbg.__wbindgen_link_203404ece0e9bab9 = function(arg0) {

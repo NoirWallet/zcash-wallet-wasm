@@ -331,6 +331,22 @@ export class WebWallet {
    * ```
    */
   get_unified_addresses(account_id: number): Promise<any>;
+  /**
+   * Generate and persist the next shielded receiving address for an account.
+   *
+   * This returns a unified address containing the account's available shielded receivers
+   * (Orchard/Sapling) and no transparent receiver. It advances the wallet's stored address
+   * position, so callers should persist the wallet DB after using this method.
+   *
+   * # Arguments
+   *
+   * * `account_id` - The account ID to generate the next shielded address for
+   *
+   * # Returns
+   *
+   * Returns a UnifiedAddresses object. `transparent` and `address_index` will be null.
+   */
+  get_next_shielded_address(account_id: number): Promise<any>;
   oneclick_pczt_transfer(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null, memo?: Uint8Array | null): Promise<string>;
   oneclick_pczt_shield(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null): Promise<string>;
   get_latest_block(): Promise<bigint>;
@@ -635,6 +651,7 @@ export interface InitOutput {
   readonly webwallet_get_account_id_by_name: (a: number, b: number, c: number) => number;
   readonly webwallet_get_account_hd_index: (a: number, b: number) => number;
   readonly webwallet_get_unified_addresses: (a: number, b: number) => number;
+  readonly webwallet_get_next_shielded_address: (a: number, b: number) => number;
   readonly webwallet_oneclick_pczt_transfer: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number) => number;
   readonly webwallet_oneclick_pczt_shield: (a: number, b: number, c: number, d: number, e: number) => number;
   readonly webwallet_get_latest_block: (a: number) => number;
@@ -682,9 +699,9 @@ export interface InitOutput {
   readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
   readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
   readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_2980: (a: number, b: number, c: number) => void;
-  readonly __wasm_bindgen_func_elem_2979: (a: number, b: number) => void;
-  readonly __wasm_bindgen_func_elem_7219: (a: number, b: number, c: number, d: number) => void;
+  readonly __wasm_bindgen_func_elem_2987: (a: number, b: number, c: number) => void;
+  readonly __wasm_bindgen_func_elem_2986: (a: number, b: number) => void;
+  readonly __wasm_bindgen_func_elem_7227: (a: number, b: number, c: number, d: number) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_export: (a: number, b: number) => number;
   readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
