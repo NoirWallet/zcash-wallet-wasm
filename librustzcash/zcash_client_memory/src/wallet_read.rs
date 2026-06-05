@@ -233,9 +233,9 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             // Don't count notes in unmined transactions that have expired.
             if let Some(note_tx) = self.tx_table.get_transaction(&note.txid) {
                 if note_tx.mined_height().is_none()
-                    && note_tx
-                        .expiry_height()
-                        .is_some_and(|expiry_height| expiry_height < BlockHeight::from(target_height))
+                    && note_tx.expiry_height().is_some_and(|expiry_height| {
+                        expiry_height < BlockHeight::from(target_height)
+                    })
                 {
                     continue;
                 }
@@ -697,9 +697,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         {
             return Ok(Some(TransparentAddressMetadata::derived(
                 Scope::External.into(),
-                NonHardenedChildIndex::from_index((*diversifier_index).try_into().unwrap()).expect(
-                    "diversifier index corresponds to a valid NonHardenedChildIndex",
-                ),
+                NonHardenedChildIndex::from_index((*diversifier_index).try_into().unwrap())
+                    .expect("diversifier index corresponds to a valid NonHardenedChildIndex"),
                 Exposure::Unknown,
                 None,
             )));
@@ -788,14 +787,11 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .addresses()
             .iter()
             .map(|(diversifier_index, ua)| {
-                AddressInfo::from_parts(
-                    ua.clone().into(),
-                    AddressSource::Derived {
-                        diversifier_index: *diversifier_index,
-                        #[cfg(feature = "transparent-inputs")]
-                        transparent_key_scope: None,
-                    },
-                )
+                AddressInfo::from_parts(ua.clone().into(), AddressSource::Derived {
+                    diversifier_index: *diversifier_index,
+                    #[cfg(feature = "transparent-inputs")]
+                    transparent_key_scope: None,
+                })
                 .ok_or_else(|| Error::CorruptedData("invalid address metadata".to_owned()))
             })
             .collect()

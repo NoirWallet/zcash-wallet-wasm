@@ -217,9 +217,8 @@ mod serialization {
     }
 
     fn transparent_key_scope_from_proto(scope: u32) -> Result<TransparentKeyScope, Error> {
-        TransparentKeyScope::custom(scope).ok_or_else(|| {
-            Error::CorruptedData(format!("invalid transparent key scope {scope}"))
-        })
+        TransparentKeyScope::custom(scope)
+            .ok_or_else(|| Error::CorruptedData(format!("invalid transparent key scope {scope}")))
     }
 
     impl From<TxOut> for proto::TxOut {

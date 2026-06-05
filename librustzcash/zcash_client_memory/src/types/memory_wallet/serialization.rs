@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 use consensus::Parameters;
-use prost::encoding::{self, message, uint32, uint64};
 use prost::Message;
+use prost::encoding::{self, message, uint32, uint64};
 
 use super::*;
 use crate::error::Result;
@@ -9,8 +9,8 @@ use crate::proto::memwallet as proto;
 use crate::read_optional;
 use crate::wallet_commitment_trees::serialization::{tree_from_protobuf, tree_to_protobuf};
 use shardtree::{
-    store::{memory::MemoryShardStore, ShardStore},
     ShardTree,
+    store::{ShardStore, memory::MemoryShardStore},
 };
 use zcash_client_backend::serialization::shardtree::write_shard;
 use zcash_protocol::consensus::BlockHeight;
@@ -30,13 +30,10 @@ impl<P: Parameters> MemoryWalletDb<P> {
         }
 
         for (txid, tx) in &self.tx_table.0 {
-            len += message::encoded_len(
-                4,
-                &proto::TransactionTableRecord {
-                    tx_id: Some((*txid).into()),
-                    tx_entry: Some(tx.clone().into()),
-                },
-            );
+            len += message::encoded_len(4, &proto::TransactionTableRecord {
+                tx_id: Some((*txid).into()),
+                tx_entry: Some(tx.clone().into()),
+            });
         }
 
         for note in self.received_notes.iter() {
@@ -44,45 +41,33 @@ impl<P: Parameters> MemoryWalletDb<P> {
         }
 
         for (note_id, tx_id) in &self.received_note_spends.0 {
-            len += message::encoded_len(
-                6,
-                &proto::ReceivedNoteSpendRecord {
-                    note_id: Some((*note_id).into()),
-                    tx_id: Some((*tx_id).into()),
-                },
-            );
+            len += message::encoded_len(6, &proto::ReceivedNoteSpendRecord {
+                note_id: Some((*note_id).into()),
+                tx_id: Some((*tx_id).into()),
+            });
         }
 
         for (nullifier, (height, tx_index)) in &self.nullifiers.0 {
-            len += message::encoded_len(
-                7,
-                &proto::NullifierRecord {
-                    block_height: (*height).into(),
-                    tx_index: *tx_index,
-                    nullifier: Some((*nullifier).into()),
-                },
-            );
+            len += message::encoded_len(7, &proto::NullifierRecord {
+                block_height: (*height).into(),
+                tx_index: *tx_index,
+                nullifier: Some((*nullifier).into()),
+            });
         }
 
         for (id, note) in &self.sent_notes.0 {
-            len += message::encoded_len(
-                8,
-                &proto::SentNoteRecord {
-                    sent_note_id: Some(id.clone().into()),
-                    sent_note: Some(proto::SentNote::from(note.clone())),
-                },
-            );
+            len += message::encoded_len(8, &proto::SentNoteRecord {
+                sent_note_id: Some(id.clone().into()),
+                sent_note: Some(proto::SentNote::from(note.clone())),
+            });
         }
 
         for ((height, tx_index), txid) in &self.tx_locator.0 {
-            len += message::encoded_len(
-                9,
-                &proto::TxLocatorRecord {
-                    block_height: (*height).into(),
-                    tx_index: *tx_index,
-                    tx_id: Some((*txid).into()),
-                },
-            );
+            len += message::encoded_len(9, &proto::TxLocatorRecord {
+                block_height: (*height).into(),
+                tx_index: *tx_index,
+                tx_id: Some((*txid).into()),
+            });
         }
 
         for r in self.scan_queue.iter() {
@@ -92,14 +77,11 @@ impl<P: Parameters> MemoryWalletDb<P> {
         len += self.encoded_shard_tree_len(11, &self.sapling_tree)?;
 
         for (address, height) in &self.sapling_tree_shard_end_heights {
-            len += message::encoded_len(
-                12,
-                &proto::TreeEndHeightsRecord {
-                    level: address.level().into(),
-                    index: address.index(),
-                    block_height: (*height).into(),
-                },
-            );
+            len += message::encoded_len(12, &proto::TreeEndHeightsRecord {
+                level: address.level().into(),
+                index: address.index(),
+                block_height: (*height).into(),
+            });
         }
 
         #[cfg(feature = "orchard")]
@@ -107,45 +89,33 @@ impl<P: Parameters> MemoryWalletDb<P> {
             len += self.encoded_shard_tree_len(13, &self.orchard_tree)?;
 
             for (address, height) in &self.orchard_tree_shard_end_heights {
-                len += message::encoded_len(
-                    14,
-                    &proto::TreeEndHeightsRecord {
-                        level: address.level().into(),
-                        index: address.index(),
-                        block_height: (*height).into(),
-                    },
-                );
+                len += message::encoded_len(14, &proto::TreeEndHeightsRecord {
+                    level: address.level().into(),
+                    index: address.index(),
+                    block_height: (*height).into(),
+                });
             }
         }
 
         for (outpoint, output) in &self.transparent_received_outputs.0 {
-            len += message::encoded_len(
-                15,
-                &proto::TransparentReceivedOutputRecord {
-                    outpoint: Some(proto::OutPoint::from(outpoint.clone())),
-                    output: Some(proto::ReceivedTransparentOutput::from(output.clone())),
-                },
-            );
+            len += message::encoded_len(15, &proto::TransparentReceivedOutputRecord {
+                outpoint: Some(proto::OutPoint::from(outpoint.clone())),
+                output: Some(proto::ReceivedTransparentOutput::from(output.clone())),
+            });
         }
 
         for (outpoint, txid) in &self.transparent_received_output_spends.0 {
-            len += message::encoded_len(
-                16,
-                &proto::TransparentReceivedOutputSpendRecord {
-                    outpoint: Some(proto::OutPoint::from(outpoint.clone())),
-                    tx_id: Some((*txid).into()),
-                },
-            );
+            len += message::encoded_len(16, &proto::TransparentReceivedOutputSpendRecord {
+                outpoint: Some(proto::OutPoint::from(outpoint.clone())),
+                tx_id: Some((*txid).into()),
+            });
         }
 
         for (txid, outpoint) in &self.transparent_spend_map.0 {
-            len += message::encoded_len(
-                17,
-                &proto::TransparentSpendCacheRecord {
-                    tx_id: Some((*txid).into()),
-                    outpoint: Some(proto::OutPoint::from(outpoint.clone())),
-                },
-            );
+            len += message::encoded_len(17, &proto::TransparentSpendCacheRecord {
+                tx_id: Some((*txid).into()),
+                outpoint: Some(proto::OutPoint::from(outpoint.clone())),
+            });
         }
 
         for request in &self.transaction_data_request_queue.0 {
@@ -700,16 +670,13 @@ where
         self.tree
             .store()
             .for_each_checkpoint(usize::MAX, |id, checkpoint| {
-                len += message::encoded_len(
-                    3,
-                    &proto::TreeCheckpoint {
-                        checkpoint_id: (*id).into(),
-                        position: match checkpoint.tree_state() {
-                            shardtree::store::TreeState::Empty => 0,
-                            shardtree::store::TreeState::AtPosition(position) => position.into(),
-                        },
+                len += message::encoded_len(3, &proto::TreeCheckpoint {
+                    checkpoint_id: (*id).into(),
+                    position: match checkpoint.tree_state() {
+                        shardtree::store::TreeState::Empty => 0,
+                        shardtree::store::TreeState::AtPosition(position) => position.into(),
                     },
-                );
+                });
                 Ok(())
             })?;
 

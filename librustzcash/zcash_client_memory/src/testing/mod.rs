@@ -407,7 +407,8 @@ where
         let mut legacy_encoded = Vec::new();
         prost::Message::encode(&proto, &mut legacy_encoded).unwrap();
         let recovered_from_legacy_encode =
-            MemoryWalletDb::decode_new(legacy_encoded.as_slice(), self.params.clone(), 100).unwrap();
+            MemoryWalletDb::decode_new(legacy_encoded.as_slice(), self.params.clone(), 100)
+                .unwrap();
         assert_eq!(self, &recovered_from_legacy_encode);
 
         let mut encoded = Vec::new();
