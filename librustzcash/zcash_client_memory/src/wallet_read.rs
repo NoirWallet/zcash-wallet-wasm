@@ -679,6 +679,54 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         Ok(t_addresses)
     }
 
+    #[cfg(feature = "transparent-inputs")]
+    fn get_transparent_address_metadata(
+        &self,
+        account_id: Self::AccountId,
+        address: &TransparentAddress,
+    ) -> Result<Option<TransparentAddressMetadata>, Self::Error> {
+        let account = self
+            .accounts
+            .get(account_id)
+            .ok_or(Error::AccountUnknown(account_id))?;
+
+        if let Some((diversifier_index, _)) = account
+            .addresses()
+            .iter()
+            .find(|(_, ua)| ua.transparent() == Some(address))
+        {
+            return Ok(Some(TransparentAddressMetadata::derived(
+                Scope::External.into(),
+                NonHardenedChildIndex::from_index((*diversifier_index).try_into().unwrap()).expect(
+                    "diversifier index corresponds to a valid NonHardenedChildIndex",
+                ),
+                Exposure::Unknown,
+                None,
+            )));
+        }
+
+        if let Some((_, metadata)) = account
+            .ephemeral_addresses()?
+            .into_iter()
+            .find(|(ephemeral_address, _)| ephemeral_address == address)
+        {
+            return Ok(Some(metadata));
+        }
+
+        if let Some((legacy_address, address_index)) = account.get_legacy_transparent_address()? {
+            if legacy_address == *address {
+                return Ok(Some(TransparentAddressMetadata::derived(
+                    Scope::External.into(),
+                    address_index,
+                    Exposure::Unknown,
+                    None,
+                )));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Returns a mapping from each transparent receiver associated with the specified account
     /// to its not-yet-shielded UTXO balance, including only the effects of transactions mined
     /// at a block height less than or equal to `summary_height`.

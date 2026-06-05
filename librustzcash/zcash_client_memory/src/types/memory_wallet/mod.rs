@@ -1044,7 +1044,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     }
 
     #[cfg(feature = "transparent-inputs")]
-    #[allow(unreachable_code, unused_variables)] //FIXME: need address key scope detection
     pub(crate) fn put_transparent_output(
         &mut self,
         output: &WalletTransparentOutput,
@@ -1054,6 +1053,12 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         use crate::types::transparent::ReceivedTransparentOutput;
 
         let address = output.recipient_address();
+        let key_scope = self
+            .accounts
+            .get(*receiving_account)
+            .ok_or(Error::AccountUnknown(*receiving_account))?
+            .transparent_key_scope_for_address(address)?
+            .ok_or(Error::AddressNotRecognized(*address))?;
         // get the block height of the block that mined the output only if we have it in the block table
         // otherwise return None
         let block = output
@@ -1111,7 +1116,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     txid,
                     *receiving_account,
                     *address,
-                    todo!("look up the key scope for the address"),
+                    key_scope,
                     output.txout().clone(),
                     max_observed_unspent.unwrap_or(BlockHeight::from(0)),
                 ));

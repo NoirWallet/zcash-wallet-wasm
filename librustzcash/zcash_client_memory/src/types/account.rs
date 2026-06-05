@@ -385,6 +385,36 @@ impl Account {
             .as_ref()
             .map(|tivk| tivk.default_address()))
     }
+
+    pub(crate) fn transparent_key_scope_for_address(
+        &self,
+        address: &TransparentAddress,
+    ) -> Result<Option<TransparentKeyScope>, Error> {
+        if self
+            .addresses()
+            .iter()
+            .any(|(_, unified_address)| unified_address.transparent() == Some(address))
+        {
+            return Ok(Some(TransparentKeyScope::EXTERNAL));
+        }
+
+        if self
+            .ephemeral_addresses()?
+            .iter()
+            .any(|(ephemeral_address, _)| ephemeral_address == address)
+        {
+            return Ok(Some(TransparentKeyScope::EPHEMERAL));
+        }
+
+        if self
+            .get_legacy_transparent_address()?
+            .is_some_and(|(legacy_address, _)| legacy_address == *address)
+        {
+            return Ok(Some(TransparentKeyScope::EXTERNAL));
+        }
+
+        Ok(None)
+    }
 }
 #[cfg(feature = "transparent-inputs")]
 impl Account {

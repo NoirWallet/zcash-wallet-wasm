@@ -404,6 +404,20 @@ where
 
         assert_eq!(self, &recovered_wallet);
 
+        let mut legacy_encoded = Vec::new();
+        prost::Message::encode(&proto, &mut legacy_encoded).unwrap();
+        let recovered_from_legacy_encode =
+            MemoryWalletDb::decode_new(legacy_encoded.as_slice(), self.params.clone(), 100).unwrap();
+        assert_eq!(self, &recovered_from_legacy_encode);
+
+        let mut encoded = Vec::new();
+        self.encode(&mut encoded).unwrap();
+        assert_eq!(self.encoded_len().unwrap(), encoded.len());
+
+        let recovered_from_streaming_encode =
+            MemoryWalletDb::decode_new(encoded.as_slice(), self.params.clone(), 100).unwrap();
+        assert_eq!(self, &recovered_from_streaming_encode);
+
         // ensure the trees can be roundtripped
         use crate::wallet_commitment_trees::serialization::{tree_from_protobuf, tree_to_protobuf};
 

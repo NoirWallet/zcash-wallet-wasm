@@ -356,6 +356,8 @@ pub struct ReceivedTransparentOutput {
     pub txout: ::core::option::Option<TxOut>,
     #[prost(uint32, optional, tag = "5")]
     pub max_observed_unspent_height: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub recipient_key_scope: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TxOut {

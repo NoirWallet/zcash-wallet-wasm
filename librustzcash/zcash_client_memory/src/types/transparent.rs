@@ -180,14 +180,11 @@ mod serialization {
                 address: output.address.encode(&EncodingParams),
                 txout: Some(output.txout.into()),
                 max_observed_unspent_height: output.max_observed_unspent_height.map(|h| h.into()),
+                recipient_key_scope: transparent_key_scope_to_proto(output.key_scope),
             }
         }
     }
 
-    // FIXME: Key scope information needs to be added to both `proto::Address` and
-    // `proto::ReceivedTransparentOutput`, with a data migration that updates stored data with
-    // correct scope information.
-    #[allow(unreachable_code)]
     impl TryFrom<proto::ReceivedTransparentOutput> for ReceivedTransparentOutput {
         type Error = crate::Error;
 
@@ -196,11 +193,33 @@ mod serialization {
                 transaction_id: TxId::from_bytes(output.transaction_id.clone().try_into()?),
                 account_id: output.account_id.into(),
                 address: TransparentAddress::decode(&EncodingParams, &output.address)?,
-                key_scope: TransparentKeyScope::custom(u32::MAX).expect("FIXME"),
+                key_scope: output
+                    .recipient_key_scope
+                    .map(transparent_key_scope_from_proto)
+                    .transpose()?
+                    .unwrap_or(TransparentKeyScope::EXTERNAL),
                 txout: read_optional!(output, txout)?.try_into()?,
                 max_observed_unspent_height: output.max_observed_unspent_height.map(|h| h.into()),
             })
         }
+    }
+
+    fn transparent_key_scope_to_proto(scope: TransparentKeyScope) -> Option<u32> {
+        if scope == TransparentKeyScope::EXTERNAL {
+            Some(0)
+        } else if scope == TransparentKeyScope::INTERNAL {
+            Some(1)
+        } else if scope == TransparentKeyScope::EPHEMERAL {
+            Some(2)
+        } else {
+            None
+        }
+    }
+
+    fn transparent_key_scope_from_proto(scope: u32) -> Result<TransparentKeyScope, Error> {
+        TransparentKeyScope::custom(scope).ok_or_else(|| {
+            Error::CorruptedData(format!("invalid transparent key scope {scope}"))
+        })
     }
 
     impl From<TxOut> for proto::TxOut {
