@@ -6,9 +6,9 @@ use pczt::roles::verifier::Verifier;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::str::FromStr;
+use transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
 use wasm_bindgen::prelude::wasm_bindgen;
-use zcash_primitives::consensus::{NetworkConstants, Parameters};
-use zcash_primitives::legacy::keys::{NonHardenedChildIndex, TransparentKeyScope};
+use zcash_protocol::consensus::{NetworkConstants, Parameters};
 
 pub(crate) async fn pczt_sign_inner(
     network: Network,
@@ -31,7 +31,7 @@ pub(crate) async fn pczt_sign_inner(
             address_index: NonHardenedChildIndex,
         },
     }
-    let mut keys = BTreeMap::<zcash_primitives::zip32::AccountId, Vec<KeyRef>>::new();
+    let mut keys = BTreeMap::<zip32::AccountId, Vec<KeyRef>>::new();
     let pczt = Verifier::new(pczt)
         .with_orchard::<Infallible, _>(|bundle| {
             for (index, action) in bundle.actions().iter().enumerate() {
@@ -43,9 +43,7 @@ pub(crate) async fn pczt_sign_inner(
                         .and_then(|derivation| {
                             derivation.extract_account_index(
                                 &seed_fp,
-                                zcash_primitives::zip32::ChildIndex::hardened(
-                                    network.network_type().coin_type(),
-                                ),
+                                zip32::ChildIndex::hardened(network.network_type().coin_type()),
                             )
                         })
                 {
@@ -63,9 +61,7 @@ pub(crate) async fn pczt_sign_inner(
                     spend.zip32_derivation().as_ref().and_then(|derivation| {
                         derivation.extract_account_index(
                             &seed_fp,
-                            zcash_primitives::zip32::ChildIndex::hardened(
-                                network.network_type().coin_type(),
-                            ),
+                            zip32::ChildIndex::hardened(network.network_type().coin_type()),
                         )
                     })
                 {
@@ -297,9 +293,9 @@ pub fn sign_message_with_transparent(
     use bitcoin_hashes::{Hash, sha256d};
     use secp256k1::{Message as Secp256k1Message, Secp256k1, SecretKey};
     use serde::{Deserialize, Serialize};
+    use transparent::keys::{IncomingViewingKey, NonHardenedChildIndex};
     use zcash_client_backend::encoding::AddressCodec;
     use zcash_keys::keys::UnifiedAddressRequest;
-    use zcash_primitives::legacy::keys::{IncomingViewingKey, NonHardenedChildIndex};
 
     #[derive(Serialize, Deserialize)]
     struct SignatureResult {

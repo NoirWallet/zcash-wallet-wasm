@@ -1,7 +1,7 @@
 //! Support for legacy transparent addresses and scripts.
 
 use core::fmt;
-use core2::io::{self, Read, Write};
+use corez::io::{self, Read, Write};
 
 use zcash_address::{ToAddress, TryFromAddress, ZcashAddress};
 use zcash_protocol::consensus::NetworkType;
@@ -14,7 +14,7 @@ use zcash_script::{
 };
 
 #[cfg(feature = "transparent-inputs")]
-use sha2::{Digest, Sha256};
+use crate::util::hash160;
 
 /// A serialized script, used inside transparent inputs and outputs of a transaction.
 #[derive(Clone)]
@@ -39,7 +39,7 @@ impl fmt::Debug for Script {
                 .finish()
         } else {
             f.debug_tuple("Script")
-                .field(&hex::encode(&self.0 .0))
+                .field(&hex::encode(&self.0.0))
                 .finish()
         }
     }
@@ -53,7 +53,7 @@ impl Default for Script {
 
 impl PartialEq for Script {
     fn eq(&self, other: &Self) -> bool {
-        self.0 .0 == other.0 .0
+        self.0.0 == other.0.0
     }
 }
 
@@ -69,12 +69,12 @@ impl Script {
     }
 
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        Vector::write(&mut writer, &self.0 .0, |w, e| w.write_all(&[*e]))
+        Vector::write(&mut writer, &self.0.0, |w, e| w.write_all(&[*e]))
     }
 
     /// Returns the length of this script as encoded (including the initial CompactSize).
     pub fn serialized_size(&self) -> usize {
-        Vector::serialized_size_of_u8_vec(&self.0 .0)
+        Vector::serialized_size_of_u8_vec(&self.0.0)
     }
 }
 
@@ -115,10 +115,25 @@ impl From<&script::Sig> for Script {
 }
 
 /// A transparent address corresponding to either a public key hash or a script hash.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TransparentAddress {
     PublicKeyHash([u8; 20]),
     ScriptHash([u8; 20]),
+}
+
+impl core::fmt::Debug for TransparentAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PublicKeyHash(arg0) => f
+                .debug_tuple("PublicKeyHash")
+                .field(&hex::encode(arg0))
+                .finish(),
+            Self::ScriptHash(arg0) => f
+                .debug_tuple("ScriptHash")
+                .field(&hex::encode(arg0))
+                .finish(),
+        }
+    }
 }
 
 impl TransparentAddress {
@@ -135,13 +150,20 @@ impl TransparentAddress {
 
     /// Returns the address that this Script contains, if any.
     pub fn from_script_pubkey(script_pubkey: &script::PubKey) -> Option<Self> {
-        solver::standard(script_pubkey).and_then(|script_kind| match script_kind {
+        solver::standard(script_pubkey)
+            .as_ref()
+            .and_then(Self::from_script_kind)
+    }
+
+    /// Returns the address that this `ScriptKind` contains, if any.
+    pub fn from_script_kind(script_kind: &solver::ScriptKind) -> Option<Self> {
+        match script_kind {
             solver::ScriptKind::PubKeyHash { hash } => {
-                Some(TransparentAddress::PublicKeyHash(hash))
+                Some(TransparentAddress::PublicKeyHash(*hash))
             }
-            solver::ScriptKind::ScriptHash { hash } => Some(TransparentAddress::ScriptHash(hash)),
+            solver::ScriptKind::ScriptHash { hash } => Some(TransparentAddress::ScriptHash(*hash)),
             _ => None,
-        })
+        }
     }
 
     /// Generate the `scriptPubKey` corresponding to this address.
@@ -174,9 +196,7 @@ impl TransparentAddress {
     /// Derives the P2PKH transparent address corresponding to the given pubkey bytes.
     #[cfg(feature = "transparent-inputs")]
     pub(crate) fn from_pubkey_bytes(pubkey: &[u8; 33]) -> Self {
-        TransparentAddress::PublicKeyHash(
-            *ripemd::Ripemd160::digest(Sha256::digest(pubkey)).as_ref(),
-        )
+        TransparentAddress::PublicKeyHash(hash160::hash(pubkey))
     }
 
     /// Encodes this transparent address for the given network type.
@@ -229,13 +249,10 @@ mod tests {
     #[test]
     fn p2pkh() {
         let addr = TransparentAddress::PublicKeyHash([4; 20]);
-        assert_eq!(
-            &addr.script().to_bytes(),
-            &[
-                0x76, 0xa9, 0x14, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04,
-                0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x88, 0xac,
-            ]
-        );
+        assert_eq!(&addr.script().to_bytes(), &[
+            0x76, 0xa9, 0x14, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04,
+            0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x88, 0xac,
+        ]);
         assert_eq!(
             TransparentAddress::from_script_pubkey(&addr.script()),
             Some(addr)
@@ -245,13 +262,10 @@ mod tests {
     #[test]
     fn p2sh() {
         let addr = TransparentAddress::ScriptHash([7; 20]);
-        assert_eq!(
-            addr.script().to_bytes(),
-            &[
-                0xa9, 0x14, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07,
-                0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x87,
-            ]
-        );
+        assert_eq!(addr.script().to_bytes(), &[
+            0xa9, 0x14, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07,
+            0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x87,
+        ]);
         assert_eq!(
             TransparentAddress::from_script_pubkey(&addr.script()),
             Some(addr)

@@ -1,7 +1,8 @@
 use crate::error::Error;
 use wasm_bindgen::prelude::*;
 use zcash_address::ZcashAddress;
-use zcash_primitives::memo::MemoBytes;
+use zcash_protocol::memo::MemoBytes;
+use zcash_protocol::value::Zatoshis;
 
 #[wasm_bindgen]
 pub struct TransactionRequest(zip321::TransactionRequest);
@@ -29,7 +30,7 @@ impl TransactionRequest {
     }
 
     pub fn total(&self) -> Result<u64, Error> {
-        Ok(self.0.total()?.into())
+        Ok(self.0.total()?.map(u64::from).unwrap_or(0))
     }
 
     pub fn from_uri(uri: &str) -> Result<TransactionRequest, Error> {
@@ -56,7 +57,7 @@ impl PaymentRequest {
         other_params: JsValue,
     ) -> Result<PaymentRequest, Error> {
         let address = ZcashAddress::try_from_encoded(recipient_address)?;
-        let amount = amount.try_into()?;
+        let amount = Some(Zatoshis::from_u64(amount)?);
         let memo = if let Some(memo_bytes) = memo {
             Some(MemoBytes::from_bytes(&memo_bytes)?)
         } else {
@@ -64,18 +65,14 @@ impl PaymentRequest {
         };
         let other_params = serde_wasm_bindgen::from_value(other_params)?;
 
-        if let Some(payment) =
-            zip321::Payment::new(address, amount, memo, label, message, other_params)
-        {
-            Ok(PaymentRequest(payment))
-        } else {
-            Err(Error::UnsupportedMemoRecipient)
-        }
+        let payment = zip321::Payment::new(address, amount, memo, label, message, other_params)
+            .map_err(|e| Error::Zip321(e.with_index(0)))?;
+        Ok(PaymentRequest(payment))
     }
 
     pub fn simple_payment(recipient_address: &str, amount: u64) -> Result<PaymentRequest, Error> {
         let address = ZcashAddress::try_from_encoded(recipient_address)?;
-        let amount = amount.try_into()?;
+        let amount = Zatoshis::from_u64(amount)?;
         Ok(PaymentRequest(zip321::Payment::without_memo(
             address, amount,
         )))
@@ -86,7 +83,7 @@ impl PaymentRequest {
     }
 
     pub fn amount(&self) -> u64 {
-        self.0.amount().into()
+        self.0.amount().map(u64::from).unwrap_or(0)
     }
 
     pub fn memo(&self) -> Option<Vec<u8>> {

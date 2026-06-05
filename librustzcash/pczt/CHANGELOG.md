@@ -8,10 +8,62 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
-## [Unreleased]
+## [0.7.0] - 2026-06-02
 
-## [0.5.0] - PLANNED
+### Changed
+- Migrated to `zcash_protocol 0.9.0`, `zcash_transparent 0.8.0`, `zcash_primitives 0.28.0`,
+  `zcash_proofs 0.28.0`.
 
+## [0.6.0] - 2026-04-27
+
+### Added
+- `pczt::ExtractError`
+- `pczt::EffectsOnly`
+- `pczt::orchard::Spend::spend_auth_sig` getter (via `getset`).
+- `pczt::roles::signer`:
+  - `Signer::sighash`
+  - `Signer::append_transparent_signature`
+  - `Signer::apply_sapling_signature`
+  - `Signer::apply_orchard_signature`
+
+### Changed
+- Migrated to `orchard 0.13`, `sapling-crypto 0.7`, `zcash_protocol 0.8`, 
+  `zcash_transparent 0.7`, `zcash_primitives 0.27`, `zcash_proofs 0.27`.
+- `Pczt::into_effects` now returns `Result<TransactionData<EffectsOnly>, ExtractError>`
+  instead of `Option<TransactionData<EffectsOnly>>`.
+- `pczt::roles::io_finalizer::Error` now wraps parse and extract errors
+  via `Extract(ExtractError)` instead of individual variants.
+- `pczt::roles::signer::Error` now wraps parse and extract errors
+  via `Extract(ExtractError)` instead of individual variants.
+- `pczt::roles::tx_extractor::Error` now wraps parse and extract errors
+  via `Extract(ExtractError)` instead of `Global(GlobalError)`,
+  `IncompatibleLockTimes`, and protocol-specific `Parse` variants.
+
+### Removed
+- `pczt::roles::tx_extractor::GlobalError` (replaced by `pczt::ExtractError`).
+- `pczt::roles::tx_extractor::TransparentError::Parse` (parse errors now
+  flow through `pczt::ExtractError`).
+- `pczt::roles::tx_extractor::SaplingError::Parse` (parse errors now
+  flow through `pczt::ExtractError`).
+- `pczt::roles::tx_extractor::OrchardError::Parse` (parse errors now
+  flow through `pczt::ExtractError`).
+- `pczt::roles::signer::EffectsOnly` (use `pczt::EffectsOnly` instead).
+
+## [0.4.1, 0.5.1] - 2026-02-26
+
+### Fixed
+- Several missing feature flags dependencies have been fixed. The following
+  missing feature flag dependencies have been added:
+  - `signer` for the `io-finalizer` feature due to cross-role code reuse
+  - `rand_core/getrandom` required by the `io-finalizer`, `prover`,
+    `signer`, and `tx-extractor` features for `OsRng` access
+  - `orchard/circuit` and `sapling/circuit` for the `prover`
+    and `tx-extractor` features.
+
+## [0.5.0] - 2025-11-05
+
+### Changed
+- MSRV is now 1.85.1.
 - Migrated to `zcash_protocol 0.7`, `zcash_transparent 0.6`, `zcash_primitives 0.26`,
   `zcash_proofs 0.26`
 

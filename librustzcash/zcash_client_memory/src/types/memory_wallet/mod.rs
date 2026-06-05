@@ -3,34 +3,38 @@
 mod serialization;
 
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     num::NonZeroU32,
     ops::{Range, RangeInclusive},
 };
 
 use ::transparent::bundle::OutPoint;
+#[cfg(feature = "transparent-inputs")]
+use ::transparent::keys::NonHardenedChildIndex;
 use incrementalmerkletree::{Address, Level, Marking, Position, Retention};
 use scanning::ScanQueue;
 use shardtree::{
-    store::{memory::MemoryShardStore, ShardStore},
     ShardTree,
+    store::{ShardStore, memory::MemoryShardStore},
 };
+#[cfg(feature = "transparent-inputs")]
+use zcash_client_backend::wallet::TransparentAddressMetadata;
 use zcash_client_backend::{
     data_api::{
+        Account as _, AccountBirthday, AccountSource, InputSource, Ratio, SAPLING_SHARD_HEIGHT,
+        TransactionStatus, WalletRead,
         scanning::{ScanPriority, ScanRange},
         wallet::{ConfirmationsPolicy, TargetHeight},
-        Account as _, AccountBirthday, AccountSource, InputSource, Ratio, TransactionStatus,
-        WalletRead, SAPLING_SHARD_HEIGHT,
     },
     wallet::{NoteId, WalletSaplingOutput},
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
-    consensus::{self, BlockHeight, NetworkUpgrade},
     ShieldedProtocol, TxId,
+    consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
 };
-use zip32::{fingerprint::SeedFingerprint, Scope};
+use zip32::{Scope, fingerprint::SeedFingerprint};
 
 #[cfg(feature = "orchard")]
 use zcash_client_backend::{data_api::ORCHARD_SHARD_HEIGHT, wallet::WalletOrchardOutput};
@@ -185,9 +189,8 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         // birthday frontier is the empty frontier, we don't need to do anything.
         if let Some(frontier) = birthday.sapling_frontier().value() {
             tracing::debug!("Inserting Sapling frontier into ShardTree: {:?}", frontier);
-            self.sapling_tree.insert_frontier_nodes(
-                frontier.clone(),
-                Retention::Checkpoint {
+            self.sapling_tree
+                .insert_frontier_nodes(frontier.clone(), Retention::Checkpoint {
                     // This subtraction is safe, because all leaves in the tree appear in blocks, and
                     // the invariant that birthday.height() always corresponds to the block for which
                     // `frontier` is the tree state at the start of the block. Together, this means
@@ -195,16 +198,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     // the block.
                     id: birthday.height() - 1,
                     marking: Marking::Reference,
-                },
-            )?;
+                })?;
         }
 
         #[cfg(feature = "orchard")]
         if let Some(frontier) = birthday.orchard_frontier().value() {
             tracing::debug!("Inserting Orchard frontier into ShardTree: {:?}", frontier);
-            self.orchard_tree.insert_frontier_nodes(
-                frontier.clone(),
-                Retention::Checkpoint {
+            self.orchard_tree
+                .insert_frontier_nodes(frontier.clone(), Retention::Checkpoint {
                     // This subtraction is safe, because all leaves in the tree appear in blocks, and
                     // the invariant that birthday.height() always corresponds to the block for which
                     // `frontier` is the tree state at the start of the block. Together, this means
@@ -212,8 +213,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     // the block.
                     id: birthday.height() - 1,
                     marking: Marking::Reference,
-                },
-            )?;
+                })?;
         }
 
         // The ignored range always starts at Sapling activation
@@ -512,8 +512,8 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     ) -> Result<Option<zip32::AccountId>, Error> {
         Ok(self
             .accounts
-            .iter()
-            .filter_map(|(_, a)| match a.source() {
+            .values()
+            .filter_map(|a| match a.source() {
                 AccountSource::Derived { derivation, .. } => {
                     if derivation.seed_fingerprint() == seed_fingerprint {
                         Some(derivation.account_index())
@@ -553,14 +553,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     pub(crate) fn insert_sapling_nullifier_map(
         &mut self,
         block_height: BlockHeight,
-        new_entries: &[(TxId, u16, Vec<sapling::Nullifier>)],
+        new_entries: &[(TxIndex, TxId, Vec<sapling::Nullifier>)],
     ) -> Result<(), Error> {
-        for (txid, tx_index, nullifiers) in new_entries {
+        for (tx_index, txid, nullifiers) in new_entries {
             for nf in nullifiers.iter() {
                 self.nullifiers
-                    .insert(block_height, *tx_index as u32, Nullifier::Sapling(*nf));
+                    .insert(block_height, u32::from(*tx_index), Nullifier::Sapling(*nf));
             }
-            match self.tx_locator.entry((block_height, *tx_index as u32)) {
+            match self.tx_locator.entry((block_height, u32::from(*tx_index))) {
                 Entry::Occupied(x) => {
                     if txid == x.get() {
                         // This is a duplicate entry
@@ -581,14 +581,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     pub(crate) fn insert_orchard_nullifier_map(
         &mut self,
         block_height: BlockHeight,
-        new_entries: &[(TxId, u16, Vec<orchard::note::Nullifier>)],
+        new_entries: &[(TxIndex, TxId, Vec<orchard::note::Nullifier>)],
     ) -> Result<(), Error> {
-        for (txid, tx_index, nullifiers) in new_entries {
+        for (tx_index, txid, nullifiers) in new_entries {
             for nf in nullifiers.iter() {
                 self.nullifiers
-                    .insert(block_height, *tx_index as u32, Nullifier::Orchard(*nf));
+                    .insert(block_height, u32::from(*tx_index), Nullifier::Orchard(*nf));
             }
-            match self.tx_locator.entry((block_height, *tx_index as u32)) {
+            match self.tx_locator.entry((block_height, u32::from(*tx_index))) {
                 Entry::Occupied(x) => {
                     if txid == x.get() {
                         // This is a duplicate entry
@@ -875,8 +875,8 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             // from the blocks table.
             let start_size = self
                 .accounts
-                .iter()
-                .filter_map(|(_, account)| {
+                .values()
+                .filter_map(|account| {
                     if account.birthday().height() == *birthday_height {
                         Some(account.birthday().sapling_frontier().tree_size())
                     } else {
@@ -921,14 +921,12 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
-            let min_tree_size = Some(min_idx << SAPLING_SHARD_HEIGHT);
-            let max_tree_size = Some((max_idx + 1) << SAPLING_SHARD_HEIGHT);
+            let max_tree_size = Some(min_idx << SAPLING_SHARD_HEIGHT);
+            let min_tree_size = Some((max_idx + 1) << SAPLING_SHARD_HEIGHT);
 
-            Ok(start_size.or(min_tree_size).zip(max_tree_size).and_then(
+            Ok(start_size.or(min_tree_size).zip(max_tree_size).map(
                 |(min_tree_size, max_tree_size)| {
-                    max_tree_size
-                        .checked_sub(min_tree_size)
-                        .map(|tree_size| Ratio::new(scanned_count, tree_size))
+                    Ratio::new(scanned_count, max_tree_size - min_tree_size)
                 },
             ))
         }
@@ -955,10 +953,10 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             // from the blocks table.
             let start_size = self
                 .accounts
-                .iter()
-                .filter_map(|(_, account)| {
+                .values()
+                .filter_map(|account| {
                     if account.birthday().height() == *birthday_height {
-                        Some(account.birthday().orchard_frontier().tree_size())
+                        Some(account.birthday().sapling_frontier().tree_size())
                     } else {
                         None
                     }
@@ -1001,14 +999,12 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
-            let min_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
-            let max_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
+            let max_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
+            let min_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
 
-            Ok(start_size.or(min_tree_size).zip(max_tree_size).and_then(
+            Ok(start_size.or(min_tree_size).zip(max_tree_size).map(
                 |(min_tree_size, max_tree_size)| {
-                    max_tree_size
-                        .checked_sub(min_tree_size)
-                        .map(|tree_size| Ratio::new(scanned_count, tree_size))
+                    Ratio::new(scanned_count, max_tree_size - min_tree_size)
                 },
             ))
         }
@@ -1029,21 +1025,16 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     ) -> Result<bool, Error> {
         // TODO: Remove it from the search queue
 
-        let known_output = self.transparent_received_outputs.contains_key(outpoint);
+        self.transparent_received_output_spends
+            .insert(outpoint.clone(), *spent_in_tx);
 
-        if known_output {
-            self.transparent_received_output_spends
-                .insert(outpoint.clone(), *spent_in_tx);
-            self.transparent_spend_map.remove(spent_in_tx, outpoint);
-        } else {
-            self.transparent_spend_map
-                .insert(*spent_in_tx, outpoint.clone());
-        }
+        // TODO: Check if this is an update and therefore we need to add something to transparent_spend_map
 
-        Ok(known_output)
+        Ok(false)
     }
 
     #[cfg(feature = "transparent-inputs")]
+    #[allow(unreachable_code, unused_variables)] //FIXME: need address key scope detection
     pub(crate) fn put_transparent_output(
         &mut self,
         output: &WalletTransparentOutput,
@@ -1094,6 +1085,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         };
 
         // insert into transparent_received_outputs table. Update if it exists
+        #[allow(clippy::diverging_sub_expression)] // FIXME
         match self
             .transparent_received_outputs
             .entry(output.outpoint().clone())
@@ -1109,6 +1101,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     txid,
                     *receiving_account,
                     *address,
+                    todo!("look up the key scope for the address"),
                     output.txout().clone(),
                     max_observed_unspent.unwrap_or(BlockHeight::from(0)),
                 ));
@@ -1117,14 +1110,11 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
         // look in transparent_spend_map for a record of the output already having been spent, then mark it as spent using the
         // stored reference to the spending transaction.
-        if let Some(spending_txid) = self
+        if self
             .transparent_spend_map
-            .spending_txid_for_outpoint(output.outpoint())
+            .contains(&txid, output.outpoint())
         {
-            self.transparent_received_output_spends
-                .insert(output.outpoint().clone(), spending_txid);
-            self.transparent_spend_map
-                .remove(&spending_txid, output.outpoint());
+            self.mark_transparent_output_spent(&txid, output.outpoint())?;
         }
 
         Ok(output.outpoint().clone())
@@ -1225,10 +1215,10 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 kind,
                 amount_zatoshis: amount_zatoshis.unsigned_abs(),
                 fee_zatoshis: fee_zatoshis.map(|f| f.unsigned_abs()),
-                mined_height: mined_height.map(|h| u32::from(h)),
-                expiry_height: tx_entry.expiry_height().map(|h| u32::from(h)),
+                mined_height: mined_height.map(u32::from),
+                expiry_height: tx_entry.expiry_height().map(u32::from),
                 status,
-                timestamp: block_time.map(|t| t as u64),
+                timestamp: block_time.map(u64::from),
                 memo,
             });
         }
@@ -1240,6 +1230,26 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         });
 
         entries
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) fn get_known_ephemeral_addresses(
+        &self,
+        account_id: AccountId,
+        index_range: Option<Range<NonHardenedChildIndex>>,
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Error> {
+        Ok(self
+            .accounts
+            .get(account_id)
+            .map(Account::ephemeral_addresses)
+            .unwrap_or_else(|| Ok(vec![]))?
+            .into_iter()
+            .filter(|(_addr, meta)| {
+                index_range
+                    .as_ref()
+                    .is_none_or(|range| meta.address_index().is_some_and(|i| range.contains(&i)))
+            })
+            .collect::<Vec<_>>())
     }
 }
 

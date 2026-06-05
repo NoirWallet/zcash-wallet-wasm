@@ -9,15 +9,15 @@ use ::transparent::{
 };
 use orchard::tree::MerkleHashOrchard;
 use pczt::{
+    Pczt,
     roles::{
         combiner::Combiner, creator::Creator, io_finalizer::IoFinalizer, prover::Prover,
         signer::Signer, spend_finalizer::SpendFinalizer, tx_extractor::TransactionExtractor,
         updater::Updater,
     },
-    Pczt,
 };
 use rand_core::OsRng;
-use shardtree::{store::memory::MemoryShardStore, ShardTree};
+use shardtree::{ShardTree, store::memory::MemoryShardStore};
 use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::{
     builder::{BuildConfig, Builder, PcztResult},
@@ -79,22 +79,18 @@ fn transparent_to_orchard() {
     );
 
     // Create the transaction's I/O.
-    let mut builder = Builder::new(
-        params,
-        10_000_000.into(),
-        BuildConfig::Standard {
-            sapling_anchor: None,
-            orchard_anchor: Some(orchard::Anchor::empty_tree()),
-        },
-    );
+    let mut builder = Builder::new(params, 10_000_000.into(), BuildConfig::Standard {
+        sapling_anchor: None,
+        orchard_anchor: Some(orchard::Anchor::empty_tree()),
+    });
     builder
-        .add_transparent_input(transparent_pubkey, utxo, coin.clone())
+        .add_transparent_p2pkh_input(transparent_pubkey, utxo, coin.clone())
         .unwrap();
     builder
         .add_orchard_output::<zip317::FeeRule>(
             Some(orchard_ovk),
             recipient,
-            100_000,
+            Zatoshis::const_from_u64(100_000),
             MemoBytes::empty(),
         )
         .unwrap();
@@ -102,7 +98,7 @@ fn transparent_to_orchard() {
         .add_orchard_output::<zip317::FeeRule>(
             Some(orchard_fvk.to_ovk(zip32::Scope::Internal)),
             orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal),
-            885_000,
+            Zatoshis::const_from_u64(885_000),
             MemoBytes::empty(),
         )
         .unwrap();
@@ -152,28 +148,36 @@ fn transparent_to_orchard() {
         Some(
             v5_signature_hash(
                 &tx_effects,
-                &SignableInput::Transparent(::transparent::sighash::SignableInput::from_parts(
-                    match (hash_type.signed_outputs(), hash_type.anyone_can_pay()) {
-                        (zcash_script::signature::SignedOutputs::All, false) => SighashType::ALL,
-                        (zcash_script::signature::SignedOutputs::All, true) => {
-                            SighashType::ALL_ANYONECANPAY
-                        }
-                        (zcash_script::signature::SignedOutputs::Single, false) => {
-                            SighashType::SINGLE
-                        }
-                        (zcash_script::signature::SignedOutputs::Single, true) => {
-                            SighashType::SINGLE_ANYONECANPAY
-                        }
-                        (zcash_script::signature::SignedOutputs::None, false) => SighashType::NONE,
-                        (zcash_script::signature::SignedOutputs::None, true) => {
-                            SighashType::NONE_ANYONECANPAY
-                        }
-                    },
-                    0,
-                    &Script(script_code.clone()),
-                    coin.script_pubkey(),
-                    coin.value(),
-                )),
+                &SignableInput::Transparent(
+                    ::transparent::sighash::SignableInput::from_parts(
+                        bundle,
+                        match (hash_type.signed_outputs(), hash_type.anyone_can_pay()) {
+                            (zcash_script::signature::SignedOutputs::All, false) => {
+                                SighashType::ALL
+                            }
+                            (zcash_script::signature::SignedOutputs::All, true) => {
+                                SighashType::ALL_ANYONECANPAY
+                            }
+                            (zcash_script::signature::SignedOutputs::Single, false) => {
+                                SighashType::SINGLE
+                            }
+                            (zcash_script::signature::SignedOutputs::Single, true) => {
+                                SighashType::SINGLE_ANYONECANPAY
+                            }
+                            (zcash_script::signature::SignedOutputs::None, false) => {
+                                SighashType::NONE
+                            }
+                            (zcash_script::signature::SignedOutputs::None, true) => {
+                                SighashType::NONE_ANYONECANPAY
+                            }
+                        },
+                        0,
+                        &Script(script_code.clone()),
+                        coin.script_pubkey(),
+                        coin.value(),
+                    )
+                    .unwrap(),
+                ),
                 &tx_digests,
             )
             .as_ref()
@@ -235,14 +239,10 @@ fn transparent_p2sh_multisig_to_orchard() {
     let redeem_script = redeem_script.weaken();
 
     // Create the transaction's I/O.
-    let mut builder = Builder::new(
-        params,
-        10_000_000.into(),
-        BuildConfig::Standard {
-            sapling_anchor: None,
-            orchard_anchor: Some(orchard::Anchor::empty_tree()),
-        },
-    );
+    let mut builder = Builder::new(params, 10_000_000.into(), BuildConfig::Standard {
+        sapling_anchor: None,
+        orchard_anchor: Some(orchard::Anchor::empty_tree()),
+    });
     builder
         .add_transparent_p2sh_input(redeem_script, utxo, coin.clone())
         .unwrap();
@@ -250,7 +250,7 @@ fn transparent_p2sh_multisig_to_orchard() {
         .add_orchard_output::<zip317::FeeRule>(
             Some(orchard_ovk),
             recipient,
-            100_000,
+            Zatoshis::const_from_u64(100_000),
             MemoBytes::empty(),
         )
         .unwrap();
@@ -258,7 +258,7 @@ fn transparent_p2sh_multisig_to_orchard() {
         .add_orchard_output::<zip317::FeeRule>(
             Some(orchard_fvk.to_ovk(zip32::Scope::Internal)),
             orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal),
-            880_000,
+            Zatoshis::const_from_u64(880_000),
             MemoBytes::empty(),
         )
         .unwrap();
@@ -322,28 +322,36 @@ fn transparent_p2sh_multisig_to_orchard() {
         Some(
             v5_signature_hash(
                 &tx_effects,
-                &SignableInput::Transparent(::transparent::sighash::SignableInput::from_parts(
-                    match (hash_type.signed_outputs(), hash_type.anyone_can_pay()) {
-                        (zcash_script::signature::SignedOutputs::All, false) => SighashType::ALL,
-                        (zcash_script::signature::SignedOutputs::All, true) => {
-                            SighashType::ALL_ANYONECANPAY
-                        }
-                        (zcash_script::signature::SignedOutputs::Single, false) => {
-                            SighashType::SINGLE
-                        }
-                        (zcash_script::signature::SignedOutputs::Single, true) => {
-                            SighashType::SINGLE_ANYONECANPAY
-                        }
-                        (zcash_script::signature::SignedOutputs::None, false) => SighashType::NONE,
-                        (zcash_script::signature::SignedOutputs::None, true) => {
-                            SighashType::NONE_ANYONECANPAY
-                        }
-                    },
-                    0,
-                    &Script(script_code.clone()),
-                    coin.script_pubkey(),
-                    coin.value(),
-                )),
+                &SignableInput::Transparent(
+                    ::transparent::sighash::SignableInput::from_parts(
+                        bundle,
+                        match (hash_type.signed_outputs(), hash_type.anyone_can_pay()) {
+                            (zcash_script::signature::SignedOutputs::All, false) => {
+                                SighashType::ALL
+                            }
+                            (zcash_script::signature::SignedOutputs::All, true) => {
+                                SighashType::ALL_ANYONECANPAY
+                            }
+                            (zcash_script::signature::SignedOutputs::Single, false) => {
+                                SighashType::SINGLE
+                            }
+                            (zcash_script::signature::SignedOutputs::Single, true) => {
+                                SighashType::SINGLE_ANYONECANPAY
+                            }
+                            (zcash_script::signature::SignedOutputs::None, false) => {
+                                SighashType::NONE
+                            }
+                            (zcash_script::signature::SignedOutputs::None, true) => {
+                                SighashType::NONE_ANYONECANPAY
+                            }
+                        },
+                        0,
+                        &Script(script_code.clone()),
+                        coin.script_pubkey(),
+                        coin.value(),
+                    )
+                    .unwrap(),
+                ),
                 &tx_digests,
             )
             .as_ref()
@@ -435,14 +443,10 @@ fn sapling_to_orchard() {
     };
 
     // Build the Orchard bundle we'll be using.
-    let mut builder = Builder::new(
-        MainNetwork,
-        10_000_000.into(),
-        BuildConfig::Standard {
-            sapling_anchor: Some(anchor),
-            orchard_anchor: Some(orchard::Anchor::empty_tree()),
-        },
-    );
+    let mut builder = Builder::new(MainNetwork, 10_000_000.into(), BuildConfig::Standard {
+        sapling_anchor: Some(anchor),
+        orchard_anchor: Some(orchard::Anchor::empty_tree()),
+    });
     builder
         .add_sapling_spend::<zip317::FeeRule>(sapling_dfvk.fvk().clone(), note, merkle_path)
         .unwrap();
@@ -450,7 +454,7 @@ fn sapling_to_orchard() {
         .add_orchard_output::<zip317::FeeRule>(
             Some(sapling_dfvk.to_ovk(zip32::Scope::External).0.into()),
             recipient,
-            100_000,
+            Zatoshis::const_from_u64(100_000),
             MemoBytes::empty(),
         )
         .unwrap();
@@ -594,14 +598,10 @@ fn orchard_to_orchard() {
     };
 
     // Build the Orchard bundle we'll be using.
-    let mut builder = Builder::new(
-        MainNetwork,
-        10_000_000.into(),
-        BuildConfig::Standard {
-            sapling_anchor: None,
-            orchard_anchor: Some(anchor),
-        },
-    );
+    let mut builder = Builder::new(MainNetwork, 10_000_000.into(), BuildConfig::Standard {
+        sapling_anchor: None,
+        orchard_anchor: Some(anchor),
+    });
     builder
         .add_orchard_spend::<zip317::FeeRule>(orchard_fvk.clone(), note, merkle_path)
         .unwrap();
@@ -609,7 +609,7 @@ fn orchard_to_orchard() {
         .add_orchard_output::<zip317::FeeRule>(
             Some(orchard_ovk),
             recipient,
-            100_000,
+            Zatoshis::const_from_u64(100_000),
             MemoBytes::empty(),
         )
         .unwrap();
@@ -617,7 +617,7 @@ fn orchard_to_orchard() {
         .add_orchard_output::<zip317::FeeRule>(
             Some(orchard_fvk.to_ovk(zip32::Scope::Internal)),
             orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal),
-            890_000,
+            Zatoshis::const_from_u64(890_000),
             MemoBytes::empty(),
         )
         .unwrap();

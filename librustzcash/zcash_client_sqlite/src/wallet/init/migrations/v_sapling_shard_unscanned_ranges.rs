@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 
-use zcash_client_backend::data_api::{scanning::ScanPriority, SAPLING_SHARD_HEIGHT};
+use zcash_client_backend::data_api::{SAPLING_SHARD_HEIGHT, scanning::ScanPriority};
 use zcash_protocol::consensus::{self, NetworkUpgrade};
 
 use crate::wallet::{init::WalletMigrationError, scanning::priority_code};
@@ -64,11 +64,12 @@ impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
                 )",
             SAPLING_SHARD_HEIGHT,
             SAPLING_SHARD_HEIGHT,
-            u32::from(
-                self.params
-                    .activation_height(NetworkUpgrade::Sapling)
-                    .unwrap()
-            ),
+            // Sapling might not be active in regtest mode.
+            self.params
+                .activation_height(NetworkUpgrade::Sapling)
+                .map(|h| u32::from(h).to_string())
+                .as_deref()
+                .unwrap_or("NULL"),
         ))?;
 
         transaction.execute_batch(&format!(

@@ -6,7 +6,7 @@
 //! ```
 //! # #[cfg(feature = "test-dependencies")]
 //! # {
-//! use zcash_primitives::{
+//! use zcash_protocol::{
 //!     consensus::{BlockHeight, Network, Parameters},
 //! };
 //!
@@ -159,9 +159,12 @@ use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{self, BlockHeight};
 
 use crate::{
-    data_api::{NullifierQuery, WalletWrite},
+    data_api::WalletWrite,
     proto::compact_formats::CompactBlock,
-    scanning::{scan_block_with_runners, BatchRunners, Nullifiers, ScanningKeys},
+    scanning::{
+        Nullifiers, ScanningKeys,
+        compact::{BatchRunners, scan_block_with_runners},
+    },
 };
 
 #[cfg(feature = "sync")]
@@ -244,7 +247,7 @@ pub trait BlockSource {
 ///        scanning::{ScanPriority, ScanRange},
 ///    };
 ///    use zcash_client_backend::proto::compact_formats::CompactBlock;
-///    use zcash_primitives::consensus::BlockHeight;
+///    use zcash_protocol::consensus::BlockHeight;
 ///
 ///    struct ExampleBlockCache {
 ///        cached_blocks: Arc<Mutex<Vec<CompactBlock>>>,
@@ -331,7 +334,7 @@ pub trait BlockSource {
 /// #        zcash_primitives::block::BlockHash([0; 32]),
 /// #        sapling::Nullifier([0; 32]),
 /// #        &dfvk,
-/// #        zcash_primitives::transaction::components::amount::NonNegativeAmount::const_from_u64(5),
+/// #        zcash_protocol::value::Zatoshis::const_from_u64(5),
 /// #        false,
 /// #        None,
 /// #    );
@@ -340,7 +343,7 @@ pub trait BlockSource {
 /// #        zcash_primitives::block::BlockHash([0; 32]),
 /// #        sapling::Nullifier([0; 32]),
 /// #        &dfvk,
-/// #        zcash_primitives::transaction::components::amount::NonNegativeAmount::const_from_u64(5),
+/// #        zcash_protocol::value::Zatoshis::const_from_u64(5),
 /// #        false,
 /// #        None,
 /// #    );
@@ -390,7 +393,7 @@ where
     /// If `range` is `None`, returns the tip of the entire cache.
     /// If no blocks are found in the cache, returns Ok(`None`).
     fn get_tip_height(&self, range: Option<&ScanRange>)
-        -> Result<Option<BlockHeight>, Self::Error>;
+    -> Result<Option<BlockHeight>, Self::Error>;
 
     /// Retrieves contiguous compact blocks specified by the given `range` from the block cache.
     ///
@@ -569,12 +572,11 @@ impl ChainState {
     }
 }
 
-/// Scans at most `limit` blocks from the provided block source for in order to find transactions
+/// Scans at most `limit` blocks from the provided block source in order to find transactions
 /// received by the accounts tracked in the provided wallet database.
 ///
 /// This function will return after scanning at most `limit` new blocks, to enable the caller to
-/// update their UI with scanning progress. Repeatedly calling this function with `from_height ==
-/// None` will process sequential ranges of blocks.
+/// update their UI with scanning progress.
 ///
 /// ## Panics
 ///
@@ -593,7 +595,7 @@ where
     ParamsT: consensus::Parameters + Send + 'static,
     BlockSourceT: BlockSource,
     DbT: WalletWrite,
-    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + 'static,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
 {
     assert_eq!(from_height, from_state.block_height + 1);
 
@@ -618,15 +620,7 @@ where
     };
 
     // Get the nullifiers for the unspent notes we are tracking
-    let mut nullifiers = Nullifiers::new(
-        data_db
-            .get_sapling_nullifiers(NullifierQuery::Unspent)
-            .map_err(Error::Wallet)?,
-        #[cfg(feature = "orchard")]
-        data_db
-            .get_orchard_nullifiers(NullifierQuery::Unspent)
-            .map_err(Error::Wallet)?,
-    );
+    let mut nullifiers = Nullifiers::unspent(data_db).map_err(Error::Wallet)?;
 
     let mut scanned_blocks = vec![];
     let mut scan_summary = ScanSummary::for_range(from_height..from_height);
@@ -655,34 +649,7 @@ where
                 }
             }
 
-            let sapling_spent_nf: Vec<&sapling::Nullifier> = scanned_block
-                .transactions
-                .iter()
-                .flat_map(|tx| tx.sapling_spends().iter().map(|spend| spend.nf()))
-                .collect();
-            nullifiers.retain_sapling(|(_, nf)| !sapling_spent_nf.contains(&nf));
-            nullifiers.extend_sapling(scanned_block.transactions.iter().flat_map(|tx| {
-                tx.sapling_outputs()
-                    .iter()
-                    .flat_map(|out| out.nf().into_iter().map(|nf| (*out.account_id(), *nf)))
-            }));
-
-            #[cfg(feature = "orchard")]
-            {
-                let orchard_spent_nf: Vec<&orchard::note::Nullifier> = scanned_block
-                    .transactions
-                    .iter()
-                    .flat_map(|tx| tx.orchard_spends().iter().map(|spend| spend.nf()))
-                    .collect();
-
-                nullifiers.retain_orchard(|(_, nf)| !orchard_spent_nf.contains(&nf));
-                nullifiers.extend_orchard(scanned_block.transactions.iter().flat_map(|tx| {
-                    tx.orchard_outputs()
-                        .iter()
-                        .flat_map(|out| out.nf().into_iter().map(|nf| (*out.account_id(), *nf)))
-                }));
-            }
-
+            nullifiers.update_with(&scanned_block);
             prior_block_metadata = Some(scanned_block.to_block_metadata());
             scanned_blocks.push(scanned_block);
 
@@ -703,7 +670,7 @@ pub mod testing {
 
     use crate::proto::compact_formats::CompactBlock;
 
-    use super::{error::Error, BlockSource};
+    use super::{BlockSource, error::Error};
 
     pub struct MockBlockSource;
 

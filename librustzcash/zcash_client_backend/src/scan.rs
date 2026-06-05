@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::mem;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use memuse::DynamicUsage;
 use zcash_note_encryption::{
-    batch, BatchDomain, Domain, ShieldedOutput, COMPACT_NOTE_SIZE, ENC_CIPHERTEXT_SIZE,
+    BatchDomain, COMPACT_NOTE_SIZE, Domain, ENC_CIPHERTEXT_SIZE, ShieldedOutput, batch,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 
@@ -476,11 +476,11 @@ where
             self.pending_results.dynamic_usage_bounds(),
         );
         (
-            bounds.0 .0 + running_usage + bounds.1 .0,
+            bounds.0.0 + running_usage + bounds.1.0,
             bounds
                 .0
-                 .1
-                .zip(bounds.1 .1)
+                .1
+                .zip(bounds.1.1)
                 .map(|(a, b)| a + running_usage + b),
         )
     }
@@ -566,7 +566,7 @@ where
         &mut self,
         block_tag: BlockHash,
         txid: TxId,
-    ) -> HashMap<(TxId, usize), DecryptedOutput<IvkTag, D, Dec::Memo>> {
+    ) -> HashMap<usize, DecryptedOutput<IvkTag, D, Dec::Memo>> {
         self.pending_results
             .remove(&ResultKey(block_tag, txid))
             // We won't have a pending result if the transaction didn't have outputs of
@@ -583,7 +583,7 @@ where
                         |OutputIndex {
                              output_index,
                              value,
-                         }| { ((txid, output_index), value) },
+                         }| { (output_index, value) },
                     )
                     .collect()
             })

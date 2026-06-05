@@ -7,6 +7,15 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-23
+
+### Added
+- `zcash_encoding::ReverseHex::{encode, decode}`
+
+### Changed
+- MSRV updated to 1.85.1
+- Migrated from the yanked `core2` crate to `corez 0.1.1`.
+
 ## [0.3.0] - 2025-02-21
 ### Changed
 - Migrated to `nonempty 0.11`

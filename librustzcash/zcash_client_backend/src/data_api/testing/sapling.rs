@@ -7,26 +7,26 @@ use sapling::{
 };
 use shardtree::error::ShardTreeError;
 use zcash_keys::{address::Address, keys::UnifiedSpendingKey};
-use zcash_primitives::transaction::{components::sapling::zip212_enforcement, Transaction};
+use zcash_primitives::transaction::{Transaction, components::sapling::zip212_enforcement};
 use zcash_protocol::{
+    ShieldedProtocol,
     consensus::{self, BlockHeight},
     memo::MemoBytes,
     value::Zatoshis,
-    ShieldedProtocol,
 };
 use zip32::Scope;
 
 use crate::{
     data_api::{
-        chain::{CommitmentTreeRoot, ScanSummary},
-        wallet::{ConfirmationsPolicy, TargetHeight},
         DecryptedTransaction, InputSource, TargetValue, WalletCommitmentTrees, WalletSummary,
         WalletTest,
+        chain::{CommitmentTreeRoot, ScanSummary},
+        wallet::{ConfirmationsPolicy, TargetHeight},
     },
     wallet::{Note, ReceivedNote},
 };
 
-use super::{pool::ShieldedPoolTester, TestState};
+use super::{TestState, pool::ShieldedPoolTester};
 
 /// Type for running pool-agnostic tests on the Sapling pool.
 pub struct SaplingPoolTester;
@@ -86,6 +86,18 @@ impl ShieldedPoolTester for SaplingPoolTester {
             .put_sapling_subtree_roots(start_index, roots)
     }
 
+    fn shard_root<Cache, DbT: WalletTest + WalletCommitmentTrees, P>(
+        st: &mut TestState<Cache, DbT, P>,
+        shard_index: u64,
+    ) -> Result<Self::MerkleTreeHash, ShardTreeError<<DbT as WalletCommitmentTrees>::Error>> {
+        use incrementalmerkletree::{Address, Position};
+        let shard_height = crate::data_api::SAPLING_SHARD_HEIGHT;
+        let addr = Address::from_parts(Level::from(shard_height), shard_index);
+        let end_position = Position::from((shard_index + 1) << shard_height);
+        st.wallet_mut()
+            .with_sapling_tree_mut(|tree| tree.root(addr, end_position))
+    }
+
     fn next_subtree_index<A: Hash + Eq>(s: &WalletSummary<A>) -> u64 {
         s.next_sapling_subtree_index()
     }
@@ -130,12 +142,12 @@ impl ShieldedPoolTester for SaplingPoolTester {
             .map(|n| n.take_sapling())
     }
 
-    fn decrypted_pool_outputs_count<A>(d_tx: &DecryptedTransaction<'_, A>) -> usize {
+    fn decrypted_pool_outputs_count<A>(d_tx: &DecryptedTransaction<Transaction, A>) -> usize {
         d_tx.sapling_outputs().len()
     }
 
     fn with_decrypted_pool_memos<A>(
-        d_tx: &DecryptedTransaction<'_, A>,
+        d_tx: &DecryptedTransaction<Transaction, A>,
         mut f: impl FnMut(&MemoBytes),
     ) {
         for output in d_tx.sapling_outputs() {

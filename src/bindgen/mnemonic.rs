@@ -30,7 +30,7 @@ pub(crate) fn unified_addresses_from_full<P>(
     address_index: Option<u32>,
 ) -> UnifiedAddresses
 where
-    P: zcash_primitives::consensus::Parameters,
+    P: zcash_protocol::consensus::Parameters,
 {
     use zcash_client_backend::encoding::AddressCodec;
     use zcash_keys::address::UnifiedAddress as ZcashUnifiedAddress;
@@ -72,7 +72,7 @@ pub(crate) fn transparent_address_index(
     }
 
     let index = u32::from_le_bytes(low_4_bytes.try_into().ok()?);
-    zcash_primitives::legacy::keys::NonHardenedChildIndex::from_index(index).map(|_| index)
+    transparent::keys::NonHardenedChildIndex::from_index(index).map(|_| index)
 }
 
 /// Generate a new 24-word BIP-39 mnemonic phrase.
@@ -262,10 +262,8 @@ pub fn mnemonic_to_transparent_address(
     address_index: u32,
 ) -> Result<JsValue, Error> {
     use std::str::FromStr;
+    use transparent::keys::{IncomingViewingKey, NonHardenedChildIndex, TransparentKeyScope};
     use zcash_client_backend::encoding::AddressCodec;
-    use zcash_primitives::legacy::keys::{
-        IncomingViewingKey, NonHardenedChildIndex, TransparentKeyScope,
-    };
 
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
@@ -394,10 +392,10 @@ pub fn mnemonic_to_addresses(
 #[wasm_bindgen]
 pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsValue, Error> {
     use std::str::FromStr;
+    use transparent::address::TransparentAddress;
     use zcash_address::unified::{self, Container, Encoding};
     use zcash_client_backend::encoding::AddressCodec;
-    use zcash_primitives::consensus::Parameters;
-    use zcash_primitives::legacy::TransparentAddress;
+    use zcash_protocol::consensus::Parameters;
 
     // Get the network
     let net = crate::Network::from_str(network)?;

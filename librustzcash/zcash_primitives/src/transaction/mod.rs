@@ -9,7 +9,6 @@ pub mod sighash_v5;
 pub mod sighash_v6;
 
 pub mod txid;
-pub mod util;
 
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod tests;
@@ -19,9 +18,10 @@ use blake2b_simd::Hash as Blake2bHash;
 use core::convert::TryFrom;
 use core::fmt::Debug;
 use core::ops::Deref;
-use core2::io::{self, Read, Write};
+use corez::io::{self, Read, Write};
 
 use ::transparent::bundle::{self as transparent, OutPoint, TxIn, TxOut};
+use orchard::bundle::ProofSizeEnforcement;
 use zcash_encoding::{CompactSize, Vector};
 use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
@@ -33,9 +33,9 @@ use self::{
         orchard as orchard_serialization, sapling as sapling_serialization,
         sprout::{self, JsDescription},
     },
-    txid::{to_txid, BlockTxCommitmentDigester, TxIdDigester},
-    util::sha256d::{HashReader, HashWriter},
+    txid::{BlockTxCommitmentDigester, TxIdDigester, to_txid},
 };
+use ::transparent::util::sha256d::{HashReader, HashWriter};
 
 #[cfg(feature = "circuits")]
 use ::sapling::builder as sapling_builder;
@@ -236,10 +236,51 @@ impl TxVersion {
             BranchId::Nu5 => TxVersion::V5,
             BranchId::Nu6 => TxVersion::V5,
             BranchId::Nu6_1 => TxVersion::V5,
+            BranchId::Nu6_2 => TxVersion::V5,
             #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => TxVersion::V6,
             #[cfg(zcash_unstable = "zfuture")]
             BranchId::ZFuture => TxVersion::ZFuture,
+        }
+    }
+
+    /// Returns `true` if this transaction version is valid for us in the specified consensus
+    /// branch, `false` otherwise.
+    pub fn valid_in_branch(&self, consensus_branch_id: BranchId) -> bool {
+        use BranchId::*;
+        // Note: we intentionally use `match` expressions instead of the `matches!`
+        // macro below because we want exhaustivity.
+        match self {
+            TxVersion::Sprout(_) => consensus_branch_id == Sprout,
+            TxVersion::V3 => consensus_branch_id == Overwinter,
+            TxVersion::V4 => match consensus_branch_id {
+                Sprout | Overwinter => false,
+                Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6 | Nu6_1 | Nu6_2 => true,
+                #[cfg(zcash_unstable = "nu7")]
+                Nu7 => false, // ZIP 2003
+                #[cfg(zcash_unstable = "zfuture")]
+                ZFuture => false, // ZIP 2003
+            },
+            TxVersion::V5 => match consensus_branch_id {
+                Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy => false,
+                Nu5 | Nu6 | Nu6_1 | Nu6_2 => true,
+                #[cfg(zcash_unstable = "nu7")]
+                Nu7 => true,
+                #[cfg(zcash_unstable = "zfuture")]
+                ZFuture => true,
+            },
+            #[cfg(zcash_unstable = "nu7")]
+            TxVersion::V6 => match consensus_branch_id {
+                Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6
+                | Nu6_1 | Nu6_2 => false,
+                Nu7 => true, // ZIP 230 or ZIP 248, whichever is chosen for activation
+            },
+            #[cfg(zcash_unstable = "zfuture")]
+            TxVersion::ZFuture => match consensus_branch_id {
+                Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6
+                | Nu6_1 | Nu6_2 => false,
+                ZFuture => true,
+            },
         }
     }
 }
@@ -255,7 +296,7 @@ pub trait Authorization {
 }
 
 /// [`Authorization`] marker type for fully-authorized transactions.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Authorized;
 
 impl Authorization for Authorized {
@@ -340,6 +381,40 @@ pub struct TransactionData<A: Authorization> {
     orchard_bundle: Option<orchard::bundle::Bundle<A::OrchardAuth, ZatBalance>>,
     #[cfg(zcash_unstable = "zfuture")]
     tze_bundle: Option<tze::Bundle<A::TzeAuth>>,
+}
+
+impl Clone for TransactionData<Authorized> {
+    fn clone(&self) -> Self {
+        TransactionData {
+            version: self.version,
+            consensus_branch_id: self.consensus_branch_id,
+            lock_time: self.lock_time,
+            expiry_height: self.expiry_height,
+            #[cfg(all(
+                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
+                feature = "zip-233"
+            ))]
+            zip233_amount: self.zip233_amount,
+            transparent_bundle: self.transparent_bundle.clone(),
+            sprout_bundle: self.sprout_bundle.clone(),
+            sapling_bundle: self.sapling_bundle.clone(),
+            orchard_bundle: self.orchard_bundle.clone(),
+            #[cfg(zcash_unstable = "zfuture")]
+            tze_bundle: self.tze_bundle.clone(),
+        }
+    }
+}
+
+impl Clone for Transaction {
+    fn clone(&self) -> Self {
+        // SAFETY: We're reconstructing the Transaction from its data.
+        // The txid is deterministic from the data, so cloning data and
+        // re-computing txid would be equivalent.
+        Transaction {
+            txid: self.txid,
+            data: self.data.clone(),
+        }
+    }
 }
 
 impl<A: Authorization> TransactionData<A> {
@@ -521,6 +596,22 @@ impl<A: Authorization> TransactionData<A> {
             #[cfg(zcash_unstable = "zfuture")]
             digester.digest_tze(self.tze_bundle.as_ref()),
         )
+    }
+
+    /// Changes the consensus branch ID stored in this transaction for pre-v5 transactions.
+    ///
+    /// This can be used to fix an incorrect value passed to [`Transaction::read`]. Just
+    /// like that method, this method does nothing for v5+ transactions.
+    pub(crate) fn fix_consensus_branch_id(mut self, consensus_branch_id: BranchId) -> Self {
+        match self.version() {
+            TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => {
+                self.consensus_branch_id = consensus_branch_id;
+            }
+            // All later tx versions directly commit to the consensus branch ID, so what
+            // we parse is what we trust.
+            _ => (),
+        }
+        self
     }
 
     /// Maps the bundles from one type to another.
@@ -857,7 +948,23 @@ impl Transaction {
 
         let transparent_bundle = Self::read_transparent(&mut reader)?;
         let sapling_bundle = sapling_serialization::read_v5_bundle(&mut reader)?;
-        let orchard_bundle = orchard_serialization::read_v5_bundle(&mut reader)?;
+        let orchard_bundle =
+            orchard_serialization::read_v5_bundle(&mut reader, match consensus_branch_id {
+                BranchId::Sprout
+                | BranchId::Overwinter
+                | BranchId::Sapling
+                | BranchId::Blossom
+                | BranchId::Heartwood
+                | BranchId::Canopy
+                | BranchId::Nu5
+                | BranchId::Nu6
+                | BranchId::Nu6_1 => ProofSizeEnforcement::Unenforced,
+                BranchId::Nu6_2 => ProofSizeEnforcement::Strict,
+                #[cfg(zcash_unstable = "nu7")]
+                BranchId::Nu7 => ProofSizeEnforcement::Strict,
+                #[cfg(zcash_unstable = "zfuture")]
+                BranchId::ZFuture => ProofSizeEnforcement::Strict,
+            })?;
 
         let data = TransactionData {
             version,
@@ -994,7 +1101,7 @@ impl Transaction {
         if self.orchard_bundle.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Orchard components cannot be present when serializing to the V4 transaction format."
+                "Orchard components cannot be present when serializing to the V4 transaction format.",
             ));
         }
 
@@ -1216,18 +1323,18 @@ pub mod testing {
     use zcash_protocol::consensus::BranchId;
 
     use super::{
+        Authorized, Transaction, TransactionData, TxId, TxVersion,
         components::{
             orchard::testing::{self as orchard},
             sapling::testing::{self as sapling},
         },
-        Authorized, Transaction, TransactionData, TxId, TxVersion,
     };
 
     #[cfg(all(
         any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
         feature = "zip-233"
     ))]
-    use zcash_protocol::value::{Zatoshis, MAX_MONEY};
+    use zcash_protocol::value::{MAX_MONEY, Zatoshis};
 
     #[cfg(zcash_unstable = "zfuture")]
     use super::components::tze::testing::{self as tze};
@@ -1246,6 +1353,7 @@ pub mod testing {
             BranchId::Nu5 => Just(TxVersion::V5).boxed(),
             BranchId::Nu6 => Just(TxVersion::V5).boxed(),
             BranchId::Nu6_1 => Just(TxVersion::V5).boxed(),
+            BranchId::Nu6_2 => Just(TxVersion::V5).boxed(),
             #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => Just(TxVersion::V6).boxed(),
             #[cfg(zcash_unstable = "zfuture")]

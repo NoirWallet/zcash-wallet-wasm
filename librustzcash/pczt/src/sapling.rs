@@ -287,7 +287,7 @@ impl Bundle {
                     || self.outputs.len() != outputs.len()
                     || self.value_sum != value_sum =>
             {
-                return None
+                return None;
             }
             // IO Finalizer has run, and neither bundle has excess spends or outputs.
             (Some(_), _) | (_, Some(_)) => (),
@@ -300,7 +300,7 @@ impl Bundle {
                     // These cases require us to recalculate the value sum, which we can't
                     // do without a parsed bundle.
                     (Ordering::Less, Ordering::Greater) | (Ordering::Greater, Ordering::Less) => {
-                        return None
+                        return None;
                     }
                     // These cases mean that at least one of the two value sums is correct
                     // and we can use it directly.
@@ -355,7 +355,7 @@ impl Bundle {
 
         // Leverage the early-exit behaviour of zip to confirm that the remaining data in
         // the other bundle matches this one.
-        for (lhs, rhs) in self.spends.iter_mut().zip(spends.into_iter()) {
+        for (lhs, rhs) in self.spends.iter_mut().zip(spends) {
             // Destructure `rhs` to ensure we handle everything.
             let Spend {
                 cv,
@@ -398,7 +398,7 @@ impl Bundle {
             }
         }
 
-        for (lhs, rhs) in self.outputs.iter_mut().zip(outputs.into_iter()) {
+        for (lhs, rhs) in self.outputs.iter_mut().zip(outputs) {
             // Destructure `rhs` to ensure we handle everything.
             let Output {
                 cv,

@@ -5,7 +5,7 @@ use wasm_bindgen::JsValue;
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Invalid account id")]
-    AccountIdConversion(#[from] zcash_primitives::zip32::TryFromIntError),
+    AccountIdConversion(#[from] zip32::TryFromIntError),
     #[error("Failed to derive key from seed")]
     // doesn't implement std::error. Should probably fix this upstream
     Derivation(#[from] zcash_keys::keys::DerivationError),
@@ -54,7 +54,7 @@ pub enum Error {
     )]
     UnsupportedMemoRecipient,
     #[error("Error decoding memo: {0}")]
-    MemoDecoding(#[from] zcash_primitives::memo::Error),
+    MemoDecoding(#[from] zcash_protocol::memo::Error),
 
     #[error("Invalid seed phrase")]
     InvalidSeedPhrase,

@@ -1,7 +1,7 @@
 use crate::encoding::{StateWrite, WriteBytesExt};
 use core::borrow::Borrow;
 use core::convert::TryFrom;
-use core2::io::Write;
+use corez::io::Write;
 
 use blake2b_simd::{Hash as Blake2bHash, Params};
 use ff::PrimeField;
@@ -26,8 +26,8 @@ use zcash_protocol::value::Zatoshis;
 
 #[cfg(zcash_unstable = "zfuture")]
 use super::{
-    components::tze::{self, TzeIn, TzeOut},
     TzeDigests,
+    components::tze::{self, TzeIn, TzeOut},
 };
 
 /// TxId tree root personalization

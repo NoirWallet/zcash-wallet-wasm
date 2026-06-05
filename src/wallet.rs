@@ -28,7 +28,8 @@ use zcash_client_backend::data_api::wallet::{
     propose_shielding, propose_transfer,
 };
 use zcash_client_backend::data_api::{
-    Account, AccountBirthday, AccountPurpose, WalletSummary, Zip32Derivation,
+    Account, AccountBirthday, AccountPurpose, TransparentOutputFilter, WalletSummary,
+    Zip32Derivation,
 };
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, SplitPolicy, StandardFeeRule};
@@ -44,8 +45,8 @@ use zcash_primitives::transaction::fees::FeeRule;
 use zcash_proofs::prover::LocalTxProver;
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
-use zcash_primitives::memo::MemoBytes;
 use zcash_protocol::ShieldedProtocol;
+use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
 
@@ -127,21 +128,17 @@ where
     pub async fn db_to_bytes(&self) -> Result<Vec<u8>, Error> {
         let mut memory_wallet_bytes = Vec::new();
         let db = self.db.read().await;
-        let encoded_len = db.encoded_len()?;
-        memory_wallet_bytes
-            .try_reserve_exact(encoded_len)
-            .map_err(|e| {
-                Error::Generic(format!(
-                    "Failed to allocate {encoded_len} bytes for wallet database serialization: {e}"
-                ))
-            })?;
         db.encode(&mut memory_wallet_bytes)?;
         Ok(memory_wallet_bytes)
     }
 
-    pub async fn db_to_bytes_chunked<F: FnMut(&[u8])>(&self, flush_fn: F) -> Result<(), Error> {
-        let db = self.db.read().await;
-        db.encode_chunked(flush_fn)?;
+    pub async fn db_to_bytes_chunked<F: FnMut(&[u8])>(&self, mut flush_fn: F) -> Result<(), Error> {
+        const CHUNK_FLUSH_SIZE: usize = 4 * 1024 * 1024;
+
+        let bytes = self.db_to_bytes().await?;
+        for chunk in bytes.chunks(CHUNK_FLUSH_SIZE) {
+            flush_fn(chunk);
+        }
         Ok(())
     }
 }
@@ -161,6 +158,7 @@ where
         + Hash
         + Default
         + Send
+        + Sync
         + ConditionallySelectable
         + Serialize
         + DeserializeOwned
@@ -506,6 +504,7 @@ where
             .get_block_range(service::BlockRange {
                 start: Some(start_id),
                 end: Some(end_id),
+                pool_types: vec![],
             })
             .await
             .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
@@ -668,6 +667,7 @@ where
         let range = service::BlockRange {
             start: Some(start),
             end: Some(end),
+            pool_types: vec![],
         };
         let compact_blocks: Vec<zcash_client_backend::proto::compact_formats::CompactBlock> =
             client
@@ -884,7 +884,7 @@ where
     /// - If time is after the latest block, returns latest height
     /// - Otherwise, performs binary search with ~1000 block precision
     pub async fn get_block_by_time(&self, time: u32) -> Result<u32, Error> {
-        use zcash_primitives::consensus::{NetworkUpgrade, Parameters};
+        use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 
         // Get Sapling activation height as the starting point
         let start_height = self
@@ -1007,6 +1007,7 @@ where
             &from_addrs,
             account_id,
             self.confirmations_policy(),
+            TransparentOutputFilter::All,
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
 
@@ -1053,13 +1054,13 @@ where
         let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
         let payment = Payment::new(
             to_address,
-            Zatoshis::from_u64(value)?,
+            Some(Zatoshis::from_u64(value)?),
             memo,
             None,
             None,
             vec![],
         )
-        .ok_or(Error::UnsupportedMemoRecipient)?;
+        .map_err(|e| Error::Zip321(e.with_index(0)))?;
         let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
         let proposal = propose_transfer::<_, _, _,_, <W as WalletCommitmentTrees>::Error>(

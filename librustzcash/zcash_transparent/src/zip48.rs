@@ -7,7 +7,7 @@ use nonempty::NonEmpty;
 use secp256k1::{PublicKey, SecretKey};
 use zcash_protocol::consensus::{self, NetworkConstants};
 use zcash_script::{
-    descriptor::{self, sh, sortedmulti, KeyExpression, KeyOrigin},
+    descriptor::{self, KeyExpression, KeyOrigin, sh, sortedmulti},
     script,
 };
 use zip32::AccountId;
@@ -32,10 +32,19 @@ fn pub_prefix<P: consensus::Parameters>(params: &P) -> Prefix {
 /// A [ZIP 48] private key at the P2SH level `m/48'/<coin_type>'/<account>'/133000'`.
 ///
 /// [ZIP 48]: https://zips.z.cash/zip-0048
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AccountPrivKey {
     origin: KeyOrigin,
     key: ExtendedPrivateKey<SecretKey>,
+}
+
+impl core::fmt::Debug for AccountPrivKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AccountPrivKey")
+            .field("origin", &self.origin)
+            .field("key", &"...")
+            .finish()
+    }
 }
 
 impl AccountPrivKey {
@@ -186,13 +195,10 @@ impl AccountPubKey {
         scope: zip32::Scope,
         address_index: NonHardenedChildIndex,
     ) -> KeyExpression {
-        self.key_expression_inner(
-            prefix,
-            vec![
-                TransparentKeyScope::from(scope).into(),
-                address_index.into(),
-            ],
-        )
+        self.key_expression_inner(prefix, vec![
+            TransparentKeyScope::from(scope).into(),
+            address_index.into(),
+        ])
     }
 
     fn key_expression_inner(

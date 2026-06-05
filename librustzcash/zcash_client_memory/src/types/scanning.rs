@@ -1,9 +1,9 @@
 use std::ops::{Deref, DerefMut, Range};
 
 use zcash_client_backend::data_api::scanning::{
-    spanning_tree::SpanningTree, ScanPriority, ScanRange,
+    ScanPriority, ScanRange, spanning_tree::SpanningTree,
 };
-use zcash_primitives::consensus::BlockHeight;
+use zcash_protocol::consensus::BlockHeight;
 
 use crate::error::Error;
 
@@ -82,7 +82,7 @@ impl ScanQueue {
                     !(start > &query_range.end || &query_range.start > end)
                 })
                 .collect();
-            q_ranges.sort_by(|(_, end_a, _), (_, end_b, _)| end_a.cmp(end_b));
+            q_ranges.sort_by_key(|(_, end_a, _)| *end_a);
 
             // Iterate over the ranges in the scan queue that overlap the range that we have
             // identified as needing to be fully scanned. For each such range add it to the

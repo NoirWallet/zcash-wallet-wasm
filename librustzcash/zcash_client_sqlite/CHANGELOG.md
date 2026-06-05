@@ -8,13 +8,210 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
-## [Unreleased]
-
-## [0.19.0] - PLANNED
+## [0.21.0] - 2026-06-02
 
 ### Changed
+- Migrated to `zcash_protocol 0.9.0`, `zcash_address 0.12.0`, `zcash_transparent 0.8.0`, `zip321 0.8.0`, `zcash_keys 0.14.0`, `zcash_primitives 0.28.0`, `zcash_proofs 0.28.0`.
+
+## [0.20.2] - 2026-05-07
+
+### Fixed
+- Scan-progress accounting (`subtree_scan_progress`) no longer counts outputs
+  from blocks whose enclosing scan-queue range has been re-queued for
+  scanning. Previously, a wallet that had scanned blocks and then re-queued
+  the corresponding range (for example as a consequence of adding a new
+  account whose birthday lies within already-scanned territory) would
+  over-report scan progress, because the re-queued blocks remained in the
+  `blocks` table and were still counted as scanned.
+
+## [0.20.1] - 2026-05-06
+
+### Fixed
+- This release fixes a bug in progress estimation that can occur when rewinding
+  to a height prior to any existing wallet birthday as a consequence of adding
+  an account.
+
+## [0.20.0] - 2026-04-27
+
+### Added
+- The following columns have been added to the exposed `v_tx_outputs` view:
+  - `transaction_id`
+  - `tx_mined_height`
+  - `tx_trust_status`
+  - `recipient_key_scope`
+- `zcash_client_sqlite::TxRef`
+- `impl<'a> Borrow<rusqlite::Transaction<'a>> for zcash_client_sqlite::SqlTransaction<'a>`
+- `impl zcash_client_backend::data_api::ll::LowLevelWalletRead for WalletDb`
+- `impl zcash_client_backend::data_api::ll::LowLevelWalletWrite for WalletDb`
+- `impl Hash for zcash_client_sqlite::{ReceivedNoteId, UtxoId, TxRef}`
+- `impl {PartialOrd, Ord} for zcash_client_sqlite::UtxoId`
+- `impl zcash_keys::keys::transparent::gap_limits::AddressStore for WalletDb`
+  (behind the `transparent-inputs` feature flag)
+- `zcash_client_sqlite::AccountRef` is now public.
+- `impl<'conn, P, CL, R> WalletWrite for WalletDb<SqlTransaction<'conn>, P, CL, R>` to
+  enable calling `WalletWrite` methods inside `WalletDb::transactionally` (amortizing the
+  database transaction overhead).
+- `WalletDb::get_unspent_orchard_notes_at_historical_height` returns all Orchard
+  notes that existed and were unspent at a given height.
+- `WalletDb::generate_orchard_witnesses_at_historical_height` generates Merkle
+  witnesses at a historical height using an ephemeral in-memory
+  `shardtree::store::memory::MemoryShardStore`.
+- Two new `orchard`-gated variants have been added to
+  `zcash_client_sqlite::error::SqliteClientError` to surface the failure modes
+  of `WalletDb::generate_orchard_witnesses_at_historical_height`:
+  - `HistoricalFrontierInvalid(shardtree::error::InsertionError)` —
+    the caller-supplied frontier is inconsistent with the shard data
+    reconstructed from the wallet at the requested height.
+  - `HistoricalWitnessUnavailable { position, height }` — no witness can be
+    produced for the specified position at the specified height (the wallet
+    most likely has not synced through that height).
+  Shard-read failures continue to surface via the existing
+  `SqliteClientError::CommitmentTree` variant.
+
+### Changed
+- Migrated to `sapling-crypto 0.7`, `orchard 0.13`, `zcash_encoding 0.4`, 
+  `zcash_protocol 0.8`, `zcash_address 0.11`, `zip321 0.7`, `zcash_transparent 0.7`, 
+  `zcash_primitives 0.27`, `zcash_proofs 0.27`, `zcash_keys 0.13`, `pczt 0.6`,
+  `zcash_client_backend 0.22`
+- The `accounts` table now stores IVK item caches instead of FVK item caches for
+  collision detection. A new `p2sh_ivk_item_cache` column is reserved for future
+  ZIP 316 Revision 2 P2SH support.
+- Account collision detection now uses IVK-based matching, which catches collisions
+  between FVK-imported and IVK-imported accounts. Importing an FVK over an existing
+  IVK-only account is treated as a capability upgrade if the existing IVK items are
+  a subset of those derivable from the new FVK.
+- The `InputSource::get_spendable_transparent_outputs` implementation now
+  accepts an `output_filter: TransparentOutputFilter` parameter. When set to
+  `CoinbaseOnly`, the SQL query restricts results to outputs from coinbase
+  transactions (identified by `tx_index = 0`).
+- Migrated to `orchard 0.13`, `sapling-crypto 0.7`.
+- Renamed `zcash_client_sqlite::error::PubkeyImportConflict` to
+  `zcash_client_sqlite::error::StandaloneImportConflict`
+- P2SH UTXOs returned by `get_spendable_transparent_outputs` now include a
+  precomputed input size for accurate ZIP 317 fee estimation.
+- Added a `witness_stabilized` column to the `sapling_received_notes` and
+  `orchard_received_notes` tables. The column is set to 1 at the end of each
+  scan batch (and once as a backfill by the `witness_stabilized_notes`
+  migration) for notes whose containing shard is fully Scanned and whose
+  `subtree_end_height` has received at least `PRUNING_DEPTH` confirmations.
+
+### Removed
+- `zcash_client_sqlite::GapLimits` use `zcash_keys::keys::transparent::GapLimits` instead.
+- `zcash_client_sqlite::UtxoId` contents are now private.
+- The inadvertently-exposed `zcash_client_sqlite::chain::migrations::blockmeta::init`
+  module has been removed from the public API.
+
+### Fixed
+- `get_transparent_balances` no longer fails for standalone transparent addresses
+  that have no `TransparentKeyScope`. Previously, it would error when encountering
+  a `KeyScope` that could not be converted to a `TransparentKeyScope`.
+- Notes are now consistently treated as having "uneconomic value" if their value is less
+  than **or equal to** the marginal fee. Previously, some call sites only considered
+  note uneconomic if their value was less than the marginal fee.
+
+## [0.19.5] - 2026-03-10
+
+### Fixed
+- The following APIs no longer crash in certain regtest mode configurations with
+  fewer NUs active:
+  - `WalletDb::{create_account, import_account_hd, import_account_ufvk}`
+  - `WalletDb::get_wallet_summary`
+  - `WalletDb::truncate_to_height`
+
+## [0.18.12, 0.19.4] - 2026-02-26
+
+### Fixed
+- Updated to `shardtree 0.6.2` to fix a note commitment tree corruption bug.
+
+## [0.19.3] - 2026-02-19
+
+### Fixed
+- Migration no longer crashes in regtest mode.
+
+## [0.18.11, 0.19.2] - 2026-01-30
+
+### Fixed
+- Migration no longer fails for wallets last written with certain older versions
+  of the crate.
+
+## [0.18.10, 0.19.1] - 2025-11-25
+
+### Fixed
+- Fixes a SQL bug that causes unspent note metadata queries to fail.
+
+## [0.19.0] - 2025-11-05
+
+### Added
+- `zcash_client_sqlite::wallet::init::migrations::V_0_19_0`
+
+### Changed
+- MSRV is now 1.85.1.
 - Migrated to `zcash_protocol 0.7`, `zcash_address 0.10`, `zip321 0.6`,
-  `zcash_transparent 0.6`, `zcash_primitives 0.26`, `zcash_proofs 0.26`
+  `zcash_transparent 0.6`, `zcash_primitives 0.26`, `zcash_proofs 0.26`,
+  `prost 0.14`, `rusqlite 0.37`.
+- The implementation of `zcash_client_backend::WalletWrite` for `WalletDb` has
+  additional type constraints. The `R` type parameter is now constrained to
+  types that implement `RngCore`.
+- The default gap limit for ephemeral address generation has been changed from
+  5 addresses to 10. Now that ephemeral addresses are being used for more
+  single-use-address use cases than just transactions sending to TEX addresses,
+  the case that there will be a series of unused addresses (for example, for
+  swap refunds) becomes more common.
+
+### Fixed
+- A bug was fixed in `WalletDb::get_transaction` that could cause transaction
+  retrieval to return an error instead of `None` for transactions for which the
+  raw transaction data was not available.
+
+## [0.18.9] - 2025-10-22
+
+### Fixed
+- Fixes a problem whereby dust-valued transparent outputs in the wallet could
+  disrupt shielding operations.
+- Fixes a bug wherein `WalletDb::get_transparent_balances` was returning
+  balance for ephemeral addresses, contradicting its documented requirements.
+
+## [0.18.8] - YANKED
+
+## [0.18.7] - 2025-10-16
+
+### Fixed
+- Fixes a data persistence error that could result in a violation of the
+  `transactions.min_observed_consistency` constraint.
+
+## [0.18.6] - 2025-10-16
+
+### Fixed
+- Fulfilled transaction enhancement requests are now deleted once it is
+  determined that there is no wallet involvement with the transaction.
+
+## [0.18.5] - 2025-10-14
+
+### Changed
+- This release regularizes our approach to determining when outputs belonging
+  to the wallet are unspent. We now track the block height at which we first
+  observe a transaction; for transactions discovered by scanning the mempool
+  and transactions generated by the wallet, this is equivalent to the mempool
+  "height".
+- This release introduces a more robust approach to the management of
+  transaction status requests. It ensures that we continue to query for
+  transaction status for a given transaction until we have positive
+  confirmation that either:
+    - the transaction has definitely expired, or
+    - if expiry information is unavailable, that the transaction has not been
+      mined for at least 140 blocks since the block height at which we first
+      observed the transaction.
+
+## [0.18.4] - 2025-10-08
+
+### Fixed
+- This modifies balance calculation to explicitly ignore balance held in
+  ephemeral addresses. This will be altered in a future release; at present,
+  the only use of ephemeral addresses is as interstitial addresses in TEX
+  address transfers, and so it is safe to ignore these funds. Funds would only
+  appear in the case of a partial TEX transfer failure or funds being returned
+  to a TEX address, which would not be detected by normal scanning but which
+  could be detected by the new mempool detection logic implemented by Zashi.
 
 ## [0.18.3] - 2025-09-30
 

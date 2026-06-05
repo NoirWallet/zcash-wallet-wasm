@@ -480,15 +480,15 @@ mod tests {
     use ff::Field;
     use rand_core::OsRng;
 
-    use sapling::{zip32::ExtendedSpendingKey, Node, Rseed};
+    use sapling::{Node, Rseed, zip32::ExtendedSpendingKey};
     use transparent::{address::TransparentAddress, builder::TransparentSigningSet};
     use zcash_primitives::{
         extensions::transparent::{self as tze, Extension, FromPayload, ToPayload},
         transaction::{
+            Transaction, TransactionData, TxVersion,
             builder::{BuildConfig, Builder},
             components::tze::{Authorized, Bundle, OutPoint, TzeIn, TzeOut},
             fees::{fixed, zip317::MINIMUM_FEE},
-            Transaction, TransactionData, TxVersion,
         },
     };
     use zcash_protocol::{
@@ -498,7 +498,7 @@ mod tests {
 
     use zcash_proofs::prover::LocalTxProver;
 
-    use super::{close, hash_1, open, Context, DemoBuilder, Precondition, Program, Witness};
+    use super::{Context, DemoBuilder, Precondition, Program, Witness, close, hash_1, open};
 
     #[derive(PartialEq, Copy, Clone, Debug)]
     struct FutureNetwork;
@@ -514,7 +514,8 @@ mod tests {
                 NetworkUpgrade::Nu5 => Some(BlockHeight::from_u32(1_200_000)),
                 NetworkUpgrade::Nu6 => Some(BlockHeight::from_u32(1_300_000)),
                 NetworkUpgrade::Nu6_1 => Some(BlockHeight::from_u32(1_400_000)),
-                NetworkUpgrade::ZFuture => Some(BlockHeight::from_u32(1_500_000)),
+                NetworkUpgrade::Nu6_2 => Some(BlockHeight::from_u32(1_500_000)),
+                NetworkUpgrade::ZFuture => Some(BlockHeight::from_u32(1_600_000)),
             }
         }
 
@@ -619,14 +620,10 @@ mod tests {
         sapling_anchor: sapling::Anchor,
     ) -> DemoBuilder<Builder<'a, FutureNetwork, ()>> {
         DemoBuilder {
-            txn_builder: Builder::new(
-                FutureNetwork,
-                height,
-                BuildConfig::Standard {
-                    sapling_anchor: Some(sapling_anchor),
-                    orchard_anchor: Some(orchard::Anchor::empty_tree()),
-                },
-            ),
+            txn_builder: Builder::new(FutureNetwork, height, BuildConfig::Standard {
+                sapling_anchor: Some(sapling_anchor),
+                orchard_anchor: Some(orchard::Anchor::empty_tree()),
+            }),
             extension_id: 0,
         }
     }

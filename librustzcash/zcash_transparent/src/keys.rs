@@ -1,5 +1,7 @@
 //! Transparent key components.
 
+use core::fmt;
+
 use bip32::ChildNumber;
 use subtle::{Choice, ConstantTimeEq};
 use zip32::DiversifierIndex;
@@ -20,7 +22,7 @@ use {
 ///
 /// This type can represent [`zip32`] internal and external scopes, as well as custom scopes that
 /// may be used in non-hardened derivation at the `change` level of the BIP 44 key path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransparentKeyScope(u32);
 
 impl TransparentKeyScope {
@@ -49,6 +51,17 @@ impl TransparentKeyScope {
     pub const EPHEMERAL: Self = TransparentKeyScope(2);
 }
 
+impl fmt::Debug for TransparentKeyScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::EXTERNAL => f.write_str("TransparentKeyScope::EXTERNAL"),
+            Self::INTERNAL => f.write_str("TransparentKeyScope::INTERNAL"),
+            Self::EPHEMERAL => f.write_str("TransparentKeyScope::EPHEMERAL"),
+            TransparentKeyScope(other) => f.write_str(&format!("TransparentKeyScope({other})")),
+        }
+    }
+}
+
 impl From<zip32::Scope> for TransparentKeyScope {
     fn from(value: zip32::Scope) -> Self {
         match value {
@@ -67,8 +80,14 @@ impl From<TransparentKeyScope> for ChildNumber {
 /// A child index for a derived transparent address.
 ///
 /// Only NON-hardened derivation is supported.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NonHardenedChildIndex(u32);
+
+impl core::fmt::Debug for NonHardenedChildIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format!("NonHardenedChildIndex({})", self.0))
+    }
+}
 
 impl ConstantTimeEq for NonHardenedChildIndex {
     fn ct_eq(&self, other: &Self) -> Choice {
@@ -207,9 +226,16 @@ impl IntoIterator for NonHardenedChildRange {
 /// A [BIP44] private key at the account path level `m/44'/<coin_type>'/<account>'`.
 ///
 /// [BIP44]: https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[cfg(feature = "transparent-inputs")]
 pub struct AccountPrivKey(ExtendedPrivateKey<secp256k1::SecretKey>);
+
+#[cfg(feature = "transparent-inputs")]
+impl core::fmt::Debug for AccountPrivKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("AccountPrivKey").field(&"...").finish()
+    }
+}
 
 #[cfg(feature = "transparent-inputs")]
 impl AccountPrivKey {
@@ -309,8 +335,29 @@ impl AccountPrivKey {
 ///
 /// [BIP44]: https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
 #[cfg(feature = "transparent-inputs")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AccountPubKey(ExtendedPublicKey<PublicKey>);
+
+/// Compares only the chain code and public key, ignoring BIP 32 derivation
+/// metadata (depth, parent fingerprint, child number) which are not preserved
+/// by the UFVK encoding.
+#[cfg(feature = "transparent-inputs")]
+impl PartialEq for AccountPubKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.attrs().chain_code == other.0.attrs().chain_code
+            && self.0.public_key() == other.0.public_key()
+    }
+}
+
+#[cfg(feature = "transparent-inputs")]
+impl Eq for AccountPubKey {}
+
+#[cfg(feature = "transparent-inputs")]
+impl core::fmt::Debug for AccountPubKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("AccountPubKey").field(&"...").finish()
+    }
+}
 
 #[cfg(feature = "transparent-inputs")]
 impl AccountPubKey {
@@ -522,8 +569,15 @@ pub trait IncomingViewingKey: private::SealedChangeLevelKey + core::marker::Size
 ///
 /// [BIP44]: https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
 #[cfg(feature = "transparent-inputs")]
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExternalIvk(ExtendedPublicKey<PublicKey>);
+
+#[cfg(feature = "transparent-inputs")]
+impl core::fmt::Debug for ExternalIvk {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("ExternalIvk").field(&"...").finish()
+    }
+}
 
 #[cfg(feature = "transparent-inputs")]
 impl private::SealedChangeLevelKey for ExternalIvk {
@@ -549,8 +603,15 @@ impl IncomingViewingKey for ExternalIvk {}
 ///
 /// [BIP44]: https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
 #[cfg(feature = "transparent-inputs")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct InternalIvk(ExtendedPublicKey<PublicKey>);
+
+#[cfg(feature = "transparent-inputs")]
+impl core::fmt::Debug for InternalIvk {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("InternalIvk").field(&"...").finish()
+    }
+}
 
 #[cfg(feature = "transparent-inputs")]
 impl private::SealedChangeLevelKey for InternalIvk {
@@ -573,8 +634,15 @@ impl IncomingViewingKey for InternalIvk {}
 ///
 /// This allows derivation of ephemeral addresses for use within the wallet.
 #[cfg(feature = "transparent-inputs")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EphemeralIvk(ExtendedPublicKey<PublicKey>);
+
+#[cfg(feature = "transparent-inputs")]
+impl core::fmt::Debug for EphemeralIvk {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("EphemeralIvk").field(&"...").finish()
+    }
+}
 
 #[cfg(feature = "transparent-inputs")]
 impl EphemeralIvk {
@@ -592,6 +660,12 @@ impl EphemeralIvk {
 /// Internal outgoing viewing key used for autoshielding.
 pub struct InternalOvk([u8; 32]);
 
+impl core::fmt::Debug for InternalOvk {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("InternalOvk").field(&"...").finish()
+    }
+}
+
 impl InternalOvk {
     pub fn as_bytes(&self) -> [u8; 32] {
         self.0
@@ -601,6 +675,12 @@ impl InternalOvk {
 /// External outgoing viewing key used by `zcashd` for transparent-to-shielded spends to
 /// external receivers.
 pub struct ExternalOvk([u8; 32]);
+
+impl core::fmt::Debug for ExternalOvk {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("ExternalOvk").field(&"...").finish()
+    }
+}
 
 impl ExternalOvk {
     pub fn as_bytes(&self) -> [u8; 32] {
@@ -622,7 +702,7 @@ mod tests {
             keys::{AccountPrivKey, AccountPubKey, IncomingViewingKey, TransparentKeyScope},
             test_vectors,
         },
-        zcash_protocol::consensus::{NetworkConstants, MAIN_NETWORK},
+        zcash_protocol::consensus::{MAIN_NETWORK, NetworkConstants},
     };
 
     #[test]
@@ -763,10 +843,12 @@ mod tests {
     #[test]
     fn nonhardened_index_next() {
         assert_eq!(1, NonHardenedChildIndex::ZERO.next().unwrap().index());
-        assert!(NonHardenedChildIndex::from_index(0x7fffffff)
-            .unwrap()
-            .next()
-            .is_none());
+        assert!(
+            NonHardenedChildIndex::from_index(0x7fffffff)
+                .unwrap()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
@@ -791,5 +873,36 @@ mod tests {
         assert_eq!(nh.index(), 0);
 
         assert!(NonHardenedChildIndex::try_from(ChildNumber::new(0, true).unwrap()).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-inputs")]
+    fn account_priv_key_debug_redaction() {
+        let sk =
+            AccountPrivKey::from_seed(&MAIN_NETWORK, &[0u8; 64], zip32::AccountId::ZERO).unwrap();
+        assert_eq!(format!("{:?}", sk), "AccountPrivKey(\"...\")");
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-inputs")]
+    fn viewing_key_debug_redaction() {
+        let seed = [0u8; 32];
+        let account_sk =
+            AccountPrivKey::from_seed(&MAIN_NETWORK, &seed, zip32::AccountId::ZERO).unwrap();
+        let account_pubkey = account_sk.to_account_pubkey();
+        assert_eq!(format!("{:?}", account_pubkey), "AccountPubKey(\"...\")");
+
+        let external_ivk = account_pubkey.derive_external_ivk().unwrap();
+        assert_eq!(format!("{:?}", external_ivk), "ExternalIvk(\"...\")");
+
+        let internal_ivk = account_pubkey.derive_internal_ivk().unwrap();
+        assert_eq!(format!("{:?}", internal_ivk), "InternalIvk(\"...\")");
+
+        let ephemeral_ivk = account_pubkey.derive_ephemeral_ivk().unwrap();
+        assert_eq!(format!("{:?}", ephemeral_ivk), "EphemeralIvk(\"...\")");
+
+        let (internal_ovk, external_ovk) = account_pubkey.ovks_for_shielding();
+        assert_eq!(format!("{:?}", internal_ovk), "InternalOvk(\"...\")");
+        assert_eq!(format!("{:?}", external_ovk), "ExternalOvk(\"...\")");
     }
 }

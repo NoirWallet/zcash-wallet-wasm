@@ -111,6 +111,7 @@ pub struct Spend {
     ///
     /// This is set by the Signer.
     #[serde_as(as = "Option<[_; 64]>")]
+    #[getset(get = "pub")]
     pub(crate) spend_auth_sig: Option<[u8; 64]>,
 
     /// The [raw encoding] of the Orchard payment address that received the note being spent.
@@ -291,7 +292,7 @@ impl Bundle {
             (Some(_), _) | (_, Some(_))
                 if self.actions.len() != actions.len() || self.value_sum != value_sum =>
             {
-                return None
+                return None;
             }
             // IO Finalizer has run, and neither bundle has excess spends or outputs.
             (Some(_), _) | (_, Some(_)) => (),
@@ -327,7 +328,7 @@ impl Bundle {
 
         // Leverage the early-exit behaviour of zip to confirm that the remaining data in
         // the other bundle matches this one.
-        for (lhs, rhs) in self.actions.iter_mut().zip(actions.into_iter()) {
+        for (lhs, rhs) in self.actions.iter_mut().zip(actions) {
             // Destructure `rhs` to ensure we handle everything.
             let Action {
                 cv_net,

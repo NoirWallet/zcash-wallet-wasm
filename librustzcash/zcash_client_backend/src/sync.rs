@@ -26,14 +26,14 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::{
     data_api::{
+        WalletCommitmentTrees, WalletRead, WalletWrite,
         chain::{
-            error::Error as ChainError, scan_cached_blocks, BlockCache, ChainState,
-            CommitmentTreeRoot,
+            BlockCache, ChainState, CommitmentTreeRoot, error::Error as ChainError,
+            scan_cached_blocks,
         },
         scanning::{ScanPriority, ScanRange},
-        WalletCommitmentTrees, WalletRead, WalletWrite,
     },
-    proto::service::{self, compact_tx_streamer_client::CompactTxStreamerClient, BlockId},
+    proto::service::{self, BlockId, compact_tx_streamer_client::CompactTxStreamerClient},
     scanning::ScanError,
 };
 
@@ -69,7 +69,7 @@ where
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
     DbT: WalletWrite + WalletCommitmentTrees,
-    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
@@ -85,9 +85,8 @@ where
 /// Syncs a single batch of blocks and returns whether any work was performed.
 ///
 /// Unlike [`run`], which loops until the wallet is fully synced, this function
-/// processes at most `batch_size` blocks (plus any Verify-priority ranges for
-/// chain continuity) and then returns. Returns `true` if a scan range was
-/// processed, and `false` only if no scan ranges were suggested.
+/// processes at most `batch_size` blocks after handling any Verify-priority
+/// ranges needed for chain continuity.
 pub async fn run_next_batch<P, ChT, CaT, DbT>(
     client: &mut CompactTxStreamerClient<ChT>,
     params: &P,
@@ -107,7 +106,7 @@ where
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
     DbT: WalletWrite + WalletCommitmentTrees,
-    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
@@ -131,7 +130,7 @@ where
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
     DbT: WalletWrite,
-    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
 {
     update_chain_tip(client, db_data).await?;
@@ -148,11 +147,13 @@ where
         refresh_utxos(params, client, db_data, account_id, start_height).await?;
     }
 
-    // Handle Verify-priority ranges first
+    let mut did_work = false;
     let mut scan_ranges = db_data.suggest_scan_ranges().map_err(Error::Wallet)?;
+
     loop {
         match scan_ranges.first() {
             Some(scan_range) if scan_range.priority() == ScanPriority::Verify => {
+                did_work = true;
                 download_blocks(client, db_cache, scan_range).await?;
                 let chain_state =
                     download_chain_state(client, scan_range.block_range().start - 1).await?;
@@ -162,6 +163,7 @@ where
                     .delete(scan_range.clone())
                     .await
                     .map_err(Error::Cache)?;
+
                 if scan_ranges_updated {
                     scan_ranges = db_data.suggest_scan_ranges().map_err(Error::Wallet)?;
                 } else {
@@ -172,11 +174,9 @@ where
         }
     }
 
-    // Get scan ranges and take only the first batch_size chunk
     let scan_ranges = db_data.suggest_scan_ranges().map_err(Error::Wallet)?;
     debug!("Suggested ranges: {:?}", scan_ranges);
 
-    // Get the first non-empty scan range and limit it to batch_size
     let first_batch = scan_ranges
         .into_iter()
         .flat_map(|r| {
@@ -206,7 +206,7 @@ where
             db_cache.delete(scan_range).await.map_err(Error::Cache)?;
             Ok(true)
         }
-        None => Ok(false),
+        None => Ok(did_work),
     }
 }
 
@@ -226,7 +226,7 @@ where
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
     DbT: WalletWrite,
-    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
 {
     // 3) Download chain tip metadata from lightwalletd
@@ -459,6 +459,7 @@ where
     let range = service::BlockRange {
         start: Some(start),
         end: Some(end),
+        pool_types: vec![],
     };
     let compact_blocks = client
         .get_block_range(range)
@@ -514,7 +515,7 @@ where
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
     DbT: WalletWrite,
-    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
 {
     info!("Scanning {}", scan_range);
@@ -629,37 +630,39 @@ where
     if request.addresses.is_empty() {
         info!("{:?} has no transparent receivers", account_id);
     } else {
-        let utxos = client
-            .get_address_utxos(request)
+        client
+            .get_address_utxos_stream(request)
             .await?
             .into_inner()
-            .address_utxos;
-
-        for reply in utxos {
-            let output = WalletTransparentOutput::from_parts(
-                OutPoint::new(
-                    reply.txid[..]
-                        .try_into()
-                        .map_err(|_| Error::MisbehavingServer)?,
-                    reply
-                        .index
-                        .try_into()
-                        .map_err(|_| Error::MisbehavingServer)?,
-                ),
-                TxOut::new(
-                    Zatoshis::from_nonnegative_i64(reply.value_zat)
-                        .map_err(|_| Error::MisbehavingServer)?,
-                    Script(script::Code(reply.script)),
-                ),
-                Some(BlockHeight::try_from(reply.height).map_err(|_| Error::MisbehavingServer)?),
-            )
-            .ok_or(Error::MisbehavingServer)?;
-
-            db_data
-                .put_received_transparent_utxo(&output)
-                .map(|_| ())
-                .map_err(Error::Wallet)?;
-        }
+            .map_err(Error::Server)
+            .and_then(|reply| async move {
+                WalletTransparentOutput::from_parts(
+                    OutPoint::new(
+                        reply.txid[..]
+                            .try_into()
+                            .map_err(|_| Error::MisbehavingServer)?,
+                        reply
+                            .index
+                            .try_into()
+                            .map_err(|_| Error::MisbehavingServer)?,
+                    ),
+                    TxOut::new(
+                        Zatoshis::from_nonnegative_i64(reply.value_zat)
+                            .map_err(|_| Error::MisbehavingServer)?,
+                        Script(script::Code(reply.script)),
+                    ),
+                    Some(
+                        BlockHeight::try_from(reply.height)
+                            .map_err(|_| Error::MisbehavingServer)?,
+                    ),
+                )
+                .ok_or(Error::MisbehavingServer)
+            })
+            .try_for_each(|output| {
+                let res = db_data.put_received_transparent_utxo(&output).map(|_| ());
+                async move { res.map_err(Error::Wallet) }
+            })
+            .await?;
     }
 
     Ok(())

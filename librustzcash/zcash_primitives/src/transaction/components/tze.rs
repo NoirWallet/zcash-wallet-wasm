@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::fmt::Debug;
-use core2::io::{self, Read, Write};
+use corez::io::{self, Read, Write};
 
 use crate::{
     encoding::{ReadBytesExt, WriteBytesExt},
@@ -241,11 +241,10 @@ impl TzeOut {
 pub mod testing {
     use proptest::collection::vec;
     use proptest::prelude::*;
+    use zcash_protocol::{consensus::BranchId, value::testing::arb_zatoshis};
 
     use crate::{
-        consensus::BranchId,
         extensions::transparent::{AuthData, Precondition, Witness},
-        transaction::components::amount::testing::arb_nonnegative_amount,
         transaction::testing::arb_txid,
     };
 
@@ -276,7 +275,7 @@ pub mod testing {
     }
 
     prop_compose! {
-        pub fn arb_tzeout()(value in arb_nonnegative_amount(), precondition in arb_precondition()) -> TzeOut {
+        pub fn arb_tzeout()(value in arb_zatoshis(), precondition in arb_precondition()) -> TzeOut {
             TzeOut { value: value.into(), precondition }
         }
     }

@@ -4,9 +4,14 @@ use std::{
 };
 
 use subtle::ConditionallySelectable;
+use transparent::address::TransparentAddress;
+#[cfg(feature = "transparent-inputs")]
+use transparent::keys::{
+    AccountPubKey, EphemeralIvk, IncomingViewingKey, NonHardenedChildIndex, TransparentKeyScope,
+};
 use zcash_address::ZcashAddress;
 #[cfg(feature = "transparent-inputs")]
-use zcash_client_backend::wallet::TransparentAddressMetadata;
+use zcash_client_backend::wallet::{Exposure, TransparentAddressMetadata};
 use zcash_client_backend::{
     address::UnifiedAddress,
     data_api::{Account as _, AccountBirthday, AccountPurpose, AccountSource},
@@ -17,11 +22,7 @@ use zcash_keys::{
     address::Receiver,
     keys::{AddressGenerationError, UnifiedIncomingViewingKey},
 };
-#[cfg(feature = "transparent-inputs")]
-use zcash_primitives::legacy::keys::{
-    AccountPubKey, EphemeralIvk, IncomingViewingKey, NonHardenedChildIndex, TransparentKeyScope,
-};
-use zcash_primitives::{legacy::TransparentAddress, transaction::TxId};
+use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::NetworkType;
 use zip32::DiversifierIndex;
 
@@ -149,10 +150,7 @@ impl Accounts {
                 Ok(Some(id))
             } else {
                 for (account_id, account) in self.accounts.iter() {
-                    if account
-                        .get_legacy_transparent_address()?
-                        .is_some_and(|(legacy_address, _)| legacy_address == *address)
-                    {
+                    if account.get_legacy_transparent_address()?.is_some() {
                         return Ok(Some(*account_id));
                     }
                 }
@@ -184,7 +182,7 @@ impl Accounts {
         address: &TransparentAddress,
         tx_id: TxId,
     ) -> Result<(), Error> {
-        for (_, account) in self.accounts.iter_mut() {
+        for account in self.accounts.values_mut() {
             account.mark_ephemeral_address_as_seen(address, tx_id)?
         }
         Ok(())
@@ -250,10 +248,10 @@ impl PartialEq for Account {
             && self.kind == other.kind
             && self
                 .viewing_key
-                .encode(&zcash_primitives::consensus::MainNetwork)
+                .encode(&zcash_protocol::consensus::MainNetwork)
                 == other
                     .viewing_key
-                    .encode(&zcash_primitives::consensus::MainNetwork)
+                    .encode(&zcash_protocol::consensus::MainNetwork)
             && self.birthday == other.birthday
             && self.addresses == other.addresses
             && self.ephemeral_addresses == other.ephemeral_addresses
@@ -291,17 +289,6 @@ impl Account {
 
     pub(crate) fn addresses(&self) -> &BTreeMap<DiversifierIndex, UnifiedAddress> {
         &self.addresses
-    }
-
-    /// Generates and stores a unified address at the given diversifier index.
-    pub(crate) fn address_at(
-        &mut self,
-        diversifier_index: DiversifierIndex,
-        request: UnifiedAddressRequest,
-    ) -> Result<UnifiedAddress, AddressGenerationError> {
-        let ua = self.uivk().address(diversifier_index, request)?;
-        self.addresses.insert(diversifier_index, ua.clone());
-        Ok(ua)
     }
 
     pub(crate) fn select_receiving_address(
@@ -396,9 +383,11 @@ impl Account {
             .map(|(idx, addr)| {
                 (
                     addr.address,
-                    TransparentAddressMetadata::new(
+                    TransparentAddressMetadata::derived(
                         TransparentKeyScope::EPHEMERAL,
                         NonHardenedChildIndex::from_index(*idx).unwrap(),
+                        Exposure::Unknown,
+                        None,
                     ),
                 )
             })
@@ -450,19 +439,19 @@ impl Account {
                             ephemeral_ivk
                                 .derive_ephemeral_address(address_index)
                                 .map(|addr| {
-                                    self.ephemeral_addresses.insert(
-                                        raw_index,
-                                        EphemeralAddress {
+                                    self.ephemeral_addresses
+                                        .insert(raw_index, EphemeralAddress {
                                             address: addr,
                                             seen: None,
                                             used: None,
-                                        },
-                                    );
+                                        });
                                     (
                                         addr,
-                                        TransparentAddressMetadata::new(
+                                        TransparentAddressMetadata::derived(
                                             TransparentKeyScope::EPHEMERAL,
                                             address_index,
+                                            Exposure::Unknown,
+                                            None,
                                         ),
                                     )
                                 })
@@ -532,6 +521,14 @@ impl zcash_client_backend::data_api::Account for Account {
         self.account_id
     }
 
+    fn name(&self) -> Option<&str> {
+        None
+    }
+
+    fn birthday_height(&self) -> zcash_protocol::consensus::BlockHeight {
+        self.birthday().height()
+    }
+
     fn source(&self) -> &AccountSource {
         &self.kind
     }
@@ -543,19 +540,15 @@ impl zcash_client_backend::data_api::Account for Account {
     fn uivk(&self) -> UnifiedIncomingViewingKey {
         self.viewing_key.to_unified_incoming_viewing_key()
     }
-
-    fn name(&self) -> Option<&str> {
-        Some(&self.account_name)
-    }
 }
 
 mod serialization {
-    use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::Zip32Derivation;
+    use zcash_client_backend::data_api::chain::ChainState;
     use zcash_keys::encoding::AddressCodec;
     use zcash_primitives::block::BlockHash;
-    use zcash_primitives::consensus::Network::MainNetwork as EncodingParams;
     use zcash_primitives::merkle_tree::{read_frontier_v1, write_frontier_v1};
+    use zcash_protocol::consensus::Network::MainNetwork as EncodingParams;
     use zip32::fingerprint::SeedFingerprint;
 
     use super::*;
@@ -721,27 +714,17 @@ mod serialization {
                     .into_iter()
                     .map(|address_record| {
                         let address = read_optional!(address_record, ephemeral_address)?;
-                        Ok((
-                            address_record.index,
-                            EphemeralAddress {
-                                address: TransparentAddress::decode(
-                                    &EncodingParams,
-                                    &address.address,
-                                )?,
-                                used: address
-                                    .used_in_tx
-                                    .map::<Result<_, Error>, _>(|s| {
-                                        Ok(TxId::from_bytes(s.try_into()?))
-                                    })
-                                    .transpose()?,
-                                seen: address
-                                    .seen_in_tx
-                                    .map::<Result<_, Error>, _>(|s| {
-                                        Ok(TxId::from_bytes(s.try_into()?))
-                                    })
-                                    .transpose()?,
-                            },
-                        ))
+                        Ok((address_record.index, EphemeralAddress {
+                            address: TransparentAddress::decode(&EncodingParams, &address.address)?,
+                            used: address
+                                .used_in_tx
+                                .map::<Result<_, Error>, _>(|s| Ok(TxId::from_bytes(s.try_into()?)))
+                                .transpose()?,
+                            seen: address
+                                .seen_in_tx
+                                .map::<Result<_, Error>, _>(|s| Ok(TxId::from_bytes(s.try_into()?)))
+                                .transpose()?,
+                        }))
                     })
                     .collect::<Result<_, Error>>()?,
                 #[cfg(not(feature = "transparent-inputs"))]
@@ -803,38 +786,9 @@ mod serialization {
     mod tests {
         use super::*;
         use crate::proto::memwallet as proto;
-        use zcash_client_backend::data_api::Zip32Derivation;
-        use zcash_keys::keys::UnifiedSpendingKey;
         use zcash_primitives::block::BlockHash;
-        use zip32::fingerprint::SeedFingerprint;
 
         const TEST_VK: &str = "uview1tg6rpjgju2s2j37gkgjq79qrh5lvzr6e0ed3n4sf4hu5qd35vmsh7avl80xa6mx7ryqce9hztwaqwrdthetpy4pc0kce25x453hwcmax02p80pg5savlg865sft9reat07c5vlactr6l2pxtlqtqunt2j9gmvr8spcuzf07af80h5qmut38h0gvcfa9k4rwujacwwca9vu8jev7wq6c725huv8qjmhss3hdj2vh8cfxhpqcm2qzc34msyrfxk5u6dqttt4vv2mr0aajreww5yufpk0gn4xkfm888467k7v6fmw7syqq6cceu078yw8xja502jxr0jgum43lhvpzmf7eu5dmnn6cr6f7p43yw8znzgxg598mllewnx076hljlvynhzwn5es94yrv65tdg3utuz2u3sras0wfcq4adxwdvlk387d22g3q98t5z74quw2fa4wed32escx8dwh4mw35t4jwf35xyfxnu83mk5s4kw2glkgsshmxk";
-
-        fn derived_account(seed: &[u8], account_index: zip32::AccountId) -> Account {
-            let usk = UnifiedSpendingKey::from_seed(&EncodingParams, seed, account_index).unwrap();
-            let account_index_u32 = u32::from(account_index);
-            let birthday = AccountBirthday::from_sapling_activation(
-                &EncodingParams,
-                BlockHash::from_slice(&[0; 32]),
-            );
-
-            Account::new(
-                format!("account {account_index_u32}"),
-                AccountId(account_index_u32 + 1),
-                AccountSource::Derived {
-                    derivation: Zip32Derivation::new(
-                        SeedFingerprint::from_seed(seed).unwrap(),
-                        account_index,
-                        #[cfg(feature = "zcashd-compat")]
-                        None,
-                    ),
-                    key_source: None,
-                },
-                usk.to_unified_full_viewing_key(),
-                birthday,
-            )
-            .unwrap()
-        }
 
         #[test]
         fn test_account_serialization_roundtrip() {
@@ -858,25 +812,6 @@ mod serialization {
             let proto_acc2: proto::Account = acc2.clone().into();
 
             assert_eq!(proto_acc, proto_acc2);
-        }
-
-        #[cfg(feature = "transparent-inputs")]
-        #[test]
-        fn find_account_for_transparent_address_matches_legacy_address() {
-            let first = derived_account(&[0; 32], zip32::AccountId::ZERO);
-            let second = derived_account(&[1; 32], zip32::AccountId::try_from(1).unwrap());
-            let second_legacy_address = second.get_legacy_transparent_address().unwrap().unwrap().0;
-
-            let mut accounts = Accounts::new();
-            accounts.accounts.insert(first.account_id(), first);
-            accounts.accounts.insert(second.account_id(), second);
-
-            assert_eq!(
-                accounts
-                    .find_account_for_transparent_address(&second_legacy_address)
-                    .unwrap(),
-                Some(AccountId(2))
-            );
         }
     }
 }

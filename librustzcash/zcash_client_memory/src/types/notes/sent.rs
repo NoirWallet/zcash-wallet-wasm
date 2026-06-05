@@ -5,7 +5,7 @@ use zcash_client_backend::{
     data_api::{SentTransaction, SentTransactionOutput},
     wallet::{NoteId, Recipient},
 };
-use zcash_protocol::{memo::Memo, value::Zatoshis, PoolType, ShieldedProtocol::Sapling, TxId};
+use zcash_protocol::{PoolType, ShieldedProtocol::Sapling, TxId, memo::Memo, value::Zatoshis};
 
 use crate::AccountId;
 
@@ -66,15 +66,12 @@ impl SentNoteTable {
                     txid: tx.tx().txid(),
                     output_index: output.output_index().try_into().unwrap(),
                 };
-                self.0.insert(
-                    note_id,
-                    SentNote {
-                        from_account_id: *tx.account_id(),
-                        to: output.recipient().clone(),
-                        value: output.value(),
-                        memo: Memo::Empty, // transparent notes don't have memos
-                    },
-                );
+                self.0.insert(note_id, SentNote {
+                    from_account_id: *tx.account_id(),
+                    to: output.recipient().clone(),
+                    value: output.value(),
+                    memo: Memo::Empty, // transparent notes don't have memos
+                });
             }
             PoolType::Shielded(protocol) => {
                 let note_id = NoteId::new(
@@ -82,15 +79,12 @@ impl SentNoteTable {
                     protocol,
                     output.output_index().try_into().unwrap(),
                 );
-                self.0.insert(
-                    note_id.into(),
-                    SentNote {
-                        from_account_id: *tx.account_id(),
-                        to: output.recipient().clone(),
-                        value: output.value(),
-                        memo: output.memo().map(|m| Memo::try_from(m).unwrap()).unwrap(),
-                    },
-                );
+                self.0.insert(note_id.into(), SentNote {
+                    from_account_id: *tx.account_id(),
+                    to: output.recipient().clone(),
+                    value: output.value(),
+                    memo: output.memo().map(|m| Memo::try_from(m).unwrap()).unwrap(),
+                });
             }
         }
     }
@@ -115,28 +109,22 @@ impl SentNoteTable {
                     txid,
                     output_index: output.output_index().try_into().unwrap(),
                 };
-                self.0.insert(
-                    note_id,
-                    SentNote {
-                        from_account_id,
-                        to: output.recipient().clone(),
-                        value: output.value(),
-                        memo: Memo::Empty, // transparent notes don't have memos
-                    },
-                );
+                self.0.insert(note_id, SentNote {
+                    from_account_id,
+                    to: output.recipient().clone(),
+                    value: output.value(),
+                    memo: Memo::Empty, // transparent notes don't have memos
+                });
             }
             PoolType::Shielded(protocol) => {
                 let note_id =
                     NoteId::new(txid, protocol, output.output_index().try_into().unwrap());
-                self.0.insert(
-                    note_id.into(),
-                    SentNote {
-                        from_account_id,
-                        to: output.recipient().clone(),
-                        value: output.value(),
-                        memo: output.memo().map(|m| Memo::try_from(m).unwrap()).unwrap(),
-                    },
-                );
+                self.0.insert(note_id.into(), SentNote {
+                    from_account_id,
+                    to: output.recipient().clone(),
+                    value: output.value(),
+                    memo: output.memo().map(|m| Memo::try_from(m).unwrap()).unwrap(),
+                });
             }
         }
     }
@@ -170,10 +158,8 @@ mod serialization {
 
     #[cfg(feature = "transparent-inputs")]
     use {
-        zcash_keys::encoding::AddressCodec as _,
-        zcash_primitives::{
-            consensus::Network::MainNetwork as EncodingParams, legacy::TransparentAddress,
-        },
+        transparent::address::TransparentAddress, zcash_keys::encoding::AddressCodec as _,
+        zcash_protocol::consensus::Network::MainNetwork as EncodingParams,
     };
 
     impl From<SentNote> for proto::SentNote {
@@ -335,7 +321,7 @@ mod serialization {
                             proto::PoolType::ShieldedOrchard => PoolType::Shielded(Orchard),
                             #[cfg(not(feature = "orchard"))]
                             proto::PoolType::ShieldedOrchard => {
-                                return Err(Error::OrchardNotEnabled)
+                                return Err(Error::OrchardNotEnabled);
                             }
                         },
                     }

@@ -58,8 +58,6 @@
 #![cfg_attr(docsrs, doc(auto_cfg))]
 // Catch documentation errors caused by code changes.
 #![deny(rustdoc::broken_intra_doc_links)]
-// Temporary until we have addressed all Result<T, ()> cases.
-#![allow(clippy::result_unit_err)]
 
 pub mod data_api;
 mod decrypt;
@@ -79,7 +77,7 @@ pub mod serialization;
 #[cfg(feature = "tor")]
 pub mod tor;
 
-pub use decrypt::{decrypt_transaction, DecryptedOutput, TransferType};
+pub use decrypt::{DecryptedOutput, TransferType, decrypt_transaction};
 
 #[deprecated(note = "This module is deprecated; use `::zcash_keys::address` instead.")]
 pub mod address {

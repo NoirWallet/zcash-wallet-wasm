@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 use crate::Network;
 use crate::error::Error;
 use secrecy::Zeroize;
-use zcash_primitives::zip32::AccountId;
+use zip32::AccountId;
 
 #[wasm_bindgen]
 pub struct SeedFingerprint {
@@ -154,7 +154,7 @@ impl UnifiedSpendingKey {
     // /// # Returns
     // /// String in WIF format
     // pub fn encode_transparent_secret_key(&self, network: &str) -> Result<String, Error> {
-    //     use zcash_primitives::legacy::keys::NonHardenedChildIndex;
+    //     use transparent::keys::NonHardenedChildIndex;
 
     //     let network = Network::from_str(network)?;
     //     let account_priv_key = self.inner.transparent();

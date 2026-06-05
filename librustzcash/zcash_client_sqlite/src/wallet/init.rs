@@ -19,7 +19,7 @@ use zcash_protocol::{consensus, value::BalanceError};
 use self::migrations::verify_network_compatibility;
 
 use super::commitment_tree;
-use crate::{error::SqliteClientError, util::Clock, WalletDb};
+use crate::{WalletDb, error::SqliteClientError, util::Clock};
 
 pub mod migrations;
 
@@ -28,6 +28,7 @@ const MIN_SQLITE_MINOR_VERSION: u32 = 35;
 
 const MIGRATIONS_TABLE: &str = "schemer_migrations";
 
+/// Errors that can occur when applying migrations to the wallet database.
 #[derive(Debug)]
 pub enum WalletMigrationError {
     /// A feature required by the wallet database is not supported by the version of
@@ -246,8 +247,13 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
             unreachable!("we don't service transaction data requests in migrations")
         }
         #[cfg(feature = "transparent-key-import")]
-        SqliteClientError::PubkeyImportConflict(_) => {
-            unreachable!("we do not import pubkeys in migrations")
+        SqliteClientError::StandaloneImportConflict(_) => {
+            unreachable!("we do not import standalone transparent addresses in migrations")
+        }
+        #[cfg(feature = "orchard")]
+        SqliteClientError::HistoricalFrontierInvalid(_)
+        | SqliteClientError::HistoricalWitnessUnavailable { .. } => {
+            unreachable!("we do not generate historical witnesses in migrations")
         }
     }
 }
@@ -641,7 +647,7 @@ fn init_wallet_db_internal<
                 SeedRelevance::NoAccounts => (),
                 // No seed is relevant to a wallet that only has imported accounts.
                 SeedRelevance::NotRelevant | SeedRelevance::NoDerivedAccounts => {
-                    return Err(WalletMigrationError::SeedNotRelevant.into())
+                    return Err(WalletMigrationError::SeedNotRelevant.into());
                 }
             }
         }
@@ -692,7 +698,7 @@ pub(crate) mod testing {
     use uuid::Uuid;
     use zcash_protocol::consensus;
 
-    use crate::{util::Clock, WalletDb};
+    use crate::{WalletDb, util::Clock};
 
     use super::WalletMigrationError;
 
@@ -711,7 +717,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use rand::RngCore;
-    use rusqlite::{self, named_params, Connection, ToSql};
+    use rusqlite::{self, Connection, ToSql, named_params};
     use secrecy::Secret;
 
     use tempfile::NamedTempFile;
@@ -722,8 +728,8 @@ mod tests {
         address::Address,
         encoding::{encode_extended_full_viewing_key, encode_payment_address},
         keys::{
-            sapling, ReceiverRequirement::*, UnifiedAddressRequest, UnifiedFullViewingKey,
-            UnifiedSpendingKey,
+            ReceiverRequirement::*, UnifiedAddressRequest, UnifiedFullViewingKey,
+            UnifiedSpendingKey, sapling,
         },
     };
     use zcash_primitives::transaction::{TransactionData, TxVersion};
@@ -732,16 +738,16 @@ mod tests {
 
     use super::testing::init_wallet_db;
     use crate::{
-        testing::db::{test_clock, test_rng, TestDbFactory},
+        UA_TRANSPARENT, WalletDb,
+        testing::db::{TestDbFactory, test_clock, test_rng},
         util::Clock,
         wallet::db,
-        WalletDb, UA_TRANSPARENT,
     };
 
     #[cfg(feature = "transparent-inputs")]
     use {
         super::WalletMigrationError,
-        crate::wallet::{self, pool_code, PoolType},
+        crate::wallet::{self, PoolType, pool_code},
         zcash_address::test_vectors,
         zcash_client_backend::data_api::WalletWrite,
         zip32::DiversifierIndex,
@@ -770,6 +776,16 @@ mod tests {
 
         use regex::Regex;
         let re = Regex::new(r"\s+").unwrap();
+        let re_paren = Regex::new(r"([\(\)])").unwrap();
+
+        // Surround each opening or closing parenthesis character with whitespace, and then
+        // replace each occurrence of any amount of whitespace (including newlines) with a single
+        // space.
+        let normalize = |s: &str| -> String {
+            re.replace_all(&re_paren.replace_all(s, " $1 "), " ")
+                .trim()
+                .to_string()
+        };
 
         let expected_tables = vec![
             db::TABLE_ACCOUNTS,
@@ -804,13 +820,14 @@ mod tests {
         let rows = describe_tables(&st.wallet().db().conn).unwrap();
         assert_eq!(rows.len(), expected_tables.len());
         for (actual, expected) in rows.iter().zip(expected_tables.iter()) {
-            assert_eq!(
-                re.replace_all(actual, " "),
-                re.replace_all(expected, " ").trim(),
-            );
+            assert_eq!(normalize(actual), normalize(expected));
         }
 
         let expected_indices = vec![
+            db::INDEX_ACCOUNTS_ORCHARD_IVK,
+            db::INDEX_ACCOUNTS_P2PKH_IVK,
+            db::INDEX_ACCOUNTS_P2SH_IVK,
+            db::INDEX_ACCOUNTS_SAPLING_IVK,
             db::INDEX_ACCOUNTS_UFVK,
             db::INDEX_ACCOUNTS_UIVK,
             db::INDEX_ACCOUNTS_UUID,
@@ -820,14 +837,29 @@ mod tests {
             db::INDEX_ADDRESSES_PUBKEYS,
             db::INDEX_ADDRESSES_T_INDICES,
             db::INDEX_NF_MAP_LOCATOR_IDX,
+            db::INDEX_ORCHARD_RNS_NOTE,
+            db::INDEX_ORCHARD_RNS_TX,
             db::INDEX_ORCHARD_RECEIVED_NOTES_ACCOUNT,
+            db::INDEX_ORCHARD_RECEIVED_NOTES_ADDRESS,
             db::INDEX_ORCHARD_RECEIVED_NOTES_TX,
+            db::INDEX_ORCHARD_RECEIVED_NOTES_WITNESS_STABILIZED,
+            db::INDEX_SAPLING_RNS_NOTE,
+            db::INDEX_SAPLING_RNS_TX,
             db::INDEX_SAPLING_RECEIVED_NOTES_ACCOUNT,
+            db::INDEX_SAPLING_RECEIVED_NOTES_ADDRESS,
             db::INDEX_SAPLING_RECEIVED_NOTES_TX,
+            db::INDEX_SAPLING_RECEIVED_NOTES_WITNESS_STABILIZED,
             db::INDEX_SENT_NOTES_FROM_ACCOUNT,
             db::INDEX_SENT_NOTES_TO_ACCOUNT,
             db::INDEX_SENT_NOTES_TX,
-            db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_ACCOUNT_ID,
+            db::INDEX_TRANSPARENT_ROS_OUTPUT,
+            db::INDEX_TRANSPARENT_ROS_TX,
+            db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_ACCOUNT,
+            db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_ADDRESS,
+            db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_TX,
+            db::INDEX_TRANSPARENT_SPEND_MAP_TX,
+            db::INDEX_TRANSPARENT_SPEND_SEARCH_TX,
+            db::INDEX_TX_RETIREVAL_QUEUE_DEPENDENT_TX,
         ];
         let mut indices_query = st
             .wallet()
@@ -838,10 +870,10 @@ mod tests {
         let mut rows = indices_query.query([]).unwrap();
         let mut expected_idx = 0;
         while let Some(row) = rows.next().unwrap() {
-            let sql: String = row.get(0).unwrap();
+            let actual: String = row.get(0).unwrap();
             assert_eq!(
-                re.replace_all(&sql, " "),
-                re.replace_all(expected_indices[expected_idx], " ").trim(),
+                normalize(&actual),
+                normalize(expected_indices[expected_idx])
             );
             expected_idx += 1;
         }
@@ -870,11 +902,8 @@ mod tests {
         let mut rows = views_query.query([]).unwrap();
         let mut expected_idx = 0;
         while let Some(row) = rows.next().unwrap() {
-            let sql: String = row.get(0).unwrap();
-            assert_eq!(
-                re.replace_all(&sql, " "),
-                re.replace_all(&expected_views[expected_idx], " ").trim(),
-            );
+            let actual: String = row.get(0).unwrap();
+            assert_eq!(normalize(&actual), normalize(&expected_views[expected_idx]));
             expected_idx += 1;
         }
     }
@@ -1147,7 +1176,8 @@ mod tests {
 
             // add a sapling sent note
             wdb.conn.execute(
-                "INSERT INTO blocks (height, hash, time, sapling_tree) VALUES (0, 0, 0, x'000000')",
+                "INSERT INTO blocks (height, hash, time, sapling_tree) \
+                 VALUES (0, x'0000000000000000000000000000000000000000000000000000000000000000', 0, x'000000')",
                 [],
             )?;
 
@@ -1345,7 +1375,8 @@ mod tests {
                 )
                 .encode(&wdb.params);
                 wdb.conn.execute(
-                    "INSERT INTO blocks (height, hash, time, sapling_tree) VALUES (0, 0, 0, x'000000')",
+                    "INSERT INTO blocks (height, hash, time, sapling_tree) \
+                 VALUES (0, x'0000000000000000000000000000000000000000000000000000000000000000', 0, x'000000')",
                     [],
                 )?;
                 wdb.conn.execute(
