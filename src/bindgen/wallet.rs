@@ -12,7 +12,7 @@ use zcash_address::ZcashAddress;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::proto::service::ChainSpec;
 use zcash_client_backend::{
-    data_api::{InputSource, WalletRead},
+    data_api::{InputSource, WalletRead, WalletWrite},
     proto::service::compact_tx_streamer_client::CompactTxStreamerClient,
 };
 use zcash_client_memory::MemoryWalletDb;
@@ -418,6 +418,57 @@ impl WebWallet {
             &full_address,
             &self.inner.network,
             address_index,
+        );
+
+        Ok(serde_wasm_bindgen::to_value(&result)?)
+    }
+
+    /// Generate and persist the next shielded receiving address for an account.
+    ///
+    /// This returns a unified address containing the account's available shielded receivers
+    /// (Orchard/Sapling) and no transparent receiver. It advances the wallet's stored address
+    /// position, so callers should persist the wallet DB after using this method.
+    ///
+    /// # Arguments
+    ///
+    /// * `account_id` - The account ID to generate the next shielded address for
+    ///
+    /// # Returns
+    ///
+    /// Returns a UnifiedAddresses object. `transparent` and `address_index` will be null.
+    pub async fn get_next_shielded_address(&self, account_id: u32) -> Result<JsValue, Error> {
+        use zcash_client_backend::data_api::Account;
+        use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest};
+
+        let account_ref = AccountId::from(account_id);
+        let mut db = self.inner.db.write().await;
+        let account = db
+            .get_account(account_ref)?
+            .ok_or(Error::AccountNotFound(account_id))?;
+        let uivk = account.uivk();
+
+        let request = UnifiedAddressRequest::custom(
+            if uivk.has_orchard() {
+                ReceiverRequirement::Require
+            } else {
+                ReceiverRequirement::Omit
+            },
+            if uivk.has_sapling() {
+                ReceiverRequirement::Require
+            } else {
+                ReceiverRequirement::Omit
+            },
+            ReceiverRequirement::Omit,
+        )
+        .map_err(|_| Error::Generic("Account has no shielded receivers".into()))?;
+
+        let (address, _) = db
+            .get_next_available_address(account_ref, request)?
+            .ok_or_else(|| Error::Generic("Account cannot generate new addresses".into()))?;
+        let result = crate::bindgen::mnemonic::unified_addresses_from_full(
+            &address,
+            &self.inner.network,
+            None,
         );
 
         Ok(serde_wasm_bindgen::to_value(&result)?)
