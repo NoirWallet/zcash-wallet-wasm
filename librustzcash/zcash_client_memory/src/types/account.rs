@@ -150,7 +150,10 @@ impl Accounts {
                 Ok(Some(id))
             } else {
                 for (account_id, account) in self.accounts.iter() {
-                    if account.get_legacy_transparent_address()?.is_some() {
+                    if account
+                        .get_legacy_transparent_address()?
+                        .is_some_and(|(legacy_address, _)| legacy_address == *address)
+                    {
                         return Ok(Some(*account_id));
                     }
                 }
@@ -289,6 +292,17 @@ impl Account {
 
     pub(crate) fn addresses(&self) -> &BTreeMap<DiversifierIndex, UnifiedAddress> {
         &self.addresses
+    }
+
+    /// Generates and stores a unified address at the given diversifier index.
+    pub(crate) fn address_at(
+        &mut self,
+        diversifier_index: DiversifierIndex,
+        request: UnifiedAddressRequest,
+    ) -> Result<UnifiedAddress, AddressGenerationError> {
+        let ua = self.uivk().address(diversifier_index, request)?;
+        self.addresses.insert(diversifier_index, ua.clone());
+        Ok(ua)
     }
 
     pub(crate) fn select_receiving_address(
@@ -522,7 +536,7 @@ impl zcash_client_backend::data_api::Account for Account {
     }
 
     fn name(&self) -> Option<&str> {
-        None
+        Some(&self.account_name)
     }
 
     fn birthday_height(&self) -> zcash_protocol::consensus::BlockHeight {

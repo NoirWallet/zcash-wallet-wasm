@@ -1244,11 +1244,15 @@ Instead derive the ufvk in the calling code and import it using `import_account_
 
     fn get_address_for_index(
         &mut self,
-        _account: Self::AccountId,
-        _diversifier_index: DiversifierIndex,
-        _request: UnifiedAddressRequest,
+        account: Self::AccountId,
+        diversifier_index: DiversifierIndex,
+        request: UnifiedAddressRequest,
     ) -> Result<Option<UnifiedAddress>, Self::Error> {
-        todo!()
+        if let Some(account) = self.accounts.get_mut(account) {
+            Ok(Some(account.address_at(diversifier_index, request)?))
+        } else {
+            Ok(None)
+        }
     }
 
     #[cfg(feature = "transparent-inputs")]

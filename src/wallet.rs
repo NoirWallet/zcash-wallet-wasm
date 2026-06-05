@@ -128,17 +128,21 @@ where
     pub async fn db_to_bytes(&self) -> Result<Vec<u8>, Error> {
         let mut memory_wallet_bytes = Vec::new();
         let db = self.db.read().await;
+        let encoded_len = db.encoded_len()?;
+        memory_wallet_bytes
+            .try_reserve_exact(encoded_len)
+            .map_err(|e| {
+                Error::Generic(format!(
+                    "Failed to allocate {encoded_len} bytes for wallet database serialization: {e}"
+                ))
+            })?;
         db.encode(&mut memory_wallet_bytes)?;
         Ok(memory_wallet_bytes)
     }
 
-    pub async fn db_to_bytes_chunked<F: FnMut(&[u8])>(&self, mut flush_fn: F) -> Result<(), Error> {
-        const CHUNK_FLUSH_SIZE: usize = 4 * 1024 * 1024;
-
-        let bytes = self.db_to_bytes().await?;
-        for chunk in bytes.chunks(CHUNK_FLUSH_SIZE) {
-            flush_fn(chunk);
-        }
+    pub async fn db_to_bytes_chunked<F: FnMut(&[u8])>(&self, flush_fn: F) -> Result<(), Error> {
+        let db = self.db.read().await;
+        db.encode_chunked(flush_fn)?;
         Ok(())
     }
 }

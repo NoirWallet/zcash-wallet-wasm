@@ -142,10 +142,18 @@ impl TransparentSpendCache {
         Self(BTreeSet::new())
     }
 
-    /// Get all the outpoints for a given transaction ID.
-    #[cfg(feature = "transparent-inputs")]
-    pub fn contains(&self, txid: &TxId, outpoint: &OutPoint) -> bool {
-        self.0.contains(&(*txid, outpoint.clone()))
+    pub fn insert(&mut self, txid: TxId, outpoint: OutPoint) {
+        self.0.insert((txid, outpoint));
+    }
+
+    pub fn spending_txid_for_outpoint(&self, outpoint: &OutPoint) -> Option<TxId> {
+        self.0
+            .iter()
+            .find_map(|(txid, prevout)| (prevout == outpoint).then_some(*txid))
+    }
+
+    pub fn remove(&mut self, txid: &TxId, outpoint: &OutPoint) -> bool {
+        self.0.remove(&(*txid, outpoint.clone()))
     }
 }
 

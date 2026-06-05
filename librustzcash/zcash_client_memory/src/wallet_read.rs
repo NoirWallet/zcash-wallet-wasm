@@ -7,8 +7,8 @@ use nonempty::NonEmpty;
 use secrecy::{ExposeSecret, SecretVec};
 use shardtree::store::ShardStore as _;
 use zcash_client_backend::data_api::{
-    AddressInfo, BlockMetadata, NullifierQuery, ReceivedTransactionOutput, WalletRead,
-    WalletSummary, Zip32Derivation, defaults,
+    AddressInfo, AddressSource, BlockMetadata, NullifierQuery, ReceivedTransactionOutput,
+    WalletRead, WalletSummary, Zip32Derivation, defaults,
     error::FindAccountForAddressError,
     scanning::ScanRange,
     wallet::{ConfirmationsPolicy, TargetHeight},
@@ -230,9 +230,13 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                     continue; // note is in an unscanned range. Skip it
                 }
             }
-            // don't count notes in unmined transactions or that have expired
-            if let Ok(Some(note_tx)) = self.get_transaction(note.txid) {
-                if note_tx.expiry_height() < BlockHeight::from(target_height) {
+            // Don't count notes in unmined transactions that have expired.
+            if let Some(note_tx) = self.tx_table.get_transaction(&note.txid) {
+                if note_tx.mined_height().is_none()
+                    && note_tx
+                        .expiry_height()
+                        .is_some_and(|expiry_height| expiry_height < BlockHeight::from(target_height))
+                {
                     continue;
                 }
             }
@@ -651,12 +655,7 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .get_account(account_id)?
             .ok_or(Error::AccountUnknown(account_id))?;
 
-        if _include_change {
-            unimplemented!("include_change is not yet supported");
-        }
-        if _include_standalone {
-            unimplemented!("include_standalone is not yet supported");
-        }
+        // This memory backend currently only tracks external derived transparent receivers.
 
         let t_addresses = account
             .addresses()
@@ -731,8 +730,27 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .collect())
     }
 
-    fn list_addresses(&self, _account: Self::AccountId) -> Result<Vec<AddressInfo>, Self::Error> {
-        todo!()
+    fn list_addresses(&self, account: Self::AccountId) -> Result<Vec<AddressInfo>, Self::Error> {
+        let account = self
+            .accounts
+            .get(account)
+            .ok_or(Error::AccountUnknown(account))?;
+
+        account
+            .addresses()
+            .iter()
+            .map(|(diversifier_index, ua)| {
+                AddressInfo::from_parts(
+                    ua.clone().into(),
+                    AddressSource::Derived {
+                        diversifier_index: *diversifier_index,
+                        #[cfg(feature = "transparent-inputs")]
+                        transparent_key_scope: None,
+                    },
+                )
+                .ok_or_else(|| Error::CorruptedData("invalid address metadata".to_owned()))
+            })
+            .collect()
     }
 
     fn find_account_for_address<Q: consensus::Parameters>(
@@ -745,15 +763,50 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
 
     fn get_last_generated_address_matching(
         &self,
-        _account: Self::AccountId,
-        _address_filter: UnifiedAddressRequest,
+        account: Self::AccountId,
+        address_filter: UnifiedAddressRequest,
     ) -> Result<Option<UnifiedAddress>, Self::Error> {
-        todo!()
+        use zcash_keys::keys::ReceiverRequirement;
+
+        let account = self
+            .accounts
+            .get(account)
+            .ok_or(Error::AccountUnknown(account))?;
+
+        let requirements = account
+            .uivk()
+            .receiver_requirements(address_filter)
+            .map_err(Error::AddressGeneration)?;
+
+        Ok(account.addresses().iter().rev().find_map(|(_, ua)| {
+            let matches_orchard = match requirements.orchard() {
+                ReceiverRequirement::Require => ua.has_orchard(),
+                ReceiverRequirement::Allow => true,
+                ReceiverRequirement::Omit => !ua.has_orchard(),
+            };
+            let matches_sapling = match requirements.sapling() {
+                ReceiverRequirement::Require => ua.has_sapling(),
+                ReceiverRequirement::Allow => true,
+                ReceiverRequirement::Omit => !ua.has_sapling(),
+            };
+            let matches_p2pkh = match requirements.p2pkh() {
+                ReceiverRequirement::Require => {
+                    matches!(ua.transparent(), Some(TransparentAddress::PublicKeyHash(_)))
+                }
+                ReceiverRequirement::Allow => true,
+                ReceiverRequirement::Omit => ua.transparent().is_none(),
+            };
+
+            (matches_orchard && matches_sapling && matches_p2pkh).then_some(ua.clone())
+        }))
     }
 
     #[cfg(feature = "transparent-inputs")]
-    fn utxo_query_height(&self, _account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
-        todo!()
+    fn utxo_query_height(&self, account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
+        // This memory backend does not track transparent address usage history, so the
+        // conservative lower bound is the account birthday. This avoids missing UTXOs for
+        // accounts imported after the wallet has already scanned later blocks.
+        self.get_account_birthday(account)
     }
 
     fn get_received_outputs(

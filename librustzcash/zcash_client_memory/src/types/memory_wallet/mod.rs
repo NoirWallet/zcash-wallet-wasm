@@ -921,12 +921,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
-            let max_tree_size = Some(min_idx << SAPLING_SHARD_HEIGHT);
-            let min_tree_size = Some((max_idx + 1) << SAPLING_SHARD_HEIGHT);
+            let min_tree_size = Some(min_idx << SAPLING_SHARD_HEIGHT);
+            let max_tree_size = Some((max_idx + 1) << SAPLING_SHARD_HEIGHT);
 
-            Ok(start_size.or(min_tree_size).zip(max_tree_size).map(
+            Ok(start_size.or(min_tree_size).zip(max_tree_size).and_then(
                 |(min_tree_size, max_tree_size)| {
-                    Ratio::new(scanned_count, max_tree_size - min_tree_size)
+                    max_tree_size
+                        .checked_sub(min_tree_size)
+                        .map(|tree_size| Ratio::new(scanned_count, tree_size))
                 },
             ))
         }
@@ -956,7 +958,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 .values()
                 .filter_map(|account| {
                     if account.birthday().height() == *birthday_height {
-                        Some(account.birthday().sapling_frontier().tree_size())
+                        Some(account.birthday().orchard_frontier().tree_size())
                     } else {
                         None
                     }
@@ -999,12 +1001,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
-            let max_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
-            let min_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
+            let min_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
+            let max_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
 
-            Ok(start_size.or(min_tree_size).zip(max_tree_size).map(
+            Ok(start_size.or(min_tree_size).zip(max_tree_size).and_then(
                 |(min_tree_size, max_tree_size)| {
-                    Ratio::new(scanned_count, max_tree_size - min_tree_size)
+                    max_tree_size
+                        .checked_sub(min_tree_size)
+                        .map(|tree_size| Ratio::new(scanned_count, tree_size))
                 },
             ))
         }
@@ -1025,12 +1029,18 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     ) -> Result<bool, Error> {
         // TODO: Remove it from the search queue
 
-        self.transparent_received_output_spends
-            .insert(outpoint.clone(), *spent_in_tx);
+        let known_output = self.transparent_received_outputs.contains_key(outpoint);
 
-        // TODO: Check if this is an update and therefore we need to add something to transparent_spend_map
+        if known_output {
+            self.transparent_received_output_spends
+                .insert(outpoint.clone(), *spent_in_tx);
+            self.transparent_spend_map.remove(spent_in_tx, outpoint);
+        } else {
+            self.transparent_spend_map
+                .insert(*spent_in_tx, outpoint.clone());
+        }
 
-        Ok(false)
+        Ok(known_output)
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -1110,11 +1120,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
         // look in transparent_spend_map for a record of the output already having been spent, then mark it as spent using the
         // stored reference to the spending transaction.
-        if self
+        if let Some(spending_txid) = self
             .transparent_spend_map
-            .contains(&txid, output.outpoint())
+            .spending_txid_for_outpoint(output.outpoint())
         {
-            self.mark_transparent_output_spent(&txid, output.outpoint())?;
+            self.transparent_received_output_spends
+                .insert(output.outpoint().clone(), spending_txid);
+            self.transparent_spend_map
+                .remove(&spending_txid, output.outpoint());
         }
 
         Ok(output.outpoint().clone())
