@@ -706,11 +706,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_7413: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_7435: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3022: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_7404: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_2957: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_7392: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_7406: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3000: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_7381: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_2935: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
