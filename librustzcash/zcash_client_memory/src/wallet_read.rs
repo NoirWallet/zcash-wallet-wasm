@@ -655,9 +655,7 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .get_account(account_id)?
             .ok_or(Error::AccountUnknown(account_id))?;
 
-        // This memory backend currently only tracks external derived transparent receivers.
-
-        let t_addresses = account
+        let mut t_addresses: HashMap<TransparentAddress, TransparentAddressMetadata> = account
             .addresses()
             .iter()
             .filter_map(|(diversifier_index, ua)| {
@@ -676,6 +674,20 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 })
             })
             .collect();
+
+        if _include_standalone {
+            if let Some((legacy_address, address_index)) = account.get_legacy_transparent_address()?
+            {
+                t_addresses.entry(legacy_address).or_insert_with(|| {
+                    TransparentAddressMetadata::derived(
+                        Scope::External.into(),
+                        address_index,
+                        Exposure::Unknown,
+                        None,
+                    )
+                });
+            }
+        }
         Ok(t_addresses)
     }
 

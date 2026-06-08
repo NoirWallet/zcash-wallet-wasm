@@ -34,25 +34,26 @@ use zcash_client_backend::data_api::{
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, SplitPolicy, StandardFeeRule};
 use zcash_client_backend::sync::{run, run_next_batch};
-use zcash_client_backend::wallet::OvkPolicy;
+use zcash_client_backend::wallet::{OvkPolicy, WalletTransparentOutput};
 use zcash_client_backend::zip321::{Payment, TransactionRequest};
 use zcash_client_backend::{
     data_api::{InputSource, WalletCommitmentTrees, WalletRead, WalletWrite},
     proto::service::{self, compact_tx_streamer_client::CompactTxStreamerClient},
 };
-use zcash_primitives::transaction::TxId;
 use zcash_primitives::transaction::fees::FeeRule;
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_proofs::prover::LocalTxProver;
 
+use transparent::bundle::OutPoint;
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::ShieldedProtocol;
+use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
 
 use zcash_client_backend::data_api::chain::BlockCache;
 use zcash_client_memory::{MemBlockCache, MemoryWalletDb};
-use zcash_protocol::consensus::Parameters;
 
 const BATCH_SIZE: u32 = 10000;
 
@@ -795,6 +796,108 @@ where
             .map_err(|e: zcash_client_backend::sync::Error<(), _, ()>| {
                 Error::Generic(format!("Failed to refresh UTXOs: {e:?}"))
             })?;
+
+            self.refresh_transparent_transaction_history_for_account(
+                client,
+                db,
+                account_id,
+                start_height,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn refresh_transparent_transaction_history_for_account(
+        &self,
+        client: &mut CompactTxStreamerClient<T>,
+        db: &mut W,
+        account_id: AccountId,
+        start_height: BlockHeight,
+    ) -> Result<(), Error> {
+        let end_height = match db
+            .chain_height()
+            .map_err(|e| Error::Generic(format!("Failed to get chain height: {e}")))?
+        {
+            Some(height) => height,
+            None => return Ok(()),
+        };
+
+        if start_height > end_height {
+            return Ok(());
+        }
+
+        let receivers = db
+            .get_transparent_receivers(account_id, true, true)
+            .map_err(|e| Error::Generic(format!("Failed to get transparent receivers: {e}")))?;
+
+        if receivers.is_empty() {
+            return Ok(());
+        }
+
+        for address in receivers.keys() {
+            let address_string = address
+                .to_zcash_address(self.network.network_type())
+                .encode();
+            let mut start = service::BlockId::default();
+            start.height = start_height.into();
+            let mut end = service::BlockId::default();
+            end.height = end_height.into();
+
+            let raw_txs: Vec<service::RawTransaction> = client
+                .get_taddress_txids(service::TransparentAddressBlockFilter {
+                    address: address_string.clone(),
+                    range: Some(service::BlockRange {
+                        start: Some(start),
+                        end: Some(end),
+                        pool_types: vec![],
+                    }),
+                })
+                .await
+                .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+                .into_inner()
+                .try_collect()
+                .await
+                .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+
+            for raw_tx in raw_txs {
+                let mined_height = match raw_tx.height {
+                    0 | u64::MAX => continue,
+                    height => BlockHeight::try_from(height).map_err(|_| {
+                        Error::Generic("Invalid transparent transaction height".into())
+                    })?,
+                };
+
+                let tx = Transaction::read(
+                    raw_tx.data.as_slice(),
+                    BranchId::for_height(&self.network, mined_height),
+                )
+                .map_err(|e| {
+                    Error::Generic(format!("Failed to parse transparent transaction: {e}"))
+                })?;
+
+                if let Some(transparent_bundle) = tx.transparent_bundle() {
+                    for (output_index, txout) in transparent_bundle.vout.iter().enumerate() {
+                        let outpoint = OutPoint::new(
+                            *tx.txid().as_ref(),
+                            output_index.try_into().map_err(|_| {
+                                Error::Generic("Transparent output index overflow".into())
+                            })?,
+                        );
+
+                        if let Some(output) = WalletTransparentOutput::from_parts(
+                            outpoint,
+                            txout.clone(),
+                            Some(mined_height),
+                        ) {
+                            if output.recipient_address() == address {
+                                db.put_received_transparent_utxo(&output)?;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())

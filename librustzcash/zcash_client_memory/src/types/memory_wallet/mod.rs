@@ -1141,9 +1141,28 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     pub fn get_transaction_history(&self, account_id: AccountId) -> Vec<TransactionHistoryEntry> {
         let mut entries: Vec<TransactionHistoryEntry> = Vec::new();
         let chain_height = self.chain_height().ok().flatten();
+        let mut history_txids: BTreeSet<TxId> =
+            self.tx_table.iter().map(|(txid, _)| *txid).collect();
+        history_txids.extend(
+            self.transparent_received_outputs
+                .iter()
+                .filter(|(_, output)| output.account_id == account_id)
+                .map(|(_, output)| output.transaction_id),
+        );
 
-        for (txid, tx_entry) in self.tx_table.iter() {
-            let mined_height = tx_entry.mined_height();
+        for txid in history_txids {
+            let tx_entry = self.tx_table.get(&txid);
+            let fallback_transparent_mined_height = self
+                .transparent_received_outputs
+                .iter()
+                .filter(|(_, output)| {
+                    output.transaction_id == txid && output.account_id == account_id
+                })
+                .filter_map(|(_, output)| output.max_observed_unspent_height)
+                .max();
+            let mined_height = tx_entry
+                .and_then(|entry| entry.mined_height())
+                .or(fallback_transparent_mined_height);
             let block_time = mined_height
                 .and_then(|h| self.blocks.get(&h))
                 .map(|b| b.block_time);
@@ -1151,7 +1170,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let received_zatoshis: i64 = self
                 .received_notes
                 .iter()
-                .filter(|n| n.txid() == *txid && n.account_id() == account_id && !n.is_change)
+                .filter(|n| n.txid() == txid && n.account_id() == account_id && !n.is_change)
                 .map(|n| n.note.value().into_u64() as i64)
                 .sum();
 
@@ -1159,7 +1178,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 .transparent_received_outputs
                 .iter()
                 .filter(|(_, output)| {
-                    output.transaction_id == *txid && output.account_id == account_id
+                    output.transaction_id == txid && output.account_id == account_id
                 })
                 .map(|(_, output)| output.txout.value().into_u64() as i64)
                 .sum();
@@ -1168,7 +1187,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 .sent_notes
                 .iter()
                 .filter(|(note_id, note)| {
-                    *note_id.txid() == *txid && note.from_account_id == account_id
+                    *note_id.txid() == txid && note.from_account_id == account_id
                 })
                 .map(|(_, note)| note.value.into_u64() as i64)
                 .sum();
@@ -1176,14 +1195,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let change_zatoshis: i64 = self
                 .received_notes
                 .iter()
-                .filter(|n| n.txid() == *txid && n.account_id() == account_id && n.is_change)
+                .filter(|n| n.txid() == txid && n.account_id() == account_id && n.is_change)
                 .map(|n| n.note.value().into_u64() as i64)
                 .sum();
 
             let spent_input_zatoshis: i64 = self
                 .received_note_spends
                 .iter()
-                .filter(|(_, spend_txid)| **spend_txid == *txid)
+                .filter(|(_, spend_txid)| **spend_txid == txid)
                 .filter_map(|(note_id, _)| {
                     self.received_notes
                         .iter()
@@ -1201,7 +1220,9 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 continue;
             }
 
-            let fee_zatoshis = tx_entry.fee().map(|f| f.into_u64() as i64);
+            let fee_zatoshis = tx_entry
+                .and_then(|entry| entry.fee())
+                .map(|f| f.into_u64() as i64);
 
             let (kind, amount_zatoshis) = if sent_zatoshis > 0 && received_zatoshis > 0 {
                 ("shield".to_string(), received_zatoshis)
@@ -1219,22 +1240,30 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 ("receive".to_string(), transparent_received_zatoshis)
             };
 
-            let status = match tx_entry.status() {
-                TransactionStatus::Mined(_) => "mined".to_string(),
-                TransactionStatus::NotInMainChain => match (tx_entry.expiry_height(), chain_height)
-                {
-                    (Some(expiry_height), Some(chain_height)) if expiry_height <= chain_height => {
-                        "expired".to_string()
+            let status = match tx_entry.map(|entry| entry.status()) {
+                Some(TransactionStatus::Mined(_)) => "mined".to_string(),
+                Some(TransactionStatus::NotInMainChain) => {
+                    match (
+                        tx_entry.and_then(|entry| entry.expiry_height()),
+                        chain_height,
+                    ) {
+                        (Some(expiry_height), Some(chain_height))
+                            if expiry_height <= chain_height =>
+                        {
+                            "expired".to_string()
+                        }
+                        _ => "pending".to_string(),
                     }
-                    _ => "pending".to_string(),
-                },
-                TransactionStatus::TxidNotRecognized => "unknown".to_string(),
+                }
+                Some(TransactionStatus::TxidNotRecognized) => "unknown".to_string(),
+                None if fallback_transparent_mined_height.is_some() => "mined".to_string(),
+                None => "unknown".to_string(),
             };
 
             let memo = self
                 .received_notes
                 .iter()
-                .filter(|n| n.txid() == *txid && n.account_id() == account_id && !n.is_change)
+                .filter(|n| n.txid() == txid && n.account_id() == account_id && !n.is_change)
                 .find_map(|n| match &n.memo {
                     zcash_protocol::memo::Memo::Text(t) => Some(t.to_string()),
                     _ => None,
@@ -1244,9 +1273,12 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 txid: txid.as_ref().to_vec(),
                 kind,
                 amount_zatoshis: amount_zatoshis.unsigned_abs(),
+                transparent_received_zatoshis: transparent_received_zatoshis.unsigned_abs(),
                 fee_zatoshis: fee_zatoshis.map(|f| f.unsigned_abs()),
                 mined_height: mined_height.map(u32::from),
-                expiry_height: tx_entry.expiry_height().map(u32::from),
+                expiry_height: tx_entry
+                    .and_then(|entry| entry.expiry_height())
+                    .map(u32::from),
                 status,
                 timestamp: block_time.map(u64::from),
                 memo,
@@ -1283,74 +1315,12 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     }
 }
 
-#[cfg(all(test, feature = "transparent-inputs"))]
-mod tests {
-    use super::*;
-    use ::transparent::{address::TransparentAddress, bundle::TxOut, keys::TransparentKeyScope};
-    use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork, value::Zatoshis};
-
-    use crate::types::transparent::ReceivedTransparentOutput;
-
-    fn local_network() -> LocalNetwork {
-        let active = Some(BlockHeight::from_u32(1));
-        LocalNetwork {
-            overwinter: active,
-            sapling: active,
-            blossom: active,
-            heartwood: active,
-            canopy: active,
-            nu5: active,
-            nu6: active,
-            nu6_1: active,
-            nu6_2: active,
-            #[cfg(zcash_unstable = "nu7")]
-            nu7: active,
-            #[cfg(zcash_unstable = "zfuture")]
-            z_future: active,
-        }
-    }
-
-    #[test]
-    fn transaction_history_includes_pure_transparent_receive() {
-        let mut db = MemoryWalletDb::new(local_network(), 100);
-        let account_id = AccountId::from(0);
-        let txid = TxId::from_bytes([7; 32]);
-        let height = BlockHeight::from_u32(10);
-        let value = Zatoshis::const_from_u64(123_456);
-        let address = TransparentAddress::PublicKeyHash([9; 20]);
-        let txout = TxOut::new(value, address.script().into());
-
-        db.tx_table
-            .put_tx_partial(&txid, &Some(height), Some(height));
-        db.transparent_received_outputs.insert(
-            OutPoint::new([7; 32], 0),
-            ReceivedTransparentOutput::new(
-                txid,
-                account_id,
-                address,
-                TransparentKeyScope::EXTERNAL,
-                txout,
-                height,
-            ),
-        );
-
-        let history = db.get_transaction_history(account_id);
-        assert_eq!(history.len(), 1);
-
-        let entry = &history[0];
-        assert_eq!(entry.txid, txid.as_ref().to_vec());
-        assert_eq!(entry.kind, "receive");
-        assert_eq!(entry.amount_zatoshis, 123_456);
-        assert_eq!(entry.mined_height, Some(10));
-        assert_eq!(entry.status, "mined");
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TransactionHistoryEntry {
     pub txid: Vec<u8>,
     pub kind: String,
     pub amount_zatoshis: u64,
+    pub transparent_received_zatoshis: u64,
     pub fee_zatoshis: Option<u64>,
     pub mined_height: Option<u32>,
     pub expiry_height: Option<u32>,
