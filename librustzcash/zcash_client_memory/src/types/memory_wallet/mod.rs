@@ -1155,15 +1155,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 .map(|n| n.note.value().into_u64() as i64)
                 .sum();
 
-            let transparent_received_zatoshis: i64 = self
-                .transparent_received_outputs
-                .iter()
-                .filter(|(_, output)| {
-                    output.transaction_id == *txid && output.account_id == account_id
-                })
-                .map(|(_, output)| output.txout.value().into_u64() as i64)
-                .sum();
-
             let sent_zatoshis: i64 = self
                 .sent_notes
                 .iter()
@@ -1196,7 +1187,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 && sent_zatoshis == 0
                 && change_zatoshis == 0
                 && spent_input_zatoshis == 0
-                && transparent_received_zatoshis == 0
             {
                 continue;
             }
@@ -1213,10 +1203,8 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 ("send".to_string(), net_send.max(0))
             } else if change_zatoshis > 0 && received_zatoshis == 0 {
                 ("send".to_string(), 0)
-            } else if received_zatoshis > 0 {
-                ("receive".to_string(), received_zatoshis)
             } else {
-                ("receive".to_string(), transparent_received_zatoshis)
+                ("receive".to_string(), received_zatoshis)
             };
 
             let status = match tx_entry.status() {
@@ -1280,69 +1268,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     .is_none_or(|range| meta.address_index().is_some_and(|i| range.contains(&i)))
             })
             .collect::<Vec<_>>())
-    }
-}
-
-#[cfg(all(test, feature = "transparent-inputs"))]
-mod tests {
-    use super::*;
-    use ::transparent::{address::TransparentAddress, bundle::TxOut, keys::TransparentKeyScope};
-    use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork, value::Zatoshis};
-
-    use crate::types::transparent::ReceivedTransparentOutput;
-
-    fn local_network() -> LocalNetwork {
-        let active = Some(BlockHeight::from_u32(1));
-        LocalNetwork {
-            overwinter: active,
-            sapling: active,
-            blossom: active,
-            heartwood: active,
-            canopy: active,
-            nu5: active,
-            nu6: active,
-            nu6_1: active,
-            nu6_2: active,
-            #[cfg(zcash_unstable = "nu7")]
-            nu7: active,
-            #[cfg(zcash_unstable = "zfuture")]
-            z_future: active,
-        }
-    }
-
-    #[test]
-    fn transaction_history_includes_pure_transparent_receive() {
-        let mut db = MemoryWalletDb::new(local_network(), 100);
-        let account_id = AccountId::from(0);
-        let txid = TxId::from_bytes([7; 32]);
-        let height = BlockHeight::from_u32(10);
-        let value = Zatoshis::const_from_u64(123_456);
-        let address = TransparentAddress::PublicKeyHash([9; 20]);
-        let txout = TxOut::new(value, address.script().into());
-
-        db.tx_table
-            .put_tx_partial(&txid, &Some(height), Some(height));
-        db.transparent_received_outputs.insert(
-            OutPoint::new([7; 32], 0),
-            ReceivedTransparentOutput::new(
-                txid,
-                account_id,
-                address,
-                TransparentKeyScope::EXTERNAL,
-                txout,
-                height,
-            ),
-        );
-
-        let history = db.get_transaction_history(account_id);
-        assert_eq!(history.len(), 1);
-
-        let entry = &history[0];
-        assert_eq!(entry.txid, txid.as_ref().to_vec());
-        assert_eq!(entry.kind, "receive");
-        assert_eq!(entry.amount_zatoshis, 123_456);
-        assert_eq!(entry.mined_height, Some(10));
-        assert_eq!(entry.status, "mined");
     }
 }
 
