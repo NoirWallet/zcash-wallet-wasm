@@ -1,33 +1,16 @@
-use crate::bindgen::{SeedFingerprint, UnifiedSpendingKey};
+use crate::Network;
+use crate::bindgen::UnifiedSpendingKey;
 use crate::error::Error;
-use crate::{Network, bindgen::Pczt};
 use pczt::roles::signer::Signer;
 use pczt::roles::verifier::Verifier;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::str::FromStr;
+use transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
 use wasm_bindgen::prelude::wasm_bindgen;
-use zcash_primitives::consensus::{NetworkConstants, Parameters};
-use zcash_primitives::legacy::keys::{NonHardenedChildIndex, TransparentKeyScope};
+use zcash_protocol::consensus::{NetworkConstants, Parameters};
 
-#[wasm_bindgen]
-pub async fn pczt_sign(
-    network: &str,
-    pczt: Pczt,
-    usk: UnifiedSpendingKey,
-    seed_fp: SeedFingerprint,
-) -> Result<Pczt, Error> {
-    pczt_sign_inner(
-        Network::from_str(network)?,
-        pczt.into(),
-        usk.into(),
-        seed_fp.into(),
-    )
-    .await
-    .map(Into::into)
-}
-
-pub async fn pczt_sign_inner(
+pub(crate) async fn pczt_sign_inner(
     network: Network,
     pczt: pczt::Pczt,
     usk: zcash_keys::keys::UnifiedSpendingKey,
@@ -48,7 +31,7 @@ pub async fn pczt_sign_inner(
             address_index: NonHardenedChildIndex,
         },
     }
-    let mut keys = BTreeMap::<zcash_primitives::zip32::AccountId, Vec<KeyRef>>::new();
+    let mut keys = BTreeMap::<zip32::AccountId, Vec<KeyRef>>::new();
     let pczt = Verifier::new(pczt)
         .with_orchard::<Infallible, _>(|bundle| {
             for (index, action) in bundle.actions().iter().enumerate() {
@@ -60,9 +43,7 @@ pub async fn pczt_sign_inner(
                         .and_then(|derivation| {
                             derivation.extract_account_index(
                                 &seed_fp,
-                                zcash_primitives::zip32::ChildIndex::hardened(
-                                    network.network_type().coin_type(),
-                                ),
+                                zip32::ChildIndex::hardened(network.network_type().coin_type()),
                             )
                         })
                 {
@@ -80,9 +61,7 @@ pub async fn pczt_sign_inner(
                     spend.zip32_derivation().as_ref().and_then(|derivation| {
                         derivation.extract_account_index(
                             &seed_fp,
-                            zcash_primitives::zip32::ChildIndex::hardened(
-                                network.network_type().coin_type(),
-                            ),
+                            zip32::ChildIndex::hardened(network.network_type().coin_type()),
                         )
                     })
                 {
@@ -122,31 +101,70 @@ pub async fn pczt_sign_inner(
         .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {:?}", e)))?
         .finish();
 
-    // Add proof generation key for Sapling spends before signing
-    // This is required for sapling-crypto 0.5+ / pczt 0.5+
+    // Add proof generation key for Sapling spends before signing.
+    // This is required for sapling-crypto 0.5+ / pczt 0.5+.
+    //
+    // Sapling notes can be received via two scopes:
+    // - External: regular incoming payments (uses the external IVK)
+    // - Internal: change outputs from previous transactions (uses a derived internal IVK)
+    //
+    // The internal FVK has a different nullifier-deriving key (nk) than the external FVK,
+    // which means the proof_generation_key (ak, nsk) is also different. We must set the
+    // correct proof_generation_key for each spend based on whether the note was received
+    // by the external or internal key. We determine this by checking which ViewingKey
+    // can produce the spend's recipient PaymentAddress from its diversifier.
     let pczt = {
         use pczt::roles::updater::Updater;
 
-        let sapling_proof_gen_key = usk.sapling().expsk.proof_generation_key();
+        let external_proof_gen_key = usk.sapling().expsk.proof_generation_key();
+        let internal_proof_gen_key = usk.sapling().derive_internal().expsk.proof_generation_key();
+
+        let external_vk = external_proof_gen_key.to_viewing_key();
+        let internal_vk = internal_proof_gen_key.to_viewing_key();
 
         Updater::new(pczt)
             .update_sapling_with(|mut updater| {
-                // Find all spends that need proof generation key
-                let spends_needing_key: Vec<usize> = updater
+                // Collect spends that need a proof generation key, along with the
+                // correct key determined by matching the recipient address.
+                let spends_needing_key: Vec<(usize, sapling::ProofGenerationKey)> = updater
                     .bundle()
                     .spends()
                     .iter()
                     .enumerate()
                     .filter_map(|(index, spend)| {
-                        // Only add if not already set
-                        spend.proof_generation_key().is_none().then_some(index)
+                        // Only process spends that don't already have a proof generation key
+                        if spend.proof_generation_key().is_some() {
+                            return None;
+                        }
+
+                        // Determine the correct key by checking which VK matches
+                        // the spend's recipient address
+                        let key = if let Some(recipient) = spend.recipient() {
+                            let diversifier = recipient.diversifier();
+                            if external_vk.to_payment_address(*diversifier) == Some(*recipient) {
+                                external_proof_gen_key.clone()
+                            } else if internal_vk.to_payment_address(*diversifier)
+                                == Some(*recipient)
+                            {
+                                internal_proof_gen_key.clone()
+                            } else {
+                                // Neither key matches; use external as fallback.
+                                // The signer will report WrongFvkForNote if this is wrong.
+                                external_proof_gen_key.clone()
+                            }
+                        } else {
+                            // No recipient set; use external as default
+                            external_proof_gen_key.clone()
+                        };
+
+                        Some((index, key))
                     })
                     .collect();
 
-                // Add proof generation key to each spend
-                for index in spends_needing_key {
+                // Add the correct proof generation key to each spend
+                for (index, key) in spends_needing_key {
                     updater.update_spend_with(index, |mut spend_updater| {
-                        spend_updater.set_proof_generation_key(sapling_proof_gen_key.clone())
+                        spend_updater.set_proof_generation_key(key)
                     })?;
                 }
 
@@ -156,8 +174,8 @@ pub async fn pczt_sign_inner(
             .finish()
     };
 
-    let mut signer = Signer::new(pczt).unwrap();
-    //.map_err(|e| anyhow!("Failed to initialize Signer: {:?}", e))?;
+    let mut signer = Signer::new(pczt)
+        .map_err(|e| Error::PcztSign(format!("Failed to initialize signer: {:?}", e)))?;
     for (_, spends) in keys {
         // let usk = UnifiedSpendingKey::from_seed(&params, seed, account_index)?;
         for keyref in spends {
@@ -248,6 +266,7 @@ fn encode_compact_size(size: usize) -> Vec<u8> {
 /// * `network` - Network type ("main" or "test")
 /// * `usk` - The Unified Spending Key
 /// * `message` - The message to sign
+/// * `address_index` - Optional external transparent address index to sign with. If omitted, the default full unified address index is used.
 ///
 /// # Returns
 ///
@@ -259,7 +278,7 @@ fn encode_compact_size(size: usize) -> Vec<u8> {
 /// # Example
 ///
 /// ```javascript
-/// const result = await sign_message_with_transparent("main", usk, "Hello Zcash!");
+/// const result = await sign_message_with_transparent("main", usk, "Hello Zcash!", undefined);
 /// console.log("Signature:", result.signature);  // hex format
 /// console.log("Public Key:", result.pubkey);     // uncompressed hex (65 bytes)
 /// console.log("Address:", result.address);       // t-address
@@ -269,12 +288,14 @@ pub fn sign_message_with_transparent(
     network: &str,
     usk: UnifiedSpendingKey,
     message: &str,
+    address_index: Option<u32>,
 ) -> Result<wasm_bindgen::JsValue, Error> {
     use bitcoin_hashes::{Hash, sha256d};
     use secp256k1::{Message as Secp256k1Message, Secp256k1, SecretKey};
     use serde::{Deserialize, Serialize};
+    use transparent::keys::{IncomingViewingKey, NonHardenedChildIndex};
     use zcash_client_backend::encoding::AddressCodec;
-    use zcash_primitives::legacy::keys::{IncomingViewingKey, NonHardenedChildIndex};
+    use zcash_keys::keys::UnifiedAddressRequest;
 
     #[derive(Serialize, Deserialize)]
     struct SignatureResult {
@@ -285,25 +306,38 @@ pub fn sign_message_with_transparent(
 
     let net = Network::from_str(network)?;
     let usk_inner: zcash_keys::keys::UnifiedSpendingKey = usk.into();
-
-    // Get transparent private key
     let transparent_key = usk_inner.transparent();
 
-    // Derive the external address at index 0 (default receiving address)
-    let address_index = NonHardenedChildIndex::ZERO;
-    let privkey = transparent_key
-        .derive_external_secret_key(address_index)
-        .map_err(|e| Error::Generic(format!("Failed to derive private key: {:?}", e)))?;
+    let address_index = match address_index {
+        Some(index) => NonHardenedChildIndex::from_index(index)
+            .ok_or_else(|| Error::Generic("Invalid transparent child index".into()))?,
+        None => {
+            let ufvk = usk_inner.to_unified_full_viewing_key();
+            let uivk = ufvk.to_unified_incoming_viewing_key();
+            let (ua, diversifier_idx) = uivk
+                .default_address(UnifiedAddressRequest::AllAvailableKeys)
+                .map_err(|e| {
+                    Error::Generic(format!("Failed to derive default address: {:?}", e))
+                })?;
+            let transparent_j =
+                crate::bindgen::mnemonic::transparent_address_index(&ua, diversifier_idx)
+                    .ok_or_else(|| Error::Generic("Invalid transparent child index".into()))?;
+            NonHardenedChildIndex::from_index(transparent_j)
+                .expect("transparent_address_index returns a valid non-hardened child index")
+        }
+    };
 
-    // Get the address
     let address_obj = transparent_key
         .to_account_pubkey()
         .derive_external_ivk()
         .map_err(|e| Error::Generic(format!("Failed to derive IVK: {:?}", e)))?
         .derive_address(address_index)
         .map_err(|e| Error::Generic(format!("Failed to derive address: {:?}", e)))?;
-
     let address_str = address_obj.encode(&net);
+
+    let privkey = transparent_key
+        .derive_external_secret_key(address_index)
+        .map_err(|e| Error::Generic(format!("Failed to derive private key: {:?}", e)))?;
 
     // Convert to secp256k1 SecretKey
     let secret_key = SecretKey::from_slice(privkey.as_ref())

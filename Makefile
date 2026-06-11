@@ -1,8 +1,8 @@
 build: lint wasm
 
 lint:
-	@cargo fmt --all
-	@cargo clippy --fix --allow-dirty --allow-staged
+	@cargo fmt --all --package zcash-wallet-wasm
+	@cargo clippy --fix --allow-dirty --allow-staged --package zcash-wallet-wasm
 
 wasm:
 	wasm-pack build --target web --release --out-dir pkg --features wasm-parallel -Z build-std=panic_abort,std

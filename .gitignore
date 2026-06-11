@@ -1,2 +1,7 @@
 /target
 .vscode
+
+native-tests
+
+.claude
+CLAUDE.md

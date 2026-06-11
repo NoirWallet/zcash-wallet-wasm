@@ -1,14 +1,17 @@
 use crate::Error;
 use crate::bindgen::{SeedFingerprint, UnifiedSpendingKey};
 use bip0039::{Count, English, Mnemonic};
+use secrecy::Zeroize;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-/// Unified addresses for all Zcash pools
+/// Addresses for all Zcash pools.
 #[derive(Serialize, Deserialize)]
 pub struct UnifiedAddresses {
-    /// The full unified address (contains all available receivers)
+    /// The shielded-only unified address (contains Orchard/Sapling receivers only)
     pub unified: String,
+    /// The full unified address (contains all available receivers)
+    pub full_unified: String,
     /// The Orchard receiver address (if available)
     pub orchard: Option<String>,
     /// The Sapling receiver unified address (u1 format, if available)
@@ -17,13 +20,66 @@ pub struct UnifiedAddresses {
     pub sapling_zs: Option<String>,
     /// The Transparent receiver address (if available)
     pub transparent: Option<String>,
+    /// Transparent child address index corresponding to the full unified address.
+    pub address_index: Option<u32>,
 }
 
-/// Generate a new BIP-39 mnemonic phrase with the specified word count.
+pub(crate) fn unified_addresses_from_full<P>(
+    address: &zcash_keys::address::UnifiedAddress,
+    params: &P,
+    address_index: Option<u32>,
+) -> UnifiedAddresses
+where
+    P: zcash_protocol::consensus::Parameters,
+{
+    use zcash_client_backend::encoding::AddressCodec;
+    use zcash_keys::address::UnifiedAddress as ZcashUnifiedAddress;
+
+    let orchard_receiver = address.orchard().cloned();
+    let sapling_receiver = address.sapling().cloned();
+    let shielded_unified =
+        ZcashUnifiedAddress::from_receivers(orchard_receiver, sapling_receiver, None)
+            .expect("all-available unified address should include a shielded receiver");
+
+    let orchard = orchard_receiver.as_ref().and_then(|receiver| {
+        ZcashUnifiedAddress::from_receivers(Some(*receiver), None, None).map(|ua| ua.encode(params))
+    });
+
+    let sapling = sapling_receiver.as_ref().and_then(|receiver| {
+        ZcashUnifiedAddress::from_receivers(None, Some(*receiver), None).map(|ua| ua.encode(params))
+    });
+
+    UnifiedAddresses {
+        unified: shielded_unified.encode(params),
+        full_unified: address.encode(params),
+        orchard,
+        sapling,
+        sapling_zs: address.sapling().map(|addr| addr.encode(params)),
+        transparent: address.transparent().map(|addr| addr.encode(params)),
+        address_index,
+    }
+}
+
+pub(crate) fn transparent_address_index(
+    address: &zcash_keys::address::UnifiedAddress,
+    diversifier_index: zip32::DiversifierIndex,
+) -> Option<u32> {
+    address.transparent()?;
+
+    let (low_4_bytes, rest) = diversifier_index.as_bytes().split_at(4);
+    if rest.iter().any(|byte| *byte != 0) {
+        return None;
+    }
+
+    let index = u32::from_le_bytes(low_4_bytes.try_into().ok()?);
+    transparent::keys::NonHardenedChildIndex::from_index(index).map(|_| index)
+}
+
+/// Generate a new 24-word BIP-39 mnemonic phrase.
 ///
 /// # Arguments
 ///
-/// * `word_count` - Number of words in the mnemonic (12, 15, 18, 21, or 24)
+/// * `word_count` - Number of words in the mnemonic. Must be 24 for new wallet generation.
 ///
 /// # Returns
 ///
@@ -38,10 +94,6 @@ pub struct UnifiedAddresses {
 #[wasm_bindgen]
 pub fn generate_mnemonic(word_count: u32) -> Result<String, Error> {
     let count = match word_count {
-        12 => Count::Words12,
-        15 => Count::Words15,
-        18 => Count::Words18,
-        21 => Count::Words21,
         24 => Count::Words24,
         _ => return Err(Error::InvalidSeedPhrase),
     };
@@ -75,56 +127,6 @@ pub fn validate_mnemonic(phrase: &str) -> Result<(), Error> {
     Mnemonic::<English>::validate(phrase).map_err(|_| Error::InvalidSeedPhrase)
 }
 
-// /// Convert a mnemonic phrase to its entropy bytes.
-// ///
-// /// # Arguments
-// ///
-// /// * `phrase` - The mnemonic phrase
-// ///
-// /// # Returns
-// ///
-// /// A vector of bytes representing the entropy
-// ///
-// /// # Example
-// ///
-// /// ```javascript
-// /// const entropy = mnemonic_to_entropy("abandon abandon abandon ... art");
-// /// console.log(entropy); // Uint8Array
-// /// ```
-// #[wasm_bindgen]
-// pub fn mnemonic_to_entropy(phrase: &str) -> Result<Vec<u8>, Error> {
-//     let mnemonic: Mnemonic<English> =
-//         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
-
-//     Ok(mnemonic.entropy().to_vec())
-// }
-
-// /// Convert entropy bytes to a mnemonic phrase.
-// ///
-// /// # Arguments
-// ///
-// /// * `entropy` - The entropy bytes (16, 20, 24, 28, or 32 bytes)
-// ///
-// /// # Returns
-// ///
-// /// A string containing the mnemonic phrase
-// ///
-// /// # Example
-// ///
-// /// ```javascript
-// /// const entropy = new Uint8Array(32); // 32 bytes for 24 words
-// /// crypto.getRandomValues(entropy);
-// /// const mnemonic = entropy_to_mnemonic(entropy);
-// /// console.log(mnemonic);
-// /// ```
-// #[wasm_bindgen]
-// pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, Error> {
-//     let mnemonic: Mnemonic<English> =
-//         Mnemonic::from_entropy(entropy).map_err(|_| Error::InvalidSeedPhrase)?;
-
-//     Ok(mnemonic.phrase().to_string())
-// }
-
 /// Convert a mnemonic phrase to a seed with an optional passphrase.
 ///
 /// # Arguments
@@ -147,8 +149,10 @@ pub fn mnemonic_to_seed(phrase: &str, passphrase: &str) -> Result<Vec<u8>, Error
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
-    Ok(seed.to_vec())
+    let mut seed = mnemonic.to_seed(passphrase);
+    let result = seed.to_vec();
+    seed.zeroize();
+    Ok(result)
 }
 
 /// Generate a UnifiedSpendingKey from a mnemonic phrase.
@@ -186,10 +190,12 @@ pub fn mnemonic_to_spending_key(
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
 
     // Create UnifiedSpendingKey from seed
-    UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)
+    let result = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index);
+    seed.zeroize();
+    result
 }
 
 /// Generate a SeedFingerprint from a mnemonic phrase.
@@ -221,57 +227,78 @@ pub fn mnemonic_to_seed_fingerprint(
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
 
     // Create SeedFingerprint from seed
-    SeedFingerprint::new(seed.to_vec().into_boxed_slice())
+    let result = SeedFingerprint::new(seed.to_vec().into_boxed_slice());
+    seed.zeroize();
+    result
 }
 
-// /// Generate a UnifiedFullViewingKey from a mnemonic phrase.
-// ///
-// /// # Arguments
-// ///
-// /// * `network` - Network name ("main" or "test")
-// /// * `phrase` - The mnemonic phrase
-// /// * `passphrase` - Optional passphrase (use empty string "" if none)
-// /// * `account_index` - The account index for HD derivation (usually 0)
-// ///
-// /// # Returns
-// ///
-// /// A UnifiedFullViewingKey that can be used for viewing transactions
-// ///
-// /// # Example
-// ///
-// /// ```javascript
-// /// const mnemonic = generate_mnemonic(24);
-// /// const ufvk = mnemonic_to_viewing_key(
-// ///     "main",
-// ///     mnemonic,
-// ///     "",  // no passphrase
-// ///     0    // first account
-// /// );
-// /// ```
-// #[wasm_bindgen]
-// pub fn mnemonic_to_viewing_key(
-//     network: &str,
-//     phrase: &str,
-//     passphrase: &str,
-//     account_index: u32,
-// ) -> Result<UnifiedFullViewingKey, Error> {
-//     // Convert mnemonic to seed
-//     let mnemonic: Mnemonic<English> =
-//         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
+/// Transparent address data for a specific external address index.
+#[derive(Serialize, Deserialize)]
+pub struct TransparentAddressInfo {
+    /// The transparent P2PKH address for the given index.
+    pub address: String,
+    /// Hex-encoded uncompressed public key (65 bytes: 04 + x + y).
+    pub pubkey: String,
+}
 
-//     let seed = mnemonic.to_seed(passphrase);
+/// Get a transparent address and public key from a mnemonic at a specific external address index.
+///
+/// # Arguments
+///
+/// * `network` - Network name ("main" or "test")
+/// * `phrase` - The mnemonic phrase
+/// * `passphrase` - Optional passphrase (use empty string "" if none)
+/// * `account_index` - The account index for HD derivation (usually 0)
+/// * `address_index` - The external transparent child address index
+#[wasm_bindgen]
+pub fn mnemonic_to_transparent_address(
+    network: &str,
+    phrase: &str,
+    passphrase: &str,
+    account_index: u32,
+    address_index: u32,
+) -> Result<JsValue, Error> {
+    use std::str::FromStr;
+    use transparent::keys::{IncomingViewingKey, NonHardenedChildIndex, TransparentKeyScope};
+    use zcash_client_backend::encoding::AddressCodec;
 
-//     // Create UnifiedSpendingKey from seed
-//     let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)?;
+    let mnemonic: Mnemonic<English> =
+        Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
+    let mut seed = mnemonic.to_seed(passphrase);
+    let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index);
+    seed.zeroize();
+    let usk = usk?;
 
-//     // Derive UnifiedFullViewingKey from spending key
-//     Ok(usk.to_unified_full_viewing_key())
-// }
+    let net = crate::Network::from_str(network)?;
+    let address_index = NonHardenedChildIndex::from_index(address_index)
+        .ok_or_else(|| Error::Generic("Invalid transparent child index".into()))?;
+    let usk_inner: zcash_keys::keys::UnifiedSpendingKey = usk.into();
+    let transparent_key = usk_inner.transparent();
 
-/// Get all addresses (unified, orchard, sapling, transparent) from a mnemonic phrase.
+    let address = transparent_key
+        .to_account_pubkey()
+        .derive_external_ivk()
+        .map_err(|e| Error::Generic(format!("Failed to derive IVK: {:?}", e)))?
+        .derive_address(address_index)
+        .map_err(|e| Error::Generic(format!("Failed to derive address: {:?}", e)))?
+        .encode(&net);
+
+    let public_key = transparent_key
+        .to_account_pubkey()
+        .derive_address_pubkey(TransparentKeyScope::EXTERNAL, address_index)
+        .map_err(|e| Error::Generic(format!("Failed to derive public key: {:?}", e)))?;
+    let pubkey = hex::encode(public_key.serialize_uncompressed());
+
+    Ok(serde_wasm_bindgen::to_value(&TransparentAddressInfo {
+        address,
+        pubkey,
+    })?)
+}
+
+/// Get all addresses (shielded unified, orchard, sapling, transparent) from a mnemonic phrase.
 ///
 /// # Arguments
 ///
@@ -307,17 +334,18 @@ pub fn mnemonic_to_addresses(
     account_index: u32,
 ) -> Result<JsValue, Error> {
     use std::str::FromStr;
-    use zcash_client_backend::encoding::AddressCodec;
     use zcash_keys::keys::UnifiedAddressRequest;
 
     // Convert mnemonic to seed
     let mnemonic: Mnemonic<English> =
         Mnemonic::from_phrase(phrase).map_err(|_| Error::InvalidSeedPhrase)?;
 
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
 
     // Create UnifiedSpendingKey from seed
-    let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index)?;
+    let usk = UnifiedSpendingKey::new(network, seed.to_vec().into_boxed_slice(), account_index);
+    seed.zeroize();
+    let usk = usk?;
 
     // Get UnifiedFullViewingKey
     let ufvk = usk.to_unified_full_viewing_key();
@@ -328,61 +356,12 @@ pub fn mnemonic_to_addresses(
     // Get UIVK (unified incoming viewing key) from UFVK
     let uivk = ufvk.as_inner().to_unified_incoming_viewing_key();
 
-    // Generate the default address (diversifier index 0) with all receivers
-    let (address, _) = uivk.default_address(UnifiedAddressRequest::ALLOW_ALL)?;
+    // Generate the first address that includes every receiver supported by the UIVK.
+    let (address, diversifier_index) =
+        uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
+    let address_index = transparent_address_index(&address, diversifier_index);
 
-    // Encode the unified address
-    let unified_str = address.encode(&net);
-
-    // Extract individual receiver addresses
-    // For Orchard and Sapling, we generate unified addresses with only that receiver type
-    use zcash_keys::keys::{ReceiverRequirement as RR, UnifiedAddressRequest as UAR};
-
-    let orchard_addr = if address.orchard().is_some() {
-        // Request a unified address with only Orchard receiver
-        // unsafe_custom allows creating requests with any combination
-        let ua_request = UAR::unsafe_custom(
-            RR::Require, // Orchard
-            RR::Omit,    // Sapling
-            RR::Omit,    // Transparent
-        );
-        uivk.default_address(ua_request)
-            .ok()
-            .map(|(addr, _)| addr.encode(&net))
-    } else {
-        None
-    };
-
-    let (sapling_addr, sapling_zs_addr) = if let Some(sapling_receiver) = address.sapling() {
-        // Generate unified address with only Sapling receiver
-        let ua_request = UAR::unsafe_custom(
-            RR::Omit,    // Orchard
-            RR::Require, // Sapling
-            RR::Omit,    // Transparent
-        );
-        let sapling_ua = uivk
-            .default_address(ua_request)
-            .ok()
-            .map(|(addr, _)| addr.encode(&net));
-
-        // Also generate traditional zs format address (directly encode the PaymentAddress)
-        let sapling_zs = Some(sapling_receiver.encode(&net));
-
-        (sapling_ua, sapling_zs)
-    } else {
-        (None, None)
-    };
-
-    let transparent_addr = address.transparent().map(|addr| addr.encode(&net));
-
-    // Create the result structure
-    let result = UnifiedAddresses {
-        unified: unified_str,
-        orchard: orchard_addr,
-        sapling: sapling_addr,
-        sapling_zs: sapling_zs_addr,
-        transparent: transparent_addr,
-    };
+    let result = unified_addresses_from_full(&address, &net, address_index);
 
     // Convert to JsValue using serde_wasm_bindgen
     Ok(serde_wasm_bindgen::to_value(&result)?)
@@ -413,16 +392,14 @@ pub fn mnemonic_to_addresses(
 #[wasm_bindgen]
 pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsValue, Error> {
     use std::str::FromStr;
-    use zcash_address::unified::{self, Container};
+    use transparent::address::TransparentAddress;
+    use zcash_address::unified::{self, Container, Encoding};
     use zcash_client_backend::encoding::AddressCodec;
-    use zcash_primitives::consensus::Parameters;
-    use zcash_primitives::legacy::TransparentAddress;
+    use zcash_protocol::consensus::Parameters;
 
     // Get the network
     let net = crate::Network::from_str(network)?;
 
-    // Parse the unified address directly
-    use zcash_address::unified::Encoding;
     let (parsed_net, ua) =
         unified::Address::decode(unified_address).map_err(|_| Error::InvalidAddress)?;
 
@@ -436,11 +413,13 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
     let mut sapling_addr: Option<String> = None;
     let mut sapling_zs_addr: Option<String> = None;
     let mut transparent_addr: Option<String> = None;
+    let mut shielded_receivers = Vec::new();
 
     // Iterate through receivers to extract each type
     for receiver in ua.items() {
         match receiver {
             unified::Receiver::Orchard(data) => {
+                shielded_receivers.push(unified::Receiver::Orchard(data));
                 // Create a unified address with only Orchard receiver
                 let single_ua =
                     unified::Address::try_from_items(vec![unified::Receiver::Orchard(data)])
@@ -449,6 +428,7 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
                 orchard_addr = Some(single_ua.encode(&parsed_net));
             }
             unified::Receiver::Sapling(data) => {
+                shielded_receivers.push(unified::Receiver::Sapling(data));
                 // Create a unified address with only Sapling receiver
                 let single_ua =
                     unified::Address::try_from_items(vec![unified::Receiver::Sapling(data)])
@@ -467,24 +447,45 @@ pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsV
                 let t_addr = TransparentAddress::PublicKeyHash(data);
                 transparent_addr = Some(t_addr.encode(&net));
             }
-            unified::Receiver::P2sh(_) => {
-                unreachable!();
-            }
-            unified::Receiver::Unknown { .. } => {
-                unreachable!();
+            unified::Receiver::P2sh(_) | unified::Receiver::Unknown { .. } => {
+                return Err(Error::InvalidAddress);
             }
         }
     }
 
+    let shielded_ua =
+        unified::Address::try_from_items(shielded_receivers).map_err(|_| Error::InvalidAddress)?;
+
     // Create the result structure
     let result = UnifiedAddresses {
-        unified: unified_address.to_string(),
+        unified: shielded_ua.encode(&parsed_net),
+        full_unified: unified_address.to_string(),
         orchard: orchard_addr,
         sapling: sapling_addr,
         sapling_zs: sapling_zs_addr,
         transparent: transparent_addr,
+        address_index: None,
     };
 
     // Convert to JsValue using serde_wasm_bindgen
     Ok(serde_wasm_bindgen::to_value(&result)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_mnemonic;
+    use crate::Error;
+
+    #[test]
+    fn generate_mnemonic_only_allows_24_words() {
+        for word_count in [12, 15, 18, 21] {
+            assert!(matches!(
+                generate_mnemonic(word_count),
+                Err(Error::InvalidSeedPhrase)
+            ));
+        }
+
+        let mnemonic = generate_mnemonic(24).expect("24-word mnemonic generation should succeed");
+        assert_eq!(mnemonic.split_whitespace().count(), 24);
+    }
 }

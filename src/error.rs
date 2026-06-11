@@ -5,7 +5,7 @@ use wasm_bindgen::JsValue;
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Invalid account id")]
-    AccountIdConversion(#[from] zcash_primitives::zip32::TryFromIntError),
+    AccountIdConversion(#[from] zip32::TryFromIntError),
     #[error("Failed to derive key from seed")]
     // doesn't implement std::error. Should probably fix this upstream
     Derivation(#[from] zcash_keys::keys::DerivationError),
@@ -39,10 +39,6 @@ pub enum Error {
     Scan(zcash_client_backend::scanning::ScanError),
     #[error("IO Error: {0}")]
     Io(#[from] std::io::Error),
-    #[error(
-        "Error parsing min_confirmations argument {0}. Must be an integer > 0 (e.g. at least 1)"
-    )]
-    InvalidMinConformations(u32),
     #[error("Error parsing zatoshi amount: {0}")]
     InvalidAmount(#[from] zcash_protocol::value::BalanceError),
     #[error("Failed to send transaction")]
@@ -58,7 +54,7 @@ pub enum Error {
     )]
     UnsupportedMemoRecipient,
     #[error("Error decoding memo: {0}")]
-    MemoDecoding(#[from] zcash_primitives::memo::Error),
+    MemoDecoding(#[from] zcash_protocol::memo::Error),
 
     #[error("Invalid seed phrase")]
     InvalidSeedPhrase,

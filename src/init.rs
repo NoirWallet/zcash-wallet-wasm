@@ -14,9 +14,16 @@ fn setup_tracing() {
         use tracing_subscriber::fmt::format::Pretty;
         use tracing_web::{MakeWebConsoleWriter, performance_layer};
 
-        // For WASM, we must set the directives here at compile time.
-        let filter_layer = EnvFilter::default()
-            .add_directive(LevelFilter::INFO.into())
+        let default_level = if cfg!(debug_assertions) {
+            LevelFilter::INFO
+        } else {
+            LevelFilter::WARN
+        };
+
+        let filter_layer = EnvFilter::default().add_directive(default_level.into());
+
+        #[cfg(debug_assertions)]
+        let filter_layer = filter_layer
             .add_directive("zcash_client_memory=info".parse().unwrap())
             .add_directive("zcash_client_backend::scanning=debug".parse().unwrap())
             .add_directive("zcash_client_backend::sync=debug".parse().unwrap());
