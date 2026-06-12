@@ -229,6 +229,62 @@ where
         .await
     }
 
+    /// Import a watch-only spending account from an encoded UFVK (hardware wallet flow).
+    ///
+    /// The ZIP-32 seed fingerprint and HD index exported by the device (e.g. Keystone
+    /// `zcash-accounts` QR) are recorded as the account derivation so that PCZTs created
+    /// from this account carry the metadata the device needs to locate its signing keys.
+    ///
+    /// This is a thin wrapper around the audited `import_account_ufvk`; it adds no new
+    /// import logic.
+    pub async fn create_account_ufvk(
+        &self,
+        account_name: &str,
+        ufvk_encoded: &str,
+        seed_fingerprint: [u8; 32],
+        account_hd_index: u32,
+        birthday_height: Option<u32>,
+        key_source: Option<&str>,
+    ) -> Result<AccountId, Error> {
+        let ufvk = UnifiedFullViewingKey::decode(&self.network, ufvk_encoded)
+            .map_err(Error::KeyDecoding)?;
+
+        let derivation = Zip32Derivation::new(
+            SeedFingerprint::from_bytes(seed_fingerprint),
+            zip32::AccountId::try_from(account_hd_index)?,
+        );
+
+        tracing::info!("Importing UFVK account (hd_index: {})", account_hd_index);
+
+        self.import_account_ufvk(
+            account_name,
+            &ufvk,
+            birthday_height,
+            AccountPurpose::Spending {
+                derivation: Some(derivation),
+            },
+            key_source,
+        )
+        .await
+    }
+
+    /// Prove and broadcast an externally signed PCZT (hardware wallet flow).
+    ///
+    /// The PCZT must already contain all required signatures (e.g. added by a Keystone
+    /// device). Proof generation runs locally; `sapling_proof_gen_key` is only needed
+    /// when the PCZT spends Sapling notes, which never happens for hardware-wallet
+    /// accounts (Keystone supports transparent + Orchard only).
+    ///
+    /// This composes the audited `pczt_prove` and `pczt_send` without modification.
+    pub async fn pczt_prove_and_send(
+        &self,
+        pczt: Pczt,
+        sapling_proof_gen_key: Option<ProofGenerationKey>,
+    ) -> Result<String, Error> {
+        let proved = self.pczt_prove(pczt, sapling_proof_gen_key).await?;
+        self.pczt_send(proved).await
+    }
+
     async fn import_account_ufvk(
         &self,
         account_name: &str,
