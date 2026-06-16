@@ -62,6 +62,15 @@ export class Pczt {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Combines this PCZT with another representing the same transaction.
+     *
+     * Used after external signing: `self` is the full PCZT kept by the wallet
+     * (with witnesses) and `other` is the redacted PCZT returned by the signer
+     * (with signatures). The result carries both, ready for proving and
+     * extraction.
+     */
+    combine(other: Pczt): Pczt;
+    /**
      * Deserialize to a Pczt from postcard bytes.
      */
     static from_bytes(bytes: Uint8Array): Pczt;
@@ -69,6 +78,21 @@ export class Pczt {
      * Returns a Pczt from a JSON object
      */
     static from_json(s: any): Pczt;
+    /**
+     * Strips prover-only data so the PCZT is small enough to transport to an
+     * external signer (e.g. Keystone) as an animated QR.
+     *
+     * Mirrors the "redact for signer" role used by Zashi: removes spend
+     * witnesses (the per-note Merkle authentication paths that dominate the
+     * serialized size) and the `zcash_client_backend` proprietary metadata.
+     * The signer only needs the spend randomizers, values and derivation
+     * paths, so the redacted PCZT still produces valid signatures. The
+     * original (full) PCZT must be retained and merged back with [`combine`]
+     * after signing to restore the witnesses required for proving.
+     *
+     * [`combine`]: Pczt::combine
+     */
+    redact_for_signer(): Pczt;
     /**
      * Returns the postcard serialization of the Pczt.
      */
@@ -659,6 +683,8 @@ export interface InitOutput {
     readonly pczt_from_json: (a: number, b: number) => void;
     readonly pczt_serialize: (a: number, b: number) => void;
     readonly pczt_from_bytes: (a: number, b: number, c: number) => void;
+    readonly pczt_redact_for_signer: (a: number) => number;
+    readonly pczt_combine: (a: number, b: number, c: number) => void;
     readonly __wbg_transactionrequest_free: (a: number, b: number) => void;
     readonly transactionrequest_new: (a: number, b: number, c: number) => void;
     readonly transactionrequest_empty: () => number;
@@ -748,11 +774,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_7431: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_7453: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3040: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_7422: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_2975: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_7477: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_7499: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3053: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_7468: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_2988: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
