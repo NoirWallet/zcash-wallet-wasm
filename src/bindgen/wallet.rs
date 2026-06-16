@@ -508,6 +508,82 @@ impl WebWallet {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn oneclick_pczt_transfer_dynamic_fee(
+        &self,
+        account_id: u32,
+        to_address: String,
+        value: u64,
+        usk: super::UnifiedSpendingKey,
+        seed_fp: SeedFingerprint,
+        sapling_proof_gen_key: Option<ProofGenerationKey>,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<String, Error> {
+        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+        let pczt = self
+            .inner
+            .pczt_create_dynamic_fee(
+                AccountId::from(account_id),
+                to_address,
+                value,
+                memo,
+                marginal_fee_zats,
+            )
+            .await?;
+
+        self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
+            .await
+    }
+
+    pub async fn oneclick_pczt_shield_dynamic_fee(
+        &self,
+        account_id: u32,
+        usk: super::UnifiedSpendingKey,
+        seed_fp: SeedFingerprint,
+        sapling_proof_gen_key: Option<ProofGenerationKey>,
+        marginal_fee_zats: u64,
+    ) -> Result<String, Error> {
+        let pczt = self
+            .inner
+            .pczt_shield_dynamic_fee(account_id.into(), marginal_fee_zats)
+            .await?;
+
+        self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn estimate_pczt_transfer_fee(
+        &self,
+        account_id: u32,
+        to_address: String,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<u64, Error> {
+        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+        self.inner
+            .estimate_pczt_transfer_fee(
+                AccountId::from(account_id),
+                to_address,
+                value,
+                memo,
+                marginal_fee_zats,
+            )
+            .await
+    }
+
+    pub async fn estimate_pczt_shield_fee(
+        &self,
+        account_id: u32,
+        marginal_fee_zats: u64,
+    ) -> Result<u64, Error> {
+        self.inner
+            .estimate_pczt_shield_fee(account_id.into(), marginal_fee_zats)
+            .await
+    }
+
     /// Sign, prove locally, and send a PCZT transaction.
     ///
     /// This helper method encapsulates the common workflow of:

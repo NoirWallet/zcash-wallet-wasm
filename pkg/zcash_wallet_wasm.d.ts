@@ -169,6 +169,8 @@ export class WebWallet {
     create_account(account_name: string, seed_phrase: string, account_hd_index: number, birthday_height?: number | null, passphrase?: string | null): Promise<number>;
     db_to_bytes(): Promise<Uint8Array>;
     db_to_bytes_chunked(callback: Function): Promise<void>;
+    estimate_pczt_shield_fee(account_id: number, marginal_fee_zats: bigint): Promise<bigint>;
+    estimate_pczt_transfer_fee(account_id: number, to_address: string, value: bigint, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<bigint>;
     /**
      * Get the birthday height for a specific account
      *
@@ -335,7 +337,9 @@ export class WebWallet {
     get_wallet_summary(): Promise<WalletSummary | undefined>;
     constructor(network: string, lightwalletd_url: string, db_bytes?: Uint8Array | null);
     oneclick_pczt_shield(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null): Promise<string>;
+    oneclick_pczt_shield_dynamic_fee(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, marginal_fee_zats: bigint): Promise<string>;
     oneclick_pczt_transfer(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null, memo?: Uint8Array | null): Promise<string>;
+    oneclick_pczt_transfer_dynamic_fee(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<string>;
     /**
      * Journal-aware sync: download + scan one batch, return journal data for persistence.
      * Returns null if fully synced, or Uint8Array with journal entry data.
@@ -661,6 +665,10 @@ export interface InitOutput {
     readonly webwallet_get_next_shielded_address: (a: number, b: number) => number;
     readonly webwallet_oneclick_pczt_transfer: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number) => number;
     readonly webwallet_oneclick_pczt_shield: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly webwallet_oneclick_pczt_transfer_dynamic_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: bigint) => number;
+    readonly webwallet_oneclick_pczt_shield_dynamic_fee: (a: number, b: number, c: number, d: number, e: number, f: bigint) => number;
+    readonly webwallet_estimate_pczt_transfer_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: bigint) => number;
+    readonly webwallet_estimate_pczt_shield_fee: (a: number, b: number, c: bigint) => number;
     readonly webwallet_get_latest_block: (a: number) => number;
     readonly __wbg_proposal_free: (a: number, b: number) => void;
     readonly __wbg_walletsummary_free: (a: number, b: number) => void;
@@ -706,11 +714,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_7392: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_7406: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3000: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_7381: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_2935: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_7465: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_7479: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3068: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_7454: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_3003: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
