@@ -1421,19 +1421,21 @@ export class WebWallet {
      *
      * The returned PCZT carries ZIP-32 derivation metadata so an external signer
      * (e.g. Keystone) can locate its keys. Serialize it with `Pczt.serialize()`
-     * before transporting via QR.
+     * before transporting via QR. `marginal_fee_zats` selects the ZIP-317 fee
+     * tier so hardware sends honor the same dynamic-fee tiers as software sends.
      * @param {number} account_id
      * @param {string} to_address
      * @param {bigint} value
-     * @param {Uint8Array | null} [memo]
+     * @param {Uint8Array | null | undefined} memo
+     * @param {bigint} marginal_fee_zats
      * @returns {Promise<Pczt>}
      */
-    pczt_create(account_id, to_address, value, memo) {
+    pczt_create(account_id, to_address, value, memo, marginal_fee_zats) {
         const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         var ptr1 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
         var len1 = WASM_VECTOR_LEN;
-        const ret = wasm.webwallet_pczt_create(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, len1);
+        const ret = wasm.webwallet_pczt_create(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, len1, marginal_fee_zats);
         return takeObject(ret);
     }
     /**
@@ -1455,12 +1457,14 @@ export class WebWallet {
     }
     /**
      * Create an unsigned, unproven shielding PCZT (transparent -> Orchard) for
-     * external signing (hardware wallet flow).
+     * external signing (hardware wallet flow). `marginal_fee_zats` selects the
+     * ZIP-317 fee tier so hardware shields honor the dynamic-fee tiers too.
      * @param {number} account_id
+     * @param {bigint} marginal_fee_zats
      * @returns {Promise<Pczt>}
      */
-    pczt_shield_create(account_id) {
-        const ret = wasm.webwallet_pczt_shield_create(this.__wbg_ptr, account_id);
+    pczt_shield_create(account_id, marginal_fee_zats) {
+        const ret = wasm.webwallet_pczt_shield_create(this.__wbg_ptr, account_id, marginal_fee_zats);
         return takeObject(ret);
     }
     /**
@@ -2368,7 +2372,7 @@ function __wbg_get_imports(memory) {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_7573(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_7570(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -2406,7 +2410,7 @@ function __wbg_get_imports(memory) {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_7573(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_7570(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -2657,23 +2661,23 @@ function __wbg_get_imports(memory) {
             console.warn(getObject(arg0), getObject(arg1), getObject(arg2), getObject(arg3));
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1098, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3121);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1096, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3118);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2628, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7542);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2626, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7539);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2631, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7551);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2629, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7548);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1069, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3056);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1067, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3053);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000005: function(arg0) {
@@ -2742,22 +2746,22 @@ function __wbg_get_imports(memory) {
     };
 }
 
-function __wasm_bindgen_func_elem_3056(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_3056(arg0, arg1);
+function __wasm_bindgen_func_elem_3053(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_3053(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_3121(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_3121(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_3118(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_3118(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7542(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_7542(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_7539(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_7539(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7551(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_7548(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_7551(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_7548(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -2768,8 +2772,8 @@ function __wasm_bindgen_func_elem_7551(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_7573(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_7573(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_7570(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_7570(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 

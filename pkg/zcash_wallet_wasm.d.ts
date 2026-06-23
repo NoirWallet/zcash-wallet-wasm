@@ -384,9 +384,10 @@ export class WebWallet {
      *
      * The returned PCZT carries ZIP-32 derivation metadata so an external signer
      * (e.g. Keystone) can locate its keys. Serialize it with `Pczt.serialize()`
-     * before transporting via QR.
+     * before transporting via QR. `marginal_fee_zats` selects the ZIP-317 fee
+     * tier so hardware sends honor the same dynamic-fee tiers as software sends.
      */
-    pczt_create(account_id: number, to_address: string, value: bigint, memo?: Uint8Array | null): Promise<Pczt>;
+    pczt_create(account_id: number, to_address: string, value: bigint, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<Pczt>;
     /**
      * Prove and broadcast an externally signed PCZT (hardware wallet flow).
      *
@@ -399,9 +400,10 @@ export class WebWallet {
     pczt_prove_and_send(pczt: Pczt): Promise<string>;
     /**
      * Create an unsigned, unproven shielding PCZT (transparent -> Orchard) for
-     * external signing (hardware wallet flow).
+     * external signing (hardware wallet flow). `marginal_fee_zats` selects the
+     * ZIP-317 fee tier so hardware shields honor the dynamic-fee tiers too.
      */
-    pczt_shield_create(account_id: number): Promise<Pczt>;
+    pczt_shield_create(account_id: number, marginal_fee_zats: bigint): Promise<Pczt>;
     /**
      * Journal-aware sync: download + scan one batch, return journal data for persistence.
      * Returns null if fully synced, or Uint8Array with journal entry data.
@@ -730,8 +732,8 @@ export interface InitOutput {
     readonly webwallet_oneclick_pczt_transfer: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number) => number;
     readonly webwallet_oneclick_pczt_shield: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly webwallet_create_account_ufvk: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => number;
-    readonly webwallet_pczt_create: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number) => number;
-    readonly webwallet_pczt_shield_create: (a: number, b: number) => number;
+    readonly webwallet_pczt_create: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: bigint) => number;
+    readonly webwallet_pczt_shield_create: (a: number, b: number, c: bigint) => number;
     readonly webwallet_pczt_prove_and_send: (a: number, b: number) => number;
     readonly webwallet_oneclick_pczt_transfer_dynamic_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: bigint) => number;
     readonly webwallet_oneclick_pczt_shield_dynamic_fee: (a: number, b: number, c: number, d: number, e: number, f: bigint) => number;
@@ -782,11 +784,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_7551: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_7573: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3121: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_7542: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_3056: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_7548: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_7570: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3118: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_7539: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_3053: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

@@ -550,25 +550,41 @@ impl WebWallet {
     ///
     /// The returned PCZT carries ZIP-32 derivation metadata so an external signer
     /// (e.g. Keystone) can locate its keys. Serialize it with `Pczt.serialize()`
-    /// before transporting via QR.
+    /// before transporting via QR. `marginal_fee_zats` selects the ZIP-317 fee
+    /// tier so hardware sends honor the same dynamic-fee tiers as software sends.
     pub async fn pczt_create(
         &self,
         account_id: u32,
         to_address: String,
         value: u64,
         memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
     ) -> Result<WasmPczt, Error> {
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
         self.inner
-            .pczt_create(AccountId::from(account_id), to_address, value, memo)
+            .pczt_create_dynamic_fee(
+                AccountId::from(account_id),
+                to_address,
+                value,
+                memo,
+                marginal_fee_zats,
+            )
             .await
             .map(Into::into)
     }
 
     /// Create an unsigned, unproven shielding PCZT (transparent -> Orchard) for
-    /// external signing (hardware wallet flow).
-    pub async fn pczt_shield_create(&self, account_id: u32) -> Result<WasmPczt, Error> {
-        self.inner.pczt_shield(account_id.into()).await.map(Into::into)
+    /// external signing (hardware wallet flow). `marginal_fee_zats` selects the
+    /// ZIP-317 fee tier so hardware shields honor the dynamic-fee tiers too.
+    pub async fn pczt_shield_create(
+        &self,
+        account_id: u32,
+        marginal_fee_zats: u64,
+    ) -> Result<WasmPczt, Error> {
+        self.inner
+            .pczt_shield_dynamic_fee(account_id.into(), marginal_fee_zats)
+            .await
+            .map(Into::into)
     }
 
     /// Prove and broadcast an externally signed PCZT (hardware wallet flow).
