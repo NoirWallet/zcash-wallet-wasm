@@ -41,24 +41,54 @@ use zcash_client_backend::{
     proto::service::{self, compact_tx_streamer_client::CompactTxStreamerClient},
 };
 use zcash_primitives::transaction::TxId;
-use zcash_primitives::transaction::fees::FeeRule;
+use zcash_primitives::transaction::fees::{FeeRule, zip317 as prim_zip317};
 use zcash_proofs::prover::LocalTxProver;
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::ShieldedProtocol;
+use zcash_protocol::consensus::Parameters;
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
 
 use zcash_client_backend::data_api::chain::BlockCache;
 use zcash_client_memory::{MemBlockCache, MemoryWalletDb};
-use zcash_protocol::consensus::Parameters;
 
 const BATCH_SIZE: u32 = 10000;
 
 /// constant that signals what's the minimum transparent balance for proposing a
 /// shielding transaction
 const SHIELDING_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(100000);
+
+fn dynamic_zip317_fee_rule(marginal_fee_zats: u64) -> Result<prim_zip317::FeeRule, Error> {
+    if marginal_fee_zats == 0 {
+        return Err(Error::Generic(
+            "marginal_fee_zats must be greater than 0".to_string(),
+        ));
+    }
+
+    prim_zip317::FeeRule::non_standard(
+        Zatoshis::from_u64(marginal_fee_zats)?,
+        prim_zip317::GRACE_ACTIONS,
+        prim_zip317::P2PKH_STANDARD_INPUT_SIZE,
+        prim_zip317::P2PKH_STANDARD_OUTPUT_SIZE,
+    )
+    .ok_or_else(|| Error::Generic("Invalid ZIP-317 fee parameters".to_string()))
+}
+
+fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
+    proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
+) -> Result<u64, Error> {
+    let fee = proposal
+        .steps()
+        .iter()
+        .try_fold(Zatoshis::ZERO, |total, step| {
+            (total + step.balance().fee_required())
+                .ok_or(zcash_protocol::value::BalanceError::Overflow)
+        })?;
+
+    Ok(fee.into())
+}
 
 /// Global prover instance, initialized once on first use
 /// This avoids repeatedly loading the expensive Sapling parameters
@@ -1149,6 +1179,258 @@ where
         )
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {:?}", e)))?;
         Ok(pczt)
+    }
+
+    pub async fn pczt_shield_dynamic_fee(
+        &self,
+        account_id: AccountId,
+        marginal_fee_zats: u64,
+    ) -> Result<Pczt, Error> {
+        let change_strategy =
+            zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
+                dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                None,
+                ShieldedProtocol::Orchard,
+                DustOutputPolicy::default(),
+                SplitPolicy::with_min_output_value(
+                    NonZeroUsize::new(self.target_note_count)
+                        .ok_or(Error::FailedToCreateTransaction)?,
+                    Zatoshis::from_u64(self.min_split_output_value)?,
+                ),
+            );
+
+        let input_selector = GreedyInputSelector::new();
+        let mut db = self.db.write().await;
+
+        // Get all transparent receivers for this account to use as shielding sources
+        let max_height = match db.chain_height()? {
+            Some(max_height) => max_height,
+            None => {
+                return Err(Error::Generic(
+                    "Havent scanned yet, cant shield".to_string(),
+                ));
+            }
+        };
+
+        let transparent_balances = db.get_transparent_balances(
+            account_id,
+            (max_height + 1).into(),
+            self.confirmations_policy(),
+        )?;
+        let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
+
+        if from_addrs.is_empty() {
+            return Err(Error::Generic(
+                "No transparent addresses found for this account. Make sure the account has received funds to a transparent address.".to_string()
+            ));
+        }
+
+        tracing::info!(
+            "Shielding from {} transparent addresses with ZIP-317 marginal fee {} zats",
+            from_addrs.len(),
+            marginal_fee_zats,
+        );
+
+        let proposal = propose_shielding::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            &input_selector,
+            &change_strategy,
+            SHIELDING_THRESHOLD,
+            &from_addrs,
+            account_id,
+            self.confirmations_policy(),
+            TransparentOutputFilter::All,
+        )
+        .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
+
+        let pczt = create_pczt_from_proposal::<
+            _,
+            _,
+            <MemoryWalletDb<Network> as InputSource>::Error,
+            _,
+            <prim_zip317::FeeRule as FeeRule>::Error,
+            _,
+        >(
+            &mut *db,
+            &self.network,
+            account_id,
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
+
+        Ok(pczt)
+    }
+
+    pub async fn pczt_create_dynamic_fee(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<Pczt, Error> {
+        let change_strategy =
+            zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
+                dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                None,
+                ShieldedProtocol::Orchard,
+                DustOutputPolicy::default(),
+                SplitPolicy::with_min_output_value(
+                    NonZeroUsize::new(self.target_note_count)
+                        .ok_or(Error::FailedToCreateTransaction)?,
+                    Zatoshis::from_u64(self.min_split_output_value)?,
+                ),
+            );
+
+        let input_selector = GreedyInputSelector::new();
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let payment = Payment::new(
+            to_address,
+            Some(Zatoshis::from_u64(value)?),
+            memo,
+            None,
+            None,
+            vec![],
+        )
+        .map_err(|e| Error::Zip321(e.with_index(0)))?;
+        let request = TransactionRequest::new(vec![payment])?;
+        let mut db = self.db.write().await;
+        let proposal = propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &input_selector,
+            &change_strategy,
+            request,
+            self.confirmations_policy(),
+        )
+        .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {:?}", e)))?;
+        let pczt = create_pczt_from_proposal::<
+            _,
+            _,
+            <MemoryWalletDb<Network> as InputSource>::Error,
+            _,
+            <prim_zip317::FeeRule as FeeRule>::Error,
+            _,
+        >(
+            &mut *db,
+            &self.network,
+            account_id,
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {:?}", e)))?;
+        Ok(pczt)
+    }
+
+    pub async fn estimate_pczt_shield_fee(
+        &self,
+        account_id: AccountId,
+        marginal_fee_zats: u64,
+    ) -> Result<u64, Error> {
+        let change_strategy =
+            zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
+                dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                None,
+                ShieldedProtocol::Orchard,
+                DustOutputPolicy::default(),
+                SplitPolicy::with_min_output_value(
+                    NonZeroUsize::new(self.target_note_count)
+                        .ok_or(Error::FailedToCreateTransaction)?,
+                    Zatoshis::from_u64(self.min_split_output_value)?,
+                ),
+            );
+
+        let input_selector = GreedyInputSelector::new();
+        let mut db = self.db.write().await;
+
+        // Get all transparent receivers for this account to use as shielding sources.
+        let max_height = match db.chain_height()? {
+            Some(max_height) => max_height,
+            None => {
+                return Err(Error::Generic(
+                    "Havent scanned yet, cant shield".to_string(),
+                ));
+            }
+        };
+
+        let transparent_balances = db.get_transparent_balances(
+            account_id,
+            (max_height + 1).into(),
+            self.confirmations_policy(),
+        )?;
+        let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
+
+        if from_addrs.is_empty() {
+            return Err(Error::Generic(
+                "No transparent addresses found for this account. Make sure the account has received funds to a transparent address.".to_string()
+            ));
+        }
+
+        let proposal = propose_shielding::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            &input_selector,
+            &change_strategy,
+            SHIELDING_THRESHOLD,
+            &from_addrs,
+            account_id,
+            self.confirmations_policy(),
+            TransparentOutputFilter::All,
+        )
+        .map_err(|e| Error::Generic(format!("Error when estimating shielding fee: {:?}", e)))?;
+
+        proposal_fee_required_zats(&proposal)
+    }
+
+    pub async fn estimate_pczt_transfer_fee(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<u64, Error> {
+        let change_strategy =
+            zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
+                dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                None,
+                ShieldedProtocol::Orchard,
+                DustOutputPolicy::default(),
+                SplitPolicy::with_min_output_value(
+                    NonZeroUsize::new(self.target_note_count)
+                        .ok_or(Error::FailedToCreateTransaction)?,
+                    Zatoshis::from_u64(self.min_split_output_value)?,
+                ),
+            );
+
+        let input_selector = GreedyInputSelector::new();
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let payment = Payment::new(
+            to_address,
+            Some(Zatoshis::from_u64(value)?),
+            memo,
+            None,
+            None,
+            vec![],
+        )
+        .map_err(|e| Error::Zip321(e.with_index(0)))?;
+        let request = TransactionRequest::new(vec![payment])?;
+        let mut db = self.db.write().await;
+        let proposal = propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &input_selector,
+            &change_strategy,
+            request,
+            self.confirmations_policy(),
+        )
+        .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {:?}", e)))?;
+
+        proposal_fee_required_zats(&proposal)
     }
 
     pub async fn pczt_prove(

@@ -31,9 +31,9 @@ tonic-web-wasm-client = "0.8.0"
 tokio_with_wasm = { version = "0.7.1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 
 zcash_keys = { path = "./librustzcash/zcash_keys", features = ["transparent-inputs", "orchard", "sapling", "unstable"] }
-zcash_client_backend = { path = "./librustzcash/zcash_client_backend", default-features = false, features = ["sync", "lightwalletd-tonic", "orchard", "pczt", "wasm-bindgen"] }
+zcash_client_backend = { path = "./librustzcash/zcash_client_backend", default-features = false, features = ["sync", "lightwalletd-tonic", "orchard", "pczt", "wasm-bindgen", "non-standard-fees"] }
 zcash_client_memory = { path = "./librustzcash/zcash_client_memory", default-features = false, features = ["orchard", "transparent-inputs", "multicore"] }
-zcash_primitives = { path = "./librustzcash/zcash_primitives", default-features = false, features = ["std", "multicore"] }
+zcash_primitives = { path = "./librustzcash/zcash_primitives", default-features = false, features = ["std", "multicore", "non-standard-fees"] }
 zcash_address = { path = "./librustzcash/components/zcash_address" }
 zcash_proofs = { path = "./librustzcash/zcash_proofs", default-features = false, features = ["bundled-prover", "multicore"] }
 zcash_protocol = { path = "./librustzcash/components/zcash_protocol", default-features = false }
