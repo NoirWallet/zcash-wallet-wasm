@@ -24,8 +24,8 @@ use tonic::{
 use zcash_address::ZcashAddress;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::{
-    ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
-    propose_shielding, propose_transfer,
+    ConfirmationsPolicy, create_pczt_from_proposal, create_pczt_from_proposal_with_expiry_delta,
+    extract_and_store_transaction_from_pczt, propose_shielding, propose_transfer,
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, TransparentOutputFilter, WalletSummary,
@@ -74,6 +74,16 @@ fn dynamic_zip317_fee_rule(marginal_fee_zats: u64) -> Result<prim_zip317::FeeRul
         prim_zip317::P2PKH_STANDARD_OUTPUT_SIZE,
     )
     .ok_or_else(|| Error::Generic("Invalid ZIP-317 fee parameters".to_string()))
+}
+
+fn validate_expiry_delta_blocks(expiry_delta_blocks: u32) -> Result<u32, Error> {
+    if expiry_delta_blocks == 0 {
+        Err(Error::Generic(
+            "expiry_delta_blocks must be greater than 0".to_string(),
+        ))
+    } else {
+        Ok(expiry_delta_blocks)
+    }
 }
 
 fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
@@ -1186,6 +1196,27 @@ where
         account_id: AccountId,
         marginal_fee_zats: u64,
     ) -> Result<Pczt, Error> {
+        self.pczt_shield_dynamic_fee_impl(account_id, marginal_fee_zats, None)
+            .await
+    }
+
+    pub async fn pczt_shield_dynamic_fee_with_expiry_delta(
+        &self,
+        account_id: AccountId,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: u32,
+    ) -> Result<Pczt, Error> {
+        let expiry_delta_blocks = validate_expiry_delta_blocks(expiry_delta_blocks)?;
+        self.pczt_shield_dynamic_fee_impl(account_id, marginal_fee_zats, Some(expiry_delta_blocks))
+            .await
+    }
+
+    async fn pczt_shield_dynamic_fee_impl(
+        &self,
+        account_id: AccountId,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<Pczt, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
@@ -1244,20 +1275,37 @@ where
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
 
-        let pczt = create_pczt_from_proposal::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <prim_zip317::FeeRule as FeeRule>::Error,
-            _,
-        >(
-            &mut *db,
-            &self.network,
-            account_id,
-            OvkPolicy::Sender,
-            &proposal,
-        )
+        let pczt = match expiry_delta_blocks {
+            Some(expiry_delta_blocks) => create_pczt_from_proposal_with_expiry_delta::<
+                _,
+                _,
+                <MemoryWalletDb<Network> as InputSource>::Error,
+                _,
+                <prim_zip317::FeeRule as FeeRule>::Error,
+                _,
+            >(
+                &mut *db,
+                &self.network,
+                account_id,
+                OvkPolicy::Sender,
+                &proposal,
+                expiry_delta_blocks,
+            ),
+            None => create_pczt_from_proposal::<
+                _,
+                _,
+                <MemoryWalletDb<Network> as InputSource>::Error,
+                _,
+                <prim_zip317::FeeRule as FeeRule>::Error,
+                _,
+            >(
+                &mut *db,
+                &self.network,
+                account_id,
+                OvkPolicy::Sender,
+                &proposal,
+            ),
+        }
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
 
         Ok(pczt)
@@ -1270,6 +1318,47 @@ where
         value: u64,
         memo: Option<Vec<u8>>,
         marginal_fee_zats: u64,
+    ) -> Result<Pczt, Error> {
+        self.pczt_create_dynamic_fee_impl(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            None,
+        )
+        .await
+    }
+
+    pub async fn pczt_create_dynamic_fee_with_expiry_delta(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: u32,
+    ) -> Result<Pczt, Error> {
+        let expiry_delta_blocks = validate_expiry_delta_blocks(expiry_delta_blocks)?;
+        self.pczt_create_dynamic_fee_impl(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            Some(expiry_delta_blocks),
+        )
+        .await
+    }
+
+    async fn pczt_create_dynamic_fee_impl(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
     ) -> Result<Pczt, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
@@ -1307,20 +1396,37 @@ where
             self.confirmations_policy(),
         )
         .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {:?}", e)))?;
-        let pczt = create_pczt_from_proposal::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <prim_zip317::FeeRule as FeeRule>::Error,
-            _,
-        >(
-            &mut *db,
-            &self.network,
-            account_id,
-            OvkPolicy::Sender,
-            &proposal,
-        )
+        let pczt = match expiry_delta_blocks {
+            Some(expiry_delta_blocks) => create_pczt_from_proposal_with_expiry_delta::<
+                _,
+                _,
+                <MemoryWalletDb<Network> as InputSource>::Error,
+                _,
+                <prim_zip317::FeeRule as FeeRule>::Error,
+                _,
+            >(
+                &mut *db,
+                &self.network,
+                account_id,
+                OvkPolicy::Sender,
+                &proposal,
+                expiry_delta_blocks,
+            ),
+            None => create_pczt_from_proposal::<
+                _,
+                _,
+                <MemoryWalletDb<Network> as InputSource>::Error,
+                _,
+                <prim_zip317::FeeRule as FeeRule>::Error,
+                _,
+            >(
+                &mut *db,
+                &self.network,
+                account_id,
+                OvkPolicy::Sender,
+                &proposal,
+            ),
+        }
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {:?}", e)))?;
         Ok(pczt)
     }

@@ -1107,6 +1107,7 @@ fn build_proposed_transaction<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>
     account_id: <DbT as WalletRead>::AccountId,
     ovk_policy: OvkPolicy,
     min_target_height: TargetHeight,
+    expiry_height: Option<BlockHeight>,
     prior_step_results: &[(&Step<N>, StepResult<<DbT as WalletRead>::AccountId>)],
     proposal_step: &Step<N>,
     #[cfg(feature = "transparent-inputs")] unused_transparent_outputs: &mut HashMap<
@@ -1252,6 +1253,10 @@ where
             orchard_anchor,
         },
     );
+
+    if let Some(expiry_height) = expiry_height {
+        builder = builder.with_expiry_height(expiry_height);
+    }
 
     #[cfg(feature = "unstable")]
     if let Some(version) = proposed_version {
@@ -1714,6 +1719,7 @@ where
         account_id,
         ovk_policy,
         min_target_height,
+        None,
         prior_step_results,
         proposal_step,
         #[cfg(feature = "transparent-inputs")]
@@ -1910,6 +1916,66 @@ where
     FeeRuleT: FeeRule,
     DbT::AccountId: serde::Serialize,
 {
+    create_pczt_from_proposal_internal::<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
+        wallet_db, params, account_id, ovk_policy, proposal, None,
+    )
+}
+
+/// Constructs a PCZT from a proposal, overriding the default expiry delta.
+///
+/// `expiry_delta_blocks` is added to the proposal's minimum target height to produce the
+/// transaction expiry height.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[cfg(feature = "pczt")]
+pub fn create_pczt_from_proposal_with_expiry_delta<
+    DbT,
+    ParamsT,
+    InputsErrT,
+    FeeRuleT,
+    ChangeErrT,
+    N,
+>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    account_id: <DbT as WalletRead>::AccountId,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    expiry_delta_blocks: u32,
+) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+    DbT::AccountId: serde::Serialize,
+{
+    create_pczt_from_proposal_internal::<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
+        wallet_db,
+        params,
+        account_id,
+        ovk_policy,
+        proposal,
+        Some(expiry_delta_blocks),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[cfg(feature = "pczt")]
+fn create_pczt_from_proposal_internal<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    account_id: <DbT as WalletRead>::AccountId,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    expiry_delta_blocks: Option<u32>,
+) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+    DbT::AccountId: serde::Serialize,
+{
     use std::collections::HashSet;
 
     let account = wallet_db
@@ -1925,6 +1991,8 @@ where
     }
     let fee_rule = proposal.fee_rule();
     let min_target_height = proposal.min_target_height();
+    let expiry_height =
+        expiry_delta_blocks.map(|delta| BlockHeight::from(min_target_height) + delta);
     let prior_step_results = &[];
     let proposal_step = proposal.steps().first();
     let unused_transparent_outputs = &mut HashMap::new();
@@ -1936,6 +2004,7 @@ where
         account_id,
         ovk_policy,
         min_target_height,
+        expiry_height,
         prior_step_results,
         proposal_step,
         #[cfg(feature = "transparent-inputs")]

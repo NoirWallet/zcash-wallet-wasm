@@ -609,18 +609,34 @@ impl WebWallet {
         sapling_proof_gen_key: Option<ProofGenerationKey>,
         memo: Option<Vec<u8>>,
         marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
     ) -> Result<String, Error> {
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        let pczt = self
-            .inner
-            .pczt_create_dynamic_fee(
-                AccountId::from(account_id),
-                to_address,
-                value,
-                memo,
-                marginal_fee_zats,
-            )
-            .await?;
+        let pczt = match expiry_delta_blocks {
+            Some(expiry_delta_blocks) => {
+                self.inner
+                    .pczt_create_dynamic_fee_with_expiry_delta(
+                        AccountId::from(account_id),
+                        to_address,
+                        value,
+                        memo,
+                        marginal_fee_zats,
+                        expiry_delta_blocks,
+                    )
+                    .await?
+            }
+            None => {
+                self.inner
+                    .pczt_create_dynamic_fee(
+                        AccountId::from(account_id),
+                        to_address,
+                        value,
+                        memo,
+                        marginal_fee_zats,
+                    )
+                    .await?
+            }
+        };
 
         self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
             .await
@@ -633,11 +649,24 @@ impl WebWallet {
         seed_fp: SeedFingerprint,
         sapling_proof_gen_key: Option<ProofGenerationKey>,
         marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
     ) -> Result<String, Error> {
-        let pczt = self
-            .inner
-            .pczt_shield_dynamic_fee(account_id.into(), marginal_fee_zats)
-            .await?;
+        let pczt = match expiry_delta_blocks {
+            Some(expiry_delta_blocks) => {
+                self.inner
+                    .pczt_shield_dynamic_fee_with_expiry_delta(
+                        account_id.into(),
+                        marginal_fee_zats,
+                        expiry_delta_blocks,
+                    )
+                    .await?
+            }
+            None => {
+                self.inner
+                    .pczt_shield_dynamic_fee(account_id.into(), marginal_fee_zats)
+                    .await?
+            }
+        };
 
         self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
             .await

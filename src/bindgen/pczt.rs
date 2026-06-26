@@ -58,9 +58,7 @@ impl Pczt {
     /// [`combine`]: Pczt::combine
     pub fn redact_for_signer(&self) -> Pczt {
         let redacted = Redactor::new(self.0.clone())
-            .redact_global_with(|mut r| {
-                r.redact_proprietary("zcash_client_backend:proposal_info")
-            })
+            .redact_global_with(|mut r| r.redact_proprietary("zcash_client_backend:proposal_info"))
             .redact_orchard_with(|mut r| {
                 r.redact_actions(|mut ar| {
                     ar.clear_spend_witness();
