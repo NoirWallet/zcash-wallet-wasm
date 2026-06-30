@@ -450,6 +450,22 @@ where
         .map_err(Into::into)
     }
 
+    pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error> {
+        let mut client = self.client.clone();
+        let db_cache = MemBlockCache::new();
+
+        let mut db = self.db.write().await;
+        zcash_client_backend::sync::run_next_batch_optimized(
+            &mut client,
+            &self.network.clone(),
+            &db_cache,
+            &mut *db,
+            batch_size.unwrap_or(BATCH_SIZE),
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     /// Execute a full journal-aware sync cycle:
     /// 1) Prepare (download from network, return journal data)
     /// 2) JS persists the journal data

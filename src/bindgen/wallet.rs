@@ -118,6 +118,24 @@ impl WebWallet {
         Ok(processed_batch)
     }
 
+    /// Runs a single batch using the optimized scanning strategy.
+    /// Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
+    pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error> {
+        let start_time = js_sys::Date::now();
+
+        let processed_batch = self.inner.sync_next_batch_optimized(batch_size).await?;
+
+        let end_time = js_sys::Date::now();
+        let elapsed_seconds = (end_time - start_time) / 1000.0;
+        tracing::info!(
+            "⏱️ Optimized sync next batch completed in {:.2} seconds, processed_batch: {}",
+            elapsed_seconds,
+            processed_batch
+        );
+
+        Ok(processed_batch)
+    }
+
     pub async fn get_wallet_summary(&self) -> Result<Option<WalletSummary>, Error> {
         self.inner
             .get_wallet_summary()

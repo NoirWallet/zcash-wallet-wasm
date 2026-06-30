@@ -425,6 +425,11 @@ export class WebWallet {
      * Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
      */
     sync_next_batch(batch_size?: number | null): Promise<boolean>;
+    /**
+     * Runs a single batch using the optimized scanning strategy.
+     * Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
+     */
+    sync_next_batch_optimized(batch_size?: number | null): Promise<boolean>;
 }
 
 /**
@@ -713,6 +718,7 @@ export interface InitOutput {
     readonly webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
     readonly webwallet_sync: (a: number) => number;
     readonly webwallet_sync_next_batch: (a: number, b: number) => number;
+    readonly webwallet_sync_next_batch_optimized: (a: number, b: number) => number;
     readonly webwallet_get_wallet_summary: (a: number) => number;
     readonly webwallet_get_account_birthday: (a: number, b: number) => number;
     readonly webwallet_get_block_time: (a: number, b: number) => number;
@@ -784,11 +790,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_7554: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_7568: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3124: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_7543: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_3059: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_7570: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_7592: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3140: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_7561: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_3075: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
