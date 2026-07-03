@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Journal Sync A/B Benchmark</title>
+  <style>
+    body { font-family: ui-monospace, monospace; background: #12121c; color: #e6e6e6; padding: 24px; }
+    h1 { color: #00f7a5; font-size: 18px; }
+    .row { margin: 8px 0; }
+    label { display: inline-block; min-width: 140px; color: #9aa; }
+    input { background: #202029; color: #e6e6e6; border: 1px solid #333; padding: 4px 8px; width: 280px; }
+    button { background: #00f7a5; color: #062; border: 0; padding: 8px 16px; font-weight: 700; cursor: pointer; border-radius: 6px; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    pre { background: #0c0c14; border: 1px solid #222; padding: 16px; white-space: pre-wrap; line-height: 1.5; max-height: 360px; overflow: auto; }
+    .ok { color: #00f7a5; } .warn { color: #ffc201; } .err { color: #ff4444; }
+    table { border-collapse: collapse; margin-top: 12px; }
+    td, th { border: 1px solid #333; padding: 6px 14px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>Zcash Journal Sync A/B — prepare_sync_batch vs optimized (WASM in Worker)</h1>
+  <div class="row"><label>Network</label><input id="network" value="main" /></div>
+  <div class="row"><label>Lightwalletd URL</label><input id="url" value="https://zcash-mainnet.chainsafe.dev" /></div>
+  <div class="row"><label>Batch size</label><input id="batch" value="1000" /></div>
+  <div class="row"><label>Threads</label><input id="threads" value="" placeholder="default: hardwareConcurrency" /></div>
+  <div class="row"><label>Accounts</label><input id="accounts" value="1" /></div>
+  <div class="row"><label>Trials/range</label><input id="trials" value="1" /></div>
+  <div class="row"><label>Range set</label><input id="set" value="partial" placeholder="partial=1mo,3mo,6mo | full=+1yr,2yr" /></div>
+  <div class="row"><button id="run">Run benchmark</button></div>
+  <div id="report"></div>
+  <pre id="out">Ready. Click "Run benchmark".</pre>
+
+  <script>
+    const BLOCKS_PER_DAY = 1152 // ~75s block time
+    const RANGE_DEFS = {
+      '1mo': 30 * BLOCKS_PER_DAY,
+      '3mo': 90 * BLOCKS_PER_DAY,
+      '6mo': 180 * BLOCKS_PER_DAY,
+      '1yr': 365 * BLOCKS_PER_DAY,
+      '2yr': 730 * BLOCKS_PER_DAY
+    }
+    const SETS = {
+      partial: ['1mo', '3mo', '6mo'],
+      full: ['1mo', '3mo', '6mo', '1yr', '2yr']
+    }
+
+    const out = document.getElementById('out')
+    const reportEl = document.getElementById('report')
+    const runBtn = document.getElementById('run')
+    const log = (msg, cls) => {
+      out.innerHTML += '\n' + (cls ? `<span class="${cls}">${msg}</span>` : msg)
+      out.scrollTop = out.scrollHeight
+      console.log('[bench]', String(msg).replace(/<[^>]+>/g, ''))
+    }
+
+    const rows = []
+    function renderReport(tip) {
+      let html = `<table>
+<tr><th>Range</th><th>Blocks</th><th>Baseline (s)</th><th>Optimized (s)</th><th>Speedup</th><th>Saved %</th><th>Base bps</th><th>Opt bps</th></tr>`
+      for (const r of rows) {
+        const cls = r.savedPct > 1 ? 'ok' : (r.savedPct < -1 ? 'err' : 'warn')
+        html += `\n<tr><td>${r.label}</td><td>${r.rangeBlocks.toLocaleString()}</td><td>${r.baseMedianS}</td><td>${r.optMedianS}</td><td>${r.speedup.toFixed(3)}×</td><td class="${cls}">${r.savedPct.toFixed(2)}</td><td>${r.baselineBps}</td><td>${r.optimizedBps}</td></tr>`
+      }
+      html += `\n</table>`
+      reportEl.innerHTML = (tip ? `<div class="row">tip ${tip}</div>` : '') + html
+    }
+
+    function run() {
+      runBtn.disabled = true
+      out.innerHTML = ''
+      reportEl.innerHTML = ''
+      rows.length = 0
+      window.__benchDone = false
+      window.__benchReport = null
+      window.__benchError = null
+      window.__benchRows = rows
+
+      const network = document.getElementById('network').value.trim()
+      const url = document.getElementById('url').value.trim()
+      const batchSize = parseInt(document.getElementById('batch').value, 10)
+      const tval = document.getElementById('threads').value
+      const threads = tval ? parseInt(tval, 10) : (navigator.hardwareConcurrency || 4)
+      const accounts = parseInt(document.getElementById('accounts').value, 10) || 1
+      const trials = parseInt(document.getElementById('trials').value, 10) || 1
+      const setName = document.getElementById('set').value.trim() || 'partial'
+      const q2 = new URLSearchParams(location.search)
+      const explicit = q2.get('ranges')
+      const keys = explicit ? explicit.split(',').filter((k) => RANGE_DEFS[k]) : (SETS[setName] || SETS.partial)
+      const ranges = keys.map((k) => ({ label: k, blocks: RANGE_DEFS[k] }))
+
+      log(`Network: ${network}  URL: ${url}`)
+      log(`Batch: ${batchSize}  Threads: ${threads}  Accounts: ${accounts}  Trials: ${trials}`)
+      log(`Ranges: ${keys.join(', ')}`)
+
+      const worker = new Worker('./bench_worker.js', { type: 'module' })
+      worker.onmessage = (e) => {
+        const d = e.data
+        if (d.type === 'console') {
+          window.__wlogs = window.__wlogs || []
+          window.__wlogs.push(`${d.level}: ${d.msg}`)
+          if (window.__wlogs.length > 400) window.__wlogs.shift()
+          if (d.level === 'error') log('  wasm: ' + d.msg, 'err')
+        }
+        else if (d.type === 'log') log(d.msg, 'warn')
+        else if (d.type === 'progress') {
+          log(`  [${d.variant}] batch ${d.batches} (+${d.batchMs}ms) elapsed ${d.elapsedS}s`)
+        } else if (d.type === 'rangeResult') {
+          rows.push(d.result)
+          renderReport()
+          log(`\n${d.result.label}: baseline ${d.result.baseMedianS}s  optimized ${d.result.optMedianS}s  speedup ${d.result.speedup.toFixed(3)}×  saved ${d.result.savedPct.toFixed(2)}%`,
+            d.result.savedPct > 1 ? 'ok' : (d.result.savedPct < -1 ? 'err' : 'warn'))
+        } else if (d.type === 'report') {
+          window.__benchReport = d
+          window.__benchDone = true
+          renderReport(d.tip)
+          log(`\nAll ranges complete.`, 'ok')
+          runBtn.disabled = false
+        } else if (d.type === 'error') {
+          window.__benchError = d.msg
+          window.__benchDone = true
+          log('ERROR: ' + d.msg, 'err')
+          if (d.stack) log(d.stack, 'err')
+          runBtn.disabled = false
+        }
+      }
+      worker.onerror = (err) => {
+        window.__benchError = err.message
+        window.__benchDone = true
+        log('WORKER ERROR: ' + err.message, 'err')
+        runBtn.disabled = false
+      }
+      worker.postMessage({ network, url, ranges, batchSize, threads, accounts, trials })
+    }
+
+    runBtn.addEventListener('click', run)
+
+    const q = new URLSearchParams(location.search)
+    if (q.get('batch')) document.getElementById('batch').value = q.get('batch')
+    if (q.get('threads')) document.getElementById('threads').value = q.get('threads')
+    if (q.get('accounts')) document.getElementById('accounts').value = q.get('accounts')
+    if (q.get('trials')) document.getElementById('trials').value = q.get('trials')
+    if (q.get('set')) document.getElementById('set').value = q.get('set')
+    if (q.get('net')) {
+      document.getElementById('network').value = q.get('net')
+      document.getElementById('url').value =
+        q.get('net') === 'test' ? 'https://zcash-testnet.chainsafe.dev' : 'https://zcash-mainnet.chainsafe.dev'
+    }
+    if (q.get('url')) document.getElementById('url').value = decodeURIComponent(q.get('url'))
+    if (q.get('auto') === '1') run()
+  </script>
+</body>
+</html>
