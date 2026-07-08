@@ -334,14 +334,13 @@ where
             .iter()
             .enumerate()
             .map(|(i, action)| {
-                let action = CompactAction::try_from(action).map_err(|_| {
-                    ScanError::EncodingInvalid {
+                let action =
+                    CompactAction::try_from(action).map_err(|_| ScanError::EncodingInvalid {
                         at_height: cur_height,
                         txid,
                         pool_type: ShieldedProtocol::Orchard,
                         index: i,
-                    }
-                })?;
+                    })?;
                 Ok((OrchardDomain::for_compact_action(&action), action))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -408,14 +407,13 @@ where
                     None::<
                         fn(
                             zcash_primitives::transaction::TxId,
-                        ) -> HashMap<usize, DecryptedOutput<IvkTag, SaplingDomain, ()>>,
+                        )
+                            -> HashMap<usize, DecryptedOutput<IvkTag, SaplingDomain, ()>>,
                     >,
                     |ivks, outputs| {
                         batch::try_compact_note_decryption(ivks, outputs)
                             .into_iter()
-                            .map(|opt| {
-                                opt.map(|((note, recipient), i)| ((note, recipient, ()), i))
-                            })
+                            .map(|opt| opt.map(|((note, recipient), i)| ((note, recipient, ()), i)))
                             .collect()
                     },
                     |output| sapling::Node::from_cmu(&output.cmu),
@@ -445,14 +443,13 @@ where
                     None::<
                         fn(
                             zcash_primitives::transaction::TxId,
-                        ) -> HashMap<usize, DecryptedOutput<IvkTag, OrchardDomain, ()>>,
+                        )
+                            -> HashMap<usize, DecryptedOutput<IvkTag, OrchardDomain, ()>>,
                     >,
                     |ivks, outputs| {
                         batch::try_compact_note_decryption(ivks, outputs)
                             .into_iter()
-                            .map(|opt| {
-                                opt.map(|((note, recipient), i)| ((note, recipient, ()), i))
-                            })
+                            .map(|opt| opt.map(|((note, recipient), i)| ((note, recipient, ()), i)))
                             .collect()
                     },
                     |output| MerkleHashOrchard::from_cmx(&output.cmx()),

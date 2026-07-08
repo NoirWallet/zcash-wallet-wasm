@@ -322,8 +322,10 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .or(sapling_scan_progress)
             .or(orchard_scan_progress);
 
-        // TODO: This won't work
-        let scan_progress = Progress::new(scan_progress.unwrap(), Some(Ratio::new(0, 0)));
+        let scan_progress = Progress::new(
+            scan_progress.unwrap_or_else(|| Ratio::new(0, 1)),
+            Some(Ratio::new(0, 0)),
+        );
 
         let summary = WalletSummary::new(
             account_balances,

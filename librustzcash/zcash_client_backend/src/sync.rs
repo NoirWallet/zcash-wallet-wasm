@@ -286,7 +286,8 @@ where
                 let chain_state =
                     download_chain_state(client, scan_range.block_range().start - 1).await?;
                 let scan_ranges_updated =
-                    scan_blocks_optimized(params, db_cache, db_data, &chain_state, scan_range).await?;
+                    scan_blocks_optimized(params, db_cache, db_data, &chain_state, scan_range)
+                        .await?;
                 db_cache
                     .delete(scan_range.clone())
                     .await
