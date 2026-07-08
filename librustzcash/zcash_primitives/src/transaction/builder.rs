@@ -369,6 +369,17 @@ impl<P, U> Builder<'_, P, U> {
         self.target_height
     }
 
+    /// Returns the expiry height of the transaction under construction.
+    pub fn expiry_height(&self) -> BlockHeight {
+        self.expiry_height
+    }
+
+    /// Overrides the expiry height of the transaction under construction.
+    pub fn with_expiry_height(mut self, expiry_height: BlockHeight) -> Self {
+        self.expiry_height = expiry_height;
+        self
+    }
+
     /// Returns the set of transparent inputs currently committed to be consumed
     /// by the transaction.
     #[cfg(feature = "transparent-inputs")]

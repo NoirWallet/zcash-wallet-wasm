@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use crate::bindgen::sign::pczt_sign_inner;
-use crate::bindgen::{ProofGenerationKey, SeedFingerprint};
+use crate::bindgen::{Pczt as WasmPczt, ProofGenerationKey, SeedFingerprint};
 use crate::{Error, Network, PRUNING_DEPTH, Wallet};
 
 use nonempty::NonEmpty;
@@ -508,6 +508,96 @@ impl WebWallet {
             .await
     }
 
+    /// Import a watch-only spending account from an encoded UFVK (hardware wallet flow).
+    ///
+    /// # Arguments
+    /// * `account_name` - Display name for the account
+    /// * `ufvk` - The encoded Unified Full Viewing Key exported by the device
+    /// * `seed_fingerprint` - 32-byte ZIP-32 seed fingerprint exported by the device
+    /// * `account_hd_index` - ZIP-32 account index on the device
+    /// * `birthday_height` - Block height to start scanning from
+    /// * `key_source` - Optional tag describing the key origin (e.g. "keystone")
+    ///
+    /// # Returns
+    /// The new account id
+    pub async fn create_account_ufvk(
+        &self,
+        account_name: &str,
+        ufvk: &str,
+        seed_fingerprint: &[u8],
+        account_hd_index: u32,
+        birthday_height: Option<u32>,
+        key_source: Option<String>,
+    ) -> Result<u32, Error> {
+        let seed_fp: [u8; 32] = seed_fingerprint
+            .try_into()
+            .map_err(|_| Error::SeedFingerprint)?;
+
+        self.inner
+            .create_account_ufvk(
+                account_name,
+                ufvk,
+                seed_fp,
+                account_hd_index,
+                birthday_height,
+                key_source.as_deref(),
+            )
+            .await
+            .map(|id| *id)
+    }
+
+    /// Create an unsigned, unproven PCZT for a transfer (hardware wallet flow).
+    ///
+    /// The returned PCZT carries ZIP-32 derivation metadata so an external signer
+    /// (e.g. Keystone) can locate its keys. Serialize it with `Pczt.serialize()`
+    /// before transporting via QR. `marginal_fee_zats` selects the ZIP-317 fee
+    /// tier so hardware sends honor the same dynamic-fee tiers as software sends.
+    pub async fn pczt_create(
+        &self,
+        account_id: u32,
+        to_address: String,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<WasmPczt, Error> {
+        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+        self.inner
+            .pczt_create_dynamic_fee(
+                AccountId::from(account_id),
+                to_address,
+                value,
+                memo,
+                marginal_fee_zats,
+            )
+            .await
+            .map(Into::into)
+    }
+
+    /// Create an unsigned, unproven shielding PCZT (transparent -> Orchard) for
+    /// external signing (hardware wallet flow). `marginal_fee_zats` selects the
+    /// ZIP-317 fee tier so hardware shields honor the dynamic-fee tiers too.
+    pub async fn pczt_shield_create(
+        &self,
+        account_id: u32,
+        marginal_fee_zats: u64,
+    ) -> Result<WasmPczt, Error> {
+        self.inner
+            .pczt_shield_dynamic_fee(account_id.into(), marginal_fee_zats)
+            .await
+            .map(Into::into)
+    }
+
+    /// Prove and broadcast an externally signed PCZT (hardware wallet flow).
+    ///
+    /// Hardware-wallet accounts never hold Sapling notes (Keystone supports
+    /// transparent + Orchard only), so no Sapling proof generation key is needed.
+    ///
+    /// # Returns
+    /// Transaction ID string on success
+    pub async fn pczt_prove_and_send(&self, pczt: WasmPczt) -> Result<String, Error> {
+        self.inner.pczt_prove_and_send(pczt.into(), None).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn oneclick_pczt_transfer_dynamic_fee(
         &self,
@@ -519,18 +609,34 @@ impl WebWallet {
         sapling_proof_gen_key: Option<ProofGenerationKey>,
         memo: Option<Vec<u8>>,
         marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
     ) -> Result<String, Error> {
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        let pczt = self
-            .inner
-            .pczt_create_dynamic_fee(
-                AccountId::from(account_id),
-                to_address,
-                value,
-                memo,
-                marginal_fee_zats,
-            )
-            .await?;
+        let pczt = match expiry_delta_blocks {
+            Some(expiry_delta_blocks) => {
+                self.inner
+                    .pczt_create_dynamic_fee_with_expiry_delta(
+                        AccountId::from(account_id),
+                        to_address,
+                        value,
+                        memo,
+                        marginal_fee_zats,
+                        expiry_delta_blocks,
+                    )
+                    .await?
+            }
+            None => {
+                self.inner
+                    .pczt_create_dynamic_fee(
+                        AccountId::from(account_id),
+                        to_address,
+                        value,
+                        memo,
+                        marginal_fee_zats,
+                    )
+                    .await?
+            }
+        };
 
         self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
             .await
@@ -543,11 +649,24 @@ impl WebWallet {
         seed_fp: SeedFingerprint,
         sapling_proof_gen_key: Option<ProofGenerationKey>,
         marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
     ) -> Result<String, Error> {
-        let pczt = self
-            .inner
-            .pczt_shield_dynamic_fee(account_id.into(), marginal_fee_zats)
-            .await?;
+        let pczt = match expiry_delta_blocks {
+            Some(expiry_delta_blocks) => {
+                self.inner
+                    .pczt_shield_dynamic_fee_with_expiry_delta(
+                        account_id.into(),
+                        marginal_fee_zats,
+                        expiry_delta_blocks,
+                    )
+                    .await?
+            }
+            None => {
+                self.inner
+                    .pczt_shield_dynamic_fee(account_id.into(), marginal_fee_zats)
+                    .await?
+            }
+        };
 
         self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
             .await

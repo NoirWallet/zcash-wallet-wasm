@@ -62,6 +62,15 @@ export class Pczt {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Combines this PCZT with another representing the same transaction.
+     *
+     * Used after external signing: `self` is the full PCZT kept by the wallet
+     * (with witnesses) and `other` is the redacted PCZT returned by the signer
+     * (with signatures). The result carries both, ready for proving and
+     * extraction.
+     */
+    combine(other: Pczt): Pczt;
+    /**
      * Deserialize to a Pczt from postcard bytes.
      */
     static from_bytes(bytes: Uint8Array): Pczt;
@@ -69,6 +78,21 @@ export class Pczt {
      * Returns a Pczt from a JSON object
      */
     static from_json(s: any): Pczt;
+    /**
+     * Strips prover-only data so the PCZT is small enough to transport to an
+     * external signer (e.g. Keystone) as an animated QR.
+     *
+     * Mirrors the "redact for signer" role used by Zashi: removes spend
+     * witnesses (the per-note Merkle authentication paths that dominate the
+     * serialized size) and the `zcash_client_backend` proprietary metadata.
+     * The signer only needs the spend randomizers, values and derivation
+     * paths, so the redacted PCZT still produces valid signatures. The
+     * original (full) PCZT must be retained and merged back with [`combine`]
+     * after signing to restore the witnesses required for proving.
+     *
+     * [`combine`]: Pczt::combine
+     */
+    redact_for_signer(): Pczt;
     /**
      * Returns the postcard serialization of the Pczt.
      */
@@ -167,6 +191,21 @@ export class WebWallet {
     free(): void;
     [Symbol.dispose](): void;
     create_account(account_name: string, seed_phrase: string, account_hd_index: number, birthday_height?: number | null, passphrase?: string | null): Promise<number>;
+    /**
+     * Import a watch-only spending account from an encoded UFVK (hardware wallet flow).
+     *
+     * # Arguments
+     * * `account_name` - Display name for the account
+     * * `ufvk` - The encoded Unified Full Viewing Key exported by the device
+     * * `seed_fingerprint` - 32-byte ZIP-32 seed fingerprint exported by the device
+     * * `account_hd_index` - ZIP-32 account index on the device
+     * * `birthday_height` - Block height to start scanning from
+     * * `key_source` - Optional tag describing the key origin (e.g. "keystone")
+     *
+     * # Returns
+     * The new account id
+     */
+    create_account_ufvk(account_name: string, ufvk: string, seed_fingerprint: Uint8Array, account_hd_index: number, birthday_height?: number | null, key_source?: string | null): Promise<number>;
     db_to_bytes(): Promise<Uint8Array>;
     db_to_bytes_chunked(callback: Function): Promise<void>;
     estimate_pczt_shield_fee(account_id: number, marginal_fee_zats: bigint): Promise<bigint>;
@@ -337,9 +376,34 @@ export class WebWallet {
     get_wallet_summary(): Promise<WalletSummary | undefined>;
     constructor(network: string, lightwalletd_url: string, db_bytes?: Uint8Array | null);
     oneclick_pczt_shield(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null): Promise<string>;
-    oneclick_pczt_shield_dynamic_fee(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, marginal_fee_zats: bigint): Promise<string>;
+    oneclick_pczt_shield_dynamic_fee(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, marginal_fee_zats: bigint, expiry_delta_blocks?: number | null): Promise<string>;
     oneclick_pczt_transfer(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null, memo?: Uint8Array | null): Promise<string>;
-    oneclick_pczt_transfer_dynamic_fee(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<string>;
+    oneclick_pczt_transfer_dynamic_fee(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint, expiry_delta_blocks?: number | null): Promise<string>;
+    /**
+     * Create an unsigned, unproven PCZT for a transfer (hardware wallet flow).
+     *
+     * The returned PCZT carries ZIP-32 derivation metadata so an external signer
+     * (e.g. Keystone) can locate its keys. Serialize it with `Pczt.serialize()`
+     * before transporting via QR. `marginal_fee_zats` selects the ZIP-317 fee
+     * tier so hardware sends honor the same dynamic-fee tiers as software sends.
+     */
+    pczt_create(account_id: number, to_address: string, value: bigint, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<Pczt>;
+    /**
+     * Prove and broadcast an externally signed PCZT (hardware wallet flow).
+     *
+     * Hardware-wallet accounts never hold Sapling notes (Keystone supports
+     * transparent + Orchard only), so no Sapling proof generation key is needed.
+     *
+     * # Returns
+     * Transaction ID string on success
+     */
+    pczt_prove_and_send(pczt: Pczt): Promise<string>;
+    /**
+     * Create an unsigned, unproven shielding PCZT (transparent -> Orchard) for
+     * external signing (hardware wallet flow). `marginal_fee_zats` selects the
+     * ZIP-317 fee tier so hardware shields honor the dynamic-fee tiers too.
+     */
+    pczt_shield_create(account_id: number, marginal_fee_zats: bigint): Promise<Pczt>;
     /**
      * Journal-aware sync: download + scan one batch, return journal data for persistence.
      * Returns null if fully synced, or Uint8Array with journal entry data.
@@ -625,6 +689,8 @@ export interface InitOutput {
     readonly pczt_from_json: (a: number, b: number) => void;
     readonly pczt_serialize: (a: number, b: number) => void;
     readonly pczt_from_bytes: (a: number, b: number, c: number) => void;
+    readonly pczt_redact_for_signer: (a: number) => number;
+    readonly pczt_combine: (a: number, b: number, c: number) => void;
     readonly __wbg_transactionrequest_free: (a: number, b: number) => void;
     readonly transactionrequest_new: (a: number, b: number, c: number) => void;
     readonly transactionrequest_empty: () => number;
@@ -665,8 +731,12 @@ export interface InitOutput {
     readonly webwallet_get_next_shielded_address: (a: number, b: number) => number;
     readonly webwallet_oneclick_pczt_transfer: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number) => number;
     readonly webwallet_oneclick_pczt_shield: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly webwallet_oneclick_pczt_transfer_dynamic_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: bigint) => number;
-    readonly webwallet_oneclick_pczt_shield_dynamic_fee: (a: number, b: number, c: number, d: number, e: number, f: bigint) => number;
+    readonly webwallet_create_account_ufvk: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => number;
+    readonly webwallet_pczt_create: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: bigint) => number;
+    readonly webwallet_pczt_shield_create: (a: number, b: number, c: bigint) => number;
+    readonly webwallet_pczt_prove_and_send: (a: number, b: number) => number;
+    readonly webwallet_oneclick_pczt_transfer_dynamic_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: bigint, l: number) => number;
+    readonly webwallet_oneclick_pczt_shield_dynamic_fee: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number) => number;
     readonly webwallet_estimate_pczt_transfer_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: bigint) => number;
     readonly webwallet_estimate_pczt_shield_fee: (a: number, b: number, c: bigint) => number;
     readonly webwallet_get_latest_block: (a: number) => number;
@@ -714,11 +784,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_7465: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_7479: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3068: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_7454: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_3003: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_7554: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_7568: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3124: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_7543: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_3059: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

@@ -24,8 +24,8 @@ use tonic::{
 use zcash_address::ZcashAddress;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::{
-    ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
-    propose_shielding, propose_transfer,
+    ConfirmationsPolicy, create_pczt_from_proposal, create_pczt_from_proposal_with_expiry_delta,
+    extract_and_store_transaction_from_pczt, propose_shielding, propose_transfer,
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, TransparentOutputFilter, WalletSummary,
@@ -74,6 +74,16 @@ fn dynamic_zip317_fee_rule(marginal_fee_zats: u64) -> Result<prim_zip317::FeeRul
         prim_zip317::P2PKH_STANDARD_OUTPUT_SIZE,
     )
     .ok_or_else(|| Error::Generic("Invalid ZIP-317 fee parameters".to_string()))
+}
+
+fn validate_expiry_delta_blocks(expiry_delta_blocks: u32) -> Result<u32, Error> {
+    if expiry_delta_blocks == 0 {
+        Err(Error::Generic(
+            "expiry_delta_blocks must be greater than 0".to_string(),
+        ))
+    } else {
+        Ok(expiry_delta_blocks)
+    }
 }
 
 fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
@@ -257,6 +267,62 @@ where
             key_source,
         )
         .await
+    }
+
+    /// Import a watch-only spending account from an encoded UFVK (hardware wallet flow).
+    ///
+    /// The ZIP-32 seed fingerprint and HD index exported by the device (e.g. Keystone
+    /// `zcash-accounts` QR) are recorded as the account derivation so that PCZTs created
+    /// from this account carry the metadata the device needs to locate its signing keys.
+    ///
+    /// This is a thin wrapper around the audited `import_account_ufvk`; it adds no new
+    /// import logic.
+    pub async fn create_account_ufvk(
+        &self,
+        account_name: &str,
+        ufvk_encoded: &str,
+        seed_fingerprint: [u8; 32],
+        account_hd_index: u32,
+        birthday_height: Option<u32>,
+        key_source: Option<&str>,
+    ) -> Result<AccountId, Error> {
+        let ufvk = UnifiedFullViewingKey::decode(&self.network, ufvk_encoded)
+            .map_err(Error::KeyDecoding)?;
+
+        let derivation = Zip32Derivation::new(
+            SeedFingerprint::from_bytes(seed_fingerprint),
+            zip32::AccountId::try_from(account_hd_index)?,
+        );
+
+        tracing::info!("Importing UFVK account (hd_index: {})", account_hd_index);
+
+        self.import_account_ufvk(
+            account_name,
+            &ufvk,
+            birthday_height,
+            AccountPurpose::Spending {
+                derivation: Some(derivation),
+            },
+            key_source,
+        )
+        .await
+    }
+
+    /// Prove and broadcast an externally signed PCZT (hardware wallet flow).
+    ///
+    /// The PCZT must already contain all required signatures (e.g. added by a Keystone
+    /// device). Proof generation runs locally; `sapling_proof_gen_key` is only needed
+    /// when the PCZT spends Sapling notes, which never happens for hardware-wallet
+    /// accounts (Keystone supports transparent + Orchard only).
+    ///
+    /// This composes the audited `pczt_prove` and `pczt_send` without modification.
+    pub async fn pczt_prove_and_send(
+        &self,
+        pczt: Pczt,
+        sapling_proof_gen_key: Option<ProofGenerationKey>,
+    ) -> Result<String, Error> {
+        let proved = self.pczt_prove(pczt, sapling_proof_gen_key).await?;
+        self.pczt_send(proved).await
     }
 
     async fn import_account_ufvk(
@@ -1130,6 +1196,27 @@ where
         account_id: AccountId,
         marginal_fee_zats: u64,
     ) -> Result<Pczt, Error> {
+        self.pczt_shield_dynamic_fee_impl(account_id, marginal_fee_zats, None)
+            .await
+    }
+
+    pub async fn pczt_shield_dynamic_fee_with_expiry_delta(
+        &self,
+        account_id: AccountId,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: u32,
+    ) -> Result<Pczt, Error> {
+        let expiry_delta_blocks = validate_expiry_delta_blocks(expiry_delta_blocks)?;
+        self.pczt_shield_dynamic_fee_impl(account_id, marginal_fee_zats, Some(expiry_delta_blocks))
+            .await
+    }
+
+    async fn pczt_shield_dynamic_fee_impl(
+        &self,
+        account_id: AccountId,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<Pczt, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
@@ -1188,20 +1275,37 @@ where
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
 
-        let pczt = create_pczt_from_proposal::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <prim_zip317::FeeRule as FeeRule>::Error,
-            _,
-        >(
-            &mut *db,
-            &self.network,
-            account_id,
-            OvkPolicy::Sender,
-            &proposal,
-        )
+        let pczt = match expiry_delta_blocks {
+            Some(expiry_delta_blocks) => create_pczt_from_proposal_with_expiry_delta::<
+                _,
+                _,
+                <MemoryWalletDb<Network> as InputSource>::Error,
+                _,
+                <prim_zip317::FeeRule as FeeRule>::Error,
+                _,
+            >(
+                &mut *db,
+                &self.network,
+                account_id,
+                OvkPolicy::Sender,
+                &proposal,
+                expiry_delta_blocks,
+            ),
+            None => create_pczt_from_proposal::<
+                _,
+                _,
+                <MemoryWalletDb<Network> as InputSource>::Error,
+                _,
+                <prim_zip317::FeeRule as FeeRule>::Error,
+                _,
+            >(
+                &mut *db,
+                &self.network,
+                account_id,
+                OvkPolicy::Sender,
+                &proposal,
+            ),
+        }
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
 
         Ok(pczt)
@@ -1214,6 +1318,47 @@ where
         value: u64,
         memo: Option<Vec<u8>>,
         marginal_fee_zats: u64,
+    ) -> Result<Pczt, Error> {
+        self.pczt_create_dynamic_fee_impl(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            None,
+        )
+        .await
+    }
+
+    pub async fn pczt_create_dynamic_fee_with_expiry_delta(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: u32,
+    ) -> Result<Pczt, Error> {
+        let expiry_delta_blocks = validate_expiry_delta_blocks(expiry_delta_blocks)?;
+        self.pczt_create_dynamic_fee_impl(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            Some(expiry_delta_blocks),
+        )
+        .await
+    }
+
+    async fn pczt_create_dynamic_fee_impl(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
     ) -> Result<Pczt, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
@@ -1251,20 +1396,37 @@ where
             self.confirmations_policy(),
         )
         .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {:?}", e)))?;
-        let pczt = create_pczt_from_proposal::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <prim_zip317::FeeRule as FeeRule>::Error,
-            _,
-        >(
-            &mut *db,
-            &self.network,
-            account_id,
-            OvkPolicy::Sender,
-            &proposal,
-        )
+        let pczt = match expiry_delta_blocks {
+            Some(expiry_delta_blocks) => create_pczt_from_proposal_with_expiry_delta::<
+                _,
+                _,
+                <MemoryWalletDb<Network> as InputSource>::Error,
+                _,
+                <prim_zip317::FeeRule as FeeRule>::Error,
+                _,
+            >(
+                &mut *db,
+                &self.network,
+                account_id,
+                OvkPolicy::Sender,
+                &proposal,
+                expiry_delta_blocks,
+            ),
+            None => create_pczt_from_proposal::<
+                _,
+                _,
+                <MemoryWalletDb<Network> as InputSource>::Error,
+                _,
+                <prim_zip317::FeeRule as FeeRule>::Error,
+                _,
+            >(
+                &mut *db,
+                &self.network,
+                account_id,
+                OvkPolicy::Sender,
+                &proposal,
+            ),
+        }
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {:?}", e)))?;
         Ok(pczt)
     }
