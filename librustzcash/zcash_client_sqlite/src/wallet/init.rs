@@ -199,6 +199,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::TableNotEmpty => unreachable!("wallet already initialized"),
         SqliteClientError::BlockConflict(_)
         | SqliteClientError::NonSequentialBlocks
+        | SqliteClientError::PutBlocksCommitmentTree { .. }
+        | SqliteClientError::TruncateCommitmentTree { .. }
         | SqliteClientError::RequestedRewindInvalid { .. }
         | SqliteClientError::KeyDerivationError(_)
         | SqliteClientError::Zip32AccountIndexOutOfRange
@@ -753,10 +755,7 @@ mod tests {
         zip32::DiversifierIndex,
     };
 
-    #[cfg(all(
-        any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-        feature = "zip-233"
-    ))]
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
     use zcash_protocol::value::Zatoshis;
 
     pub(crate) fn describe_tables(conn: &Connection) -> Result<Vec<String>, rusqlite::Error> {
@@ -833,6 +832,7 @@ mod tests {
             db::INDEX_ACCOUNTS_UUID,
             db::INDEX_HD_ACCOUNT,
             db::INDEX_ADDRESSES_ACCOUNTS,
+            db::INDEX_ADDRESSES_CACHED_TRANSPARENT_RECEIVER_ADDRESS,
             db::INDEX_ADDRESSES_INDICES,
             db::INDEX_ADDRESSES_PUBKEYS,
             db::INDEX_ADDRESSES_T_INDICES,
@@ -1186,10 +1186,7 @@ mod tests {
                 BranchId::Canopy,
                 0,
                 BlockHeight::from(0),
-                #[cfg(all(
-                    any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                    feature = "zip-233"
-                ))]
+                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
                 Zatoshis::ZERO,
                 None,
                 None,

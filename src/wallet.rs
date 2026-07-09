@@ -120,7 +120,7 @@ static ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::n
 fn get_orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
     ORCHARD_PROVING_KEY.get_or_init(|| {
         tracing::info!("🔧 Initializing Orchard ProvingKey...");
-        orchard::circuit::ProvingKey::build()
+        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3)
     })
 }
 
@@ -132,7 +132,7 @@ static ORCHARD_VERIFYING_KEY: OnceLock<orchard::circuit::VerifyingKey> = OnceLoc
 fn get_orchard_verifying_key() -> &'static orchard::circuit::VerifyingKey {
     ORCHARD_VERIFYING_KEY.get_or_init(|| {
         tracing::info!("🔧 Initializing Orchard VerifyingKey...");
-        orchard::circuit::VerifyingKey::build()
+        orchard::circuit::VerifyingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3)
     })
 }
 

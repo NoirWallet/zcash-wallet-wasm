@@ -312,13 +312,12 @@ where
 
     #[cfg(feature = "orchard")]
     let orchard_action_count = |change_count| {
-        orchard
-            .bundle_type()
-            .num_actions(
-                orchard.inputs().len(),
-                orchard.outputs().len() + change_count,
-            )
-            .map_err(ChangeError::BundleError)
+        orchard_fees::transactional_action_count(
+            orchard.bundle_version(),
+            orchard.inputs().len(),
+            orchard.outputs().len() + change_count,
+        )
+        .map_err(ChangeError::BundleError)
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_action_count = |change_count: usize| -> Result<usize, ChangeError<E, NoteRefT>> {
@@ -330,6 +329,10 @@ where
             Ok(0)
         }
     };
+
+    // Ironwood bundles are not yet constructed by the wallet, so they contribute
+    // no actions to the fee.
+    let ironwood_action_count = 0;
 
     let transparent_input_sizes = transparent_inputs
         .iter()
@@ -378,6 +381,7 @@ where
             sapling_input_count,
             sapling_output_count(0)?,
             orchard_action_count(0)?,
+            ironwood_action_count,
         )
         .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?;
 
@@ -410,6 +414,7 @@ where
                         sapling_input_count,
                         sapling_output_count(target_change_counts.sapling())?,
                         orchard_action_count(target_change_counts.orchard())?,
+                        ironwood_action_count,
                     )
                     .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?,
             );
@@ -449,6 +454,7 @@ where
                         } else {
                             0
                         })?,
+                        ironwood_action_count,
                     )
                     .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?
             } else {
@@ -692,10 +698,12 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
                 .map_err(ChangeError::BundleError)?;
 
             #[cfg(feature = "orchard")]
-            let o_action_count = orchard
-                .bundle_type()
-                .num_actions(o_req_inputs + _o_extra, o_outputs_len + change.orchard)
-                .map_err(ChangeError::BundleError)?;
+            let o_action_count = orchard_fees::transactional_action_count(
+                orchard.bundle_version(),
+                o_req_inputs + _o_extra,
+                o_outputs_len + change.orchard,
+            )
+            .map_err(ChangeError::BundleError)?;
             #[cfg(not(feature = "orchard"))]
             let o_action_count = 0;
 

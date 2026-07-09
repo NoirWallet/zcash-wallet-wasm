@@ -1741,6 +1741,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "749cff877dc1af878a0b31a41dd221a753634401ea0ef2f87b62d3171522485a"
 
 [[package]]
+name = "flume"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "nanorand",
+ "spin 0.9.8",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1915,8 +1927,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4567c8db10ae91089c99af84c68c38da3ec2f087c3f82960bcdbf3656b6f4d7"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2724,6 +2738,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5ce46fe64a9d73be07dcbe690a38ce1b293be448fd8ce1e6c1b8062c9f72c6a"
 
 [[package]]
+name = "nanorand"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a51313c5820b0b02bd422f4b44776fbf47961755c74ce64afc73bfad10226c3"
+dependencies = [
+ "getrandom 0.2.15",
+]
+
+[[package]]
 name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2966,9 +2989,9 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "orchard"
-version = "0.14.0"
+version = "0.15.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a54f8d29bfb1e76a9d4e868a1a08cce2e57dd2bdc66232982822ad3114b91ab3"
+checksum = "e8e277dd4b46f5d06deae3ffb8af1a951e8622368f028c2a4d6fe59339566403"
 dependencies = [
  "aes",
  "bitvec",
@@ -4604,6 +4627,9 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "spin"
@@ -4897,7 +4923,6 @@ checksum = "5dfd88e563464686c916c7e46e623e520ddc6d79fa6641390f2e3fa86e83e885"
 dependencies = [
  "deranged",
  "itoa",
- "js-sys",
  "num-conv",
  "powerfmt",
  "serde",
@@ -4971,6 +4996,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2 0.5.9",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.48.0",
 ]
 
@@ -6507,17 +6533,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af190c94f2773fdb3729c55b007a722abb5384da03bc0986df4c289bf5567e96"
 
 [[package]]
-name = "wasm_sync"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cff360cade7fec41ff0e9d2cda57fe58258c5f16def0e21302394659e6bbb0ea"
-dependencies = [
- "js-sys",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
 name = "weak-table"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7026,7 +7041,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_address"
-version = "0.12.0"
+version = "0.13.0-pre.0"
 dependencies = [
  "assert_matches",
  "bech32",
@@ -7052,9 +7067,9 @@ dependencies = [
  "bls12_381",
  "bs58",
  "byteorder",
- "crossbeam-channel",
  "document-features",
  "dynosaur",
+ "flume",
  "fs-mistrust",
  "futures-util",
  "getset",
@@ -7115,53 +7130,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "zcash_client_memory"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "bip32",
- "bs58",
- "byteorder",
- "bytes",
- "ciborium",
- "group",
- "incrementalmerkletree",
- "jubjub",
- "nonempty",
- "orchard",
- "postcard",
- "proptest",
- "prost",
- "prost-build",
- "rayon",
- "sapling-crypto",
- "secp256k1",
- "secrecy",
- "serde",
- "serde_json",
- "shardtree",
- "static_assertions",
- "subtle",
- "thiserror 1.0.63",
- "time",
- "tokio",
- "tracing",
- "wasm_sync",
- "which",
- "zcash_address",
- "zcash_client_backend",
- "zcash_encoding",
- "zcash_keys",
- "zcash_primitives",
- "zcash_protocol",
- "zcash_script",
- "zcash_transparent",
- "zip32",
-]
-
-[[package]]
 name = "zcash_client_sqlite"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -7226,25 +7196,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "zcash_extensions"
-version = "0.1.0"
-dependencies = [
- "blake2b_simd",
- "ff",
- "jubjub",
- "orchard",
- "rand_core 0.6.4",
- "sapling-crypto",
- "zcash_address",
- "zcash_primitives",
- "zcash_proofs",
- "zcash_protocol",
- "zcash_transparent",
-]
-
-[[package]]
 name = "zcash_history"
-version = "0.4.0"
+version = "0.5.0-pre.0"
 dependencies = [
  "assert_matches",
  "blake2b_simd",
@@ -7255,7 +7208,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_keys"
-version = "0.14.0"
+version = "0.15.0-pre.0"
 dependencies = [
  "assert_matches",
  "bech32",
@@ -7307,11 +7260,12 @@ dependencies = [
 
 [[package]]
 name = "zcash_primitives"
-version = "0.28.0"
+version = "0.29.0-pre.0"
 dependencies = [
  "assert_matches",
  "blake2b_simd",
  "block-buffer 0.11.0-rc.3",
+ "bls12_381",
  "chacha20poly1305",
  "corez",
  "criterion 0.5.1",
@@ -7343,7 +7297,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_proofs"
-version = "0.28.0"
+version = "0.29.0-pre.0"
 dependencies = [
  "bellman",
  "blake2b_simd",
@@ -7366,7 +7320,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_protocol"
-version = "0.9.0"
+version = "0.10.0-pre.0"
 dependencies = [
  "corez",
  "document-features",
@@ -7406,7 +7360,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_transparent"
-version = "0.8.0"
+version = "0.9.0-pre.0"
 dependencies = [
  "bip32",
  "bs58",

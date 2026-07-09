@@ -12,7 +12,7 @@ use zcash_address::{ConversionError, ZcashAddress};
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_primitives::transaction::fees::{
     FeeRule,
-    transparent::InputSize,
+    transparent::{self as transparent_fees, InputSize},
     zip317::{P2PKH_STANDARD_INPUT_SIZE, P2PKH_STANDARD_OUTPUT_SIZE},
 };
 use zcash_protocol::{
@@ -267,6 +267,69 @@ pub trait ShieldingSelector {
     where
         ParamsT: consensus::Parameters,
         ChangeT: ChangeStrategy<MetaSource = Self::InputSource>;
+
+    /// Performs input selection and returns a proposal for the construction of a transaction
+    /// that shields coinbase transparent outputs to an arbitrary shielded recipient.
+    ///
+    /// This method differs from [`Self::propose_shielding`] in the following ways:
+    ///
+    /// - Only coinbase transparent outputs are eligible for inclusion in the proposal. This
+    ///   restriction is hard-coded; callers cannot opt in to selecting non-coinbase outputs
+    ///   via this method. Coinbase outputs are uniquely suited to being sent to arbitrary
+    ///   shielded recipients because they have no prior transparent transaction graph that
+    ///   could be exposed to the recipient.
+    /// - The `to_address` argument specifies the destination of the shielded value. It must
+    ///   be a shielded address (Sapling, or a Unified Address with a shielded receiver). It
+    ///   may be an external address not belonging to any account we control.
+    /// - The resulting proposal carries an explicit ZIP-321 payment to `to_address` for the
+    ///   full available value (input total minus fee). **No change is produced**, in either
+    ///   the transparent or any shielded pool. This is a privacy invariant: producing a
+    ///   shielded change output would allow the recipient (or any chain observer) to learn
+    ///   the sender's total selected-coinbase value by summing the public transparent input
+    ///   values and subtracting the visible payment amount. Since this method targets the
+    ///   `z_shieldcoinbase`-style "sweep coinbase to a recipient" workflow, where the
+    ///   recipient may not belong to the sender's wallet, change is forbidden by design.
+    ///
+    /// Because no change is produced, this method takes a `fee_rule` directly rather than a
+    /// [`ChangeStrategy`]: there is no change to compute, and no per-account metadata is
+    /// required.
+    ///
+    /// The `memo` parameter is stored in the shielded output's memo field; it is always
+    /// permitted because a shielded payment is always present.
+    ///
+    /// The `limit` parameter, when `Some(n)`, caps the number of transparent inputs to at
+    /// most `n`, keeping the highest-value UTXOs (with a stable tiebreaker by outpoint).
+    /// `Some(0)` selects no inputs and will therefore return
+    /// [`InputSelectorError::InsufficientFunds`].
+    ///
+    /// If the total value of selected inputs (after any cap imposed by `limit`), minus the
+    /// fee, is less than `shielding_threshold`, this method returns
+    /// [`InputSelectorError::InsufficientFunds`].
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
+    fn propose_shielding_coinbase<ParamsT, FeeRuleT>(
+        &self,
+        params: &ParamsT,
+        wallet_db: &Self::InputSource,
+        fee_rule: &FeeRuleT,
+        shielding_threshold: Zatoshis,
+        source_addrs: &[TransparentAddress],
+        to_address: ZcashAddress,
+        memo: Option<MemoBytes>,
+        limit: Option<usize>,
+        target_height: TargetHeight,
+    ) -> Result<
+        Proposal<FeeRuleT, Infallible>,
+        InputSelectorError<
+            <Self::InputSource as InputSource>::Error,
+            Self::Error,
+            FeeRuleT::Error,
+            Infallible,
+        >,
+    >
+    where
+        ParamsT: consensus::Parameters,
+        FeeRuleT: FeeRule + Clone;
 }
 
 /// Errors that can occur as a consequence of greedy input selection.
@@ -351,12 +414,25 @@ impl orchard_fees::OutputView for OrchardPayment {
     }
 }
 
+/// The Zcash consensus maximum block size, in bytes.
+#[cfg(feature = "transparent-inputs")]
+const MAX_BLOCK_BYTES: usize = 2_000_000;
+
+/// The default maximum fraction of a block's space, as an integer percentage, that a single
+/// shielding transaction's transparent inputs may occupy.
+#[cfg(feature = "transparent-inputs")]
+const DEFAULT_SHIELDING_BLOCK_SPACE_PERCENT: u32 = 10;
+
 /// An [`InputSelector`] implementation that uses a greedy strategy to select between available
 /// notes.
 ///
 /// This implementation performs input selection using methods available via the
 /// [`InputSource`] interface.
 pub struct GreedyInputSelector<DbT> {
+    /// The maximum fraction of a block's space, as an integer percentage (0–100), that a single
+    /// shielding transaction's transparent inputs may occupy.
+    #[cfg(feature = "transparent-inputs")]
+    shielding_block_space_percent: u32,
     _ds_type: PhantomData<DbT>,
 }
 
@@ -372,9 +448,32 @@ impl<DbT> GreedyInputSelector<DbT> {
     /// [`EphemeralBalance::Output`]: crate::fees::EphemeralBalance::Output
     pub fn new() -> Self {
         GreedyInputSelector {
+            #[cfg(feature = "transparent-inputs")]
+            shielding_block_space_percent: DEFAULT_SHIELDING_BLOCK_SPACE_PERCENT,
             _ds_type: PhantomData,
         }
     }
+
+    /// Sets the maximum fraction of a block's space, as an integer percentage (0–100), that a
+    /// single shielding transaction's transparent inputs may occupy.
+    ///
+    /// When shielding gathers more spendable transparent outputs than will fit within this bound,
+    /// the highest-value outputs are selected first and the remainder are left unspent, to be
+    /// consolidated by a subsequent shielding transaction. Values above 100 are clamped to 100.
+    /// Defaults to 10.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn with_shielding_block_space_percent(mut self, percent: u32) -> Self {
+        self.shielding_block_space_percent = percent.min(100);
+        self
+    }
+}
+
+/// Returns the maximum number of transparent inputs that a single shielding transaction may
+/// select, given the configured fraction of a block's space (as an integer percentage) that its
+/// inputs may occupy.
+#[cfg(feature = "transparent-inputs")]
+fn shielding_max_inputs(block_space_percent: u32) -> usize {
+    (MAX_BLOCK_BYTES.saturating_mul(block_space_percent as usize) / 100) / P2PKH_STANDARD_INPUT_SIZE
 }
 
 impl<DbT> Default for GreedyInputSelector<DbT> {
@@ -598,7 +697,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                         .compute_balance::<_, DbT::NoteRef>(
                             params,
                             target_height,
-                            &[] as &[WalletTransparentOutput],
+                            &[] as &[WalletTransparentOutput<<DbT as InputSource>::AccountId>],
                             &tr1_transparent_outputs,
                             &sapling::EmptyBundleView,
                             #[cfg(feature = "orchard")]
@@ -619,7 +718,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                     let tr1_balance = change_strategy.compute_balance::<_, DbT::NoteRef>(
                         params,
                         target_height,
-                        &[] as &[WalletTransparentOutput],
+                        &[] as &[WalletTransparentOutput<<DbT as InputSource>::AccountId>],
                         &tr1_transparent_outputs,
                         &sapling::EmptyBundleView,
                         #[cfg(feature = "orchard")]
@@ -638,7 +737,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
             let tr0_balance = change_strategy.compute_balance(
                 params,
                 target_height,
-                &[] as &[WalletTransparentOutput],
+                &[] as &[WalletTransparentOutput<<DbT as InputSource>::AccountId>],
                 &transparent_outputs,
                 &(
                     ::sapling::builder::BundleType::DEFAULT,
@@ -647,7 +746,11 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                 ),
                 #[cfg(feature = "orchard")]
                 &(
-                    ::orchard::builder::BundleType::DEFAULT,
+                    // Preserve the legacy Orchard action-count estimate here.
+                    // If this path targets restrictions that disable
+                    // cross-address transfers, thread the target-height-selected
+                    // `BundleVersion` through this call.
+                    crate::ANY_ORCHARD_BUNDLE_VERSION,
                     &orchard_inputs[..],
                     &orchard_outputs[..],
                 ),
@@ -806,15 +909,26 @@ where
         } else {
             0
         };
-        orchard::builder::BundleType::DEFAULT
-            .num_actions(spendable_notes.orchard.len(), requested_orchard_actions)
-            .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?
+        orchard_fees::transactional_action_count(
+            // Preserve the legacy Orchard action-count estimate here. If this
+            // path targets restrictions that disable cross-address transfers,
+            // thread the target-height-selected `BundleVersion`
+            // through this call.
+            crate::ANY_ORCHARD_BUNDLE_VERSION,
+            spendable_notes.orchard.len(),
+            requested_orchard_actions,
+        )
+        .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_action_count: usize = 0;
 
     #[cfg(feature = "orchard")]
     let use_orchard = orchard_action_count > 0;
+
+    // The wallet does not yet construct Ironwood bundles, so they contribute no
+    // actions to the fee.
+    let ironwood_action_count: usize = 0;
 
     let recipient_address: Address = recipient
         .clone()
@@ -830,6 +944,7 @@ where
                 spendable_notes.sapling().len(),
                 sapling_output_count,
                 orchard_action_count,
+                ironwood_action_count,
             )
             .map(|fee| (fee, None)),
         Address::Transparent(_) => fee_rule
@@ -841,6 +956,7 @@ where
                 spendable_notes.sapling().len(),
                 sapling_output_count,
                 orchard_action_count,
+                ironwood_action_count,
             )
             .map(|fee| (fee, None)),
         Address::Unified(addr) => fee_rule
@@ -856,6 +972,7 @@ where
                 spendable_notes.sapling().len(),
                 sapling_output_count,
                 orchard_action_count,
+                ironwood_action_count,
             )
             .map(|fee| (fee, None)),
         Address::Tex(_) => fee_rule
@@ -867,6 +984,7 @@ where
                 spendable_notes.sapling().len(),
                 sapling_output_count,
                 orchard_action_count,
+                ironwood_action_count,
             )
             .and_then(|tr0_fee| {
                 let tr1_fee = fee_rule.fee_required(
@@ -874,6 +992,7 @@ where
                     BlockHeight::from(target_height),
                     [InputSize::Known(P2PKH_STANDARD_INPUT_SIZE)],
                     [P2PKH_STANDARD_OUTPUT_SIZE],
+                    0,
                     0,
                     0,
                     0,
@@ -1088,85 +1207,26 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
         ParamsT: consensus::Parameters,
         ChangeT: ChangeStrategy<MetaSource = Self::InputSource>,
     {
-        let (mut transparent_inputs, _, _) = source_addrs.iter().try_fold(
-            (
-                vec![],
-                BTreeSet::<TransparentAddress>::new(),
-                BTreeSet::<TransparentAddress>::new(),
-            ),
-            |(mut inputs, mut ephemeral_addrs, mut input_addrs), taddr| {
-                use transparent::keys::TransparentKeyScope;
-
-                let utxos = wallet_db
-                    .get_spendable_transparent_outputs(
-                        taddr,
-                        target_height,
-                        confirmations_policy,
-                        output_filter,
-                    )
-                    .map_err(InputSelectorError::DataSource)?;
-
-                // `InputSource::get_spendable_transparent_outputs` is required to return
-                // outputs received by `taddr`, so these `.extend()` calls are guaranteed
-                // to add at most a single new address to each set. But it's more
-                // convenient this way as we can reuse `utxo.recipient_key_scope()`
-                // instead of needing to query the wallet twice for each address to
-                // determine their scopes.
-                ephemeral_addrs.extend(utxos.iter().filter_map(|utxo| {
-                    (utxo.recipient_key_scope() == Some(TransparentKeyScope::EPHEMERAL))
-                        .then_some(utxo.recipient_address())
-                }));
-                input_addrs.extend(utxos.iter().map(|utxo| utxo.recipient_address()));
-                inputs.extend(utxos.into_iter().map(|utxo| utxo.into_wallet_output()));
-
-                // Funds may be spent from at most one ephemeral address at a time. If there are no
-                // ephemeral addresses, we allow shielding from multiple transparent addresses.
-                if !ephemeral_addrs.is_empty() && input_addrs.len() > 1 {
-                    Err(InputSelectorError::Proposal(
-                        ProposalError::EphemeralAddressLinkability,
-                    ))
-                } else {
-                    Ok((inputs, ephemeral_addrs, input_addrs))
-                }
-            },
+        let mut transparent_inputs = gather_shielding_inputs::<DbT, ChangeT::Error>(
+            wallet_db,
+            source_addrs,
+            target_height,
+            confirmations_policy,
+            output_filter,
+            shielding_max_inputs(self.shielding_block_space_percent),
         )?;
 
         let wallet_meta = change_strategy
             .fetch_wallet_meta(wallet_db, to_account, target_height, &[])
             .map_err(InputSelectorError::DataSource)?;
 
-        let trial_balance = change_strategy.compute_balance(
+        let balance = compute_shielding_balance_with_dust_retry::<DbT, ChangeT, ParamsT>(
+            change_strategy,
             params,
             target_height,
-            &transparent_inputs,
-            &[] as &[TxOut],
-            &sapling::EmptyBundleView,
-            #[cfg(feature = "orchard")]
-            &orchard_fees::EmptyBundleView,
-            None,
+            &mut transparent_inputs,
             &wallet_meta,
-        );
-
-        let balance = match trial_balance {
-            Ok(balance) => balance,
-            Err(ChangeError::DustInputs { transparent, .. }) => {
-                let exclusions: BTreeSet<OutPoint> = transparent.into_iter().collect();
-                transparent_inputs.retain(|i| !exclusions.contains(i.outpoint()));
-
-                change_strategy.compute_balance(
-                    params,
-                    target_height,
-                    &transparent_inputs,
-                    &[] as &[TxOut],
-                    &sapling::EmptyBundleView,
-                    #[cfg(feature = "orchard")]
-                    &orchard_fees::EmptyBundleView,
-                    None,
-                    &wallet_meta,
-                )?
-            }
-            Err(other) => return Err(InputSelectorError::Change(other)),
-        };
+        )?;
 
         if balance.total() >= shielding_threshold {
             Proposal::single_step(
@@ -1186,5 +1246,395 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
                 required: shielding_threshold,
             })
         }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn propose_shielding_coinbase<ParamsT, FeeRuleT>(
+        &self,
+        params: &ParamsT,
+        wallet_db: &Self::InputSource,
+        fee_rule: &FeeRuleT,
+        shielding_threshold: Zatoshis,
+        source_addrs: &[TransparentAddress],
+        to_address: ZcashAddress,
+        memo: Option<MemoBytes>,
+        limit: Option<usize>,
+        target_height: TargetHeight,
+    ) -> Result<
+        Proposal<FeeRuleT, Infallible>,
+        InputSelectorError<<DbT as InputSource>::Error, Self::Error, FeeRuleT::Error, Infallible>,
+    >
+    where
+        ParamsT: consensus::Parameters,
+        FeeRuleT: FeeRule + Clone,
+    {
+        // Coinbase-only is enforced here at the API boundary: callers cannot bypass
+        // it. This is the privacy property that motivates having a dedicated method
+        // rather than a more general "shield to address" path; only coinbase
+        // outputs are eligible because they have no prior transparent transaction
+        // graph that could be exposed to the shielded recipient.
+        // The block-space cap and the caller-supplied `limit` (when present) both bound the number
+        // of transparent inputs; `gather_shielding_inputs` applies the more restrictive of the two,
+        // keeping the highest-value UTXOs first. When `limit` is `Some(0)` this empties the set, and
+        // the subsequent `InsufficientFunds` check fires; this is the documented behavior.
+        let transparent_inputs = gather_shielding_inputs::<DbT, FeeRuleT::Error>(
+            wallet_db,
+            source_addrs,
+            target_height,
+            // It doesn't matter here if we pass a 100 confirmations or 1 confirmations policy,
+            // as coinbase txs require 100, which will be enforced by note selection.
+            ConfirmationsPolicy::MIN,
+            TransparentOutputFilter::CoinbaseOnly,
+            limit
+                .unwrap_or(usize::MAX)
+                .min(shielding_max_inputs(self.shielding_block_space_percent)),
+        )?;
+
+        let destination_pool =
+            resolve_shielded_destination::<DbT, FeeRuleT::Error, ParamsT>(&to_address, params)?;
+
+        // Compute the fee directly from the fee rule. This method produces no
+        // change in any pool, so there is no change-strategy or wallet-metadata
+        // computation to perform. The proposal will carry exactly one shielded
+        // payment output (in `destination_pool`) and zero transparent outputs.
+        //
+        // Both Sapling and Orchard transactional bundles pad up to a minimum
+        // of 2 outputs/actions when any output is added (see `MIN_ACTIONS` /
+        // `MIN_SHIELDED_OUTPUTS` in the respective crates). The proposal fee
+        // must reflect the *padded* counts that the builder will actually
+        // produce, otherwise the subsequent `create_proposed_transactions`
+        // call fails with `InsufficientFunds(need additional <marginal_fee>)`.
+        // We query each bundle type for the count it will materialize.
+        let (sapling_output_count, orchard_action_count) = match destination_pool {
+            PoolType::SAPLING => {
+                let count = ::sapling::builder::BundleType::DEFAULT
+                    .num_outputs(0, 1)
+                    .expect("sapling DEFAULT bundle type permits any (spends, outputs) count");
+                (count, 0usize)
+            }
+            #[cfg(feature = "orchard")]
+            PoolType::ORCHARD => {
+                let count = orchard_fees::transactional_action_count(
+                    // With no Orchard spends and one requested output, the
+                    // padded action count is independent of the Orchard pool
+                    // restriction.
+                    crate::ANY_ORCHARD_BUNDLE_VERSION,
+                    0,
+                    1,
+                )
+                .expect("legacy Orchard protocol permits any transactional spend and output count");
+                (0usize, count)
+            }
+            // Unreachable: `resolve_shielded_destination` rejects transparent
+            // destinations earlier with `ShieldingRequiresShieldedRecipient`.
+            _ => {
+                return Err(InputSelectorError::Proposal(
+                    ProposalError::ShieldingRequiresShieldedRecipient,
+                ));
+            }
+        };
+
+        // The wallet does not yet construct Ironwood bundles, so they contribute
+        // no actions to the fee.
+        let ironwood_action_count = 0;
+
+        let fee = fee_rule
+            .fee_required(
+                params,
+                BlockHeight::from(target_height),
+                transparent_inputs
+                    .iter()
+                    .map(transparent_fees::InputView::serialized_size),
+                std::iter::empty::<usize>(),
+                0,
+                sapling_output_count,
+                orchard_action_count,
+                ironwood_action_count,
+            )
+            // The `InputSelectorError::Change` variant is the only existing
+            // carrier capable of holding an arbitrary fee-rule error
+            // (`ChangeError::StrategyError` wraps `FeeRuleT::Error` in the
+            // generic position). We reuse it here rather than introduce a new
+            // top-level variant.
+            .map_err(|e| InputSelectorError::Change(ChangeError::StrategyError(e)))?;
+
+        // Route the full available value (input_total - fee) as an explicit
+        // payment to the supplied destination. No change is produced.
+        let input_total = transparent_inputs
+            .iter()
+            .map(|utxo| utxo.value())
+            .try_fold(Zatoshis::ZERO, |acc, v| acc + v)
+            .ok_or(InputSelectorError::Selection(
+                GreedyInputSelectorError::Balance(BalanceError::Overflow),
+            ))?;
+        let payment_amount =
+            (input_total - fee).ok_or_else(|| InputSelectorError::InsufficientFunds {
+                available: input_total,
+                required: fee,
+            })?;
+
+        if payment_amount < shielding_threshold {
+            return Err(InputSelectorError::InsufficientFunds {
+                available: payment_amount,
+                required: shielding_threshold,
+            });
+        }
+
+        let payment = Payment::new(to_address, Some(payment_amount), memo, None, None, vec![])
+            .map_err(|payment_error| {
+                InputSelectorError::Proposal(ProposalError::Zip321(payment_error.with_index(0)))
+            })?;
+        let request = TransactionRequest::new(vec![payment]).map_err(|payment_error| {
+            InputSelectorError::Proposal(ProposalError::Zip321(payment_error))
+        })?;
+        let mut payment_pools = BTreeMap::new();
+        payment_pools.insert(0usize, destination_pool);
+        let final_balance = TransactionBalance::new(vec![], fee).map_err(|_| {
+            InputSelectorError::Selection(GreedyInputSelectorError::Balance(BalanceError::Overflow))
+        })?;
+
+        // `is_shielding` is `false` because the proposal layer reserves
+        // `is_shielding = true` for the legacy "no payment, all value in change"
+        // shape produced by `propose_shielding`. From the wallet's perspective
+        // this is still a transparent -> shielded transfer of coinbase value.
+        Proposal::single_step(
+            request,
+            payment_pools,
+            transparent_inputs,
+            None,
+            final_balance,
+            fee_rule.clone(),
+            target_height,
+            false,
+        )
+        .map_err(InputSelectorError::Proposal)
+    }
+}
+
+/// Gathers spendable transparent UTXOs from each source address, applying the
+/// supplied [`TransparentOutputFilter`] and rejecting input sets that would
+/// link activity on an ephemeral address to other wallet activity.
+///
+/// Shared between `propose_shielding` and `propose_shielding_coinbase`.
+#[cfg(feature = "transparent-inputs")]
+#[allow(clippy::type_complexity)]
+fn gather_shielding_inputs<DbT, ChangeErrT>(
+    wallet_db: &DbT,
+    source_addrs: &[TransparentAddress],
+    target_height: TargetHeight,
+    confirmations_policy: ConfirmationsPolicy,
+    output_filter: TransparentOutputFilter,
+    max_inputs: usize,
+) -> Result<
+    Vec<WalletTransparentOutput<()>>,
+    InputSelectorError<
+        <DbT as InputSource>::Error,
+        GreedyInputSelectorError,
+        ChangeErrT,
+        Infallible,
+    >,
+>
+where
+    DbT: InputSource,
+{
+    use transparent::keys::TransparentKeyScope;
+
+    // Gather the spendable UTXOs for every source address in a single query. This avoids issuing
+    // one query per address (including for the many addresses that have no spendable outputs),
+    // which is prohibitively expensive for wallets that hold large numbers of transparent
+    // addresses.
+    let mut utxos = wallet_db
+        .get_spendable_transparent_outputs_for_addresses(
+            source_addrs,
+            target_height,
+            confirmations_policy,
+            output_filter,
+        )
+        .map_err(InputSelectorError::DataSource)?;
+
+    // Cap the number of transparent inputs that a single shielding transaction may consume,
+    // keeping the highest-value UTXOs first (stable tiebreaker by outpoint for determinism). UTXOs
+    // beyond the cap are left unspent, to be consolidated by a subsequent shielding transaction.
+    // When `max_inputs` is 0 this empties the set, and the caller's `InsufficientFunds` check
+    // fires. The cap is applied before the linkability check below so that the check reflects the
+    // outputs that will actually be spent.
+    utxos.sort_by(|a, b| {
+        b.value()
+            .cmp(&a.value())
+            .then_with(|| a.outpoint().cmp(b.outpoint()))
+    });
+    utxos.truncate(max_inputs);
+
+    // We use `recipient_key_scope()` and `recipient_address()` from the returned outputs to
+    // determine the set of input addresses and which of them are ephemeral, rather than querying
+    // the wallet again per address.
+    let ephemeral_addrs = utxos
+        .iter()
+        .filter_map(|utxo| {
+            (utxo.recipient_key_scope() == Some(TransparentKeyScope::EPHEMERAL))
+                .then_some(utxo.recipient_address())
+        })
+        .collect::<BTreeSet<_>>();
+    let input_addrs = utxos
+        .iter()
+        .map(|utxo| utxo.recipient_address())
+        .collect::<BTreeSet<_>>();
+
+    // Funds may be spent from at most one ephemeral address at a time. If there are no
+    // ephemeral addresses, we allow shielding from multiple transparent addresses.
+    if !ephemeral_addrs.is_empty() && input_addrs.len() > 1 {
+        return Err(InputSelectorError::Proposal(
+            ProposalError::EphemeralAddressLinkability,
+        ));
+    }
+
+    Ok(utxos
+        .into_iter()
+        .map(|utxo| utxo.redact_account_data())
+        .collect())
+}
+
+/// Resolves a [`ZcashAddress`] destination for a shielding proposal to the
+/// shielded pool it should be received in.
+///
+/// Rejects transparent and TEX addresses with
+/// [`ProposalError::ShieldingRequiresShieldedRecipient`], and rejects Unified
+/// Addresses without a shielded receiver with
+/// [`GreedyInputSelectorError::UnsupportedAddress`].
+#[cfg(feature = "transparent-inputs")]
+#[allow(clippy::type_complexity)]
+fn resolve_shielded_destination<DbT, ChangeErrT, ParamsT>(
+    addr: &ZcashAddress,
+    params: &ParamsT,
+) -> Result<
+    PoolType,
+    InputSelectorError<
+        <DbT as InputSource>::Error,
+        GreedyInputSelectorError,
+        ChangeErrT,
+        Infallible,
+    >,
+>
+where
+    DbT: InputSource,
+    ParamsT: consensus::Parameters,
+{
+    let resolved: Address = addr
+        .clone()
+        .convert_if_network(params.network_type())
+        .map_err(InputSelectorError::Address)?;
+    match resolved {
+        Address::Sapling(_) => Ok(PoolType::SAPLING),
+        #[cfg(feature = "orchard")]
+        Address::Unified(ua) if ua.has_orchard() => Ok(PoolType::ORCHARD),
+        Address::Unified(ua) if ua.has_sapling() => Ok(PoolType::SAPLING),
+        Address::Unified(ua) => Err(InputSelectorError::Selection(
+            GreedyInputSelectorError::UnsupportedAddress(Box::new(ua)),
+        )),
+        Address::Transparent(_) | Address::Tex(_) => Err(InputSelectorError::Proposal(
+            ProposalError::ShieldingRequiresShieldedRecipient,
+        )),
+    }
+}
+
+/// Helper that performs the dust-input retry pattern used by `propose_shielding`.
+///
+/// On the first call to [`ChangeStrategy::compute_balance`], if the strategy
+/// reports [`ChangeError::DustInputs`], those inputs are removed from
+/// `transparent_inputs` and the balance is recomputed. The resulting proposal
+/// directs all available value into change (the legacy `propose_shielding`
+/// "all-change" shape).
+#[cfg(feature = "transparent-inputs")]
+#[allow(clippy::type_complexity)]
+fn compute_shielding_balance_with_dust_retry<DbT, ChangeT, ParamsT>(
+    change_strategy: &ChangeT,
+    params: &ParamsT,
+    target_height: TargetHeight,
+    transparent_inputs: &mut Vec<WalletTransparentOutput<()>>,
+    wallet_meta: &<ChangeT as ChangeStrategy>::AccountMetaT,
+) -> Result<
+    TransactionBalance,
+    InputSelectorError<
+        <DbT as InputSource>::Error,
+        GreedyInputSelectorError,
+        ChangeT::Error,
+        Infallible,
+    >,
+>
+where
+    DbT: InputSource,
+    ChangeT: ChangeStrategy<MetaSource = DbT>,
+    ParamsT: consensus::Parameters,
+{
+    let trial = compute_shielding_balance::<DbT, ChangeT, ParamsT>(
+        change_strategy,
+        params,
+        target_height,
+        transparent_inputs,
+        wallet_meta,
+    );
+
+    match trial {
+        Ok(balance) => Ok(balance),
+        Err(ChangeError::DustInputs { transparent, .. }) => {
+            let exclusions: BTreeSet<OutPoint> = transparent.into_iter().collect();
+            transparent_inputs.retain(|i| !exclusions.contains(i.outpoint()));
+
+            compute_shielding_balance::<DbT, ChangeT, ParamsT>(
+                change_strategy,
+                params,
+                target_height,
+                transparent_inputs,
+                wallet_meta,
+            )
+            .map_err(InputSelectorError::Change)
+        }
+        Err(other) => Err(InputSelectorError::Change(other)),
+    }
+}
+
+/// Helper for `propose_shielding`'s balance computation that calls
+/// `change_strategy.compute_balance` with empty Sapling and Orchard bundle
+/// views, allowing the change strategy to direct all available transparent
+/// input value into change.
+#[cfg(feature = "transparent-inputs")]
+#[allow(clippy::type_complexity)]
+fn compute_shielding_balance<DbT, ChangeT, ParamsT>(
+    change_strategy: &ChangeT,
+    params: &ParamsT,
+    target_height: TargetHeight,
+    transparent_inputs: &[WalletTransparentOutput<()>],
+    wallet_meta: &<ChangeT as ChangeStrategy>::AccountMetaT,
+) -> Result<TransactionBalance, ChangeError<ChangeT::Error, Infallible>>
+where
+    DbT: InputSource,
+    ChangeT: ChangeStrategy<MetaSource = DbT>,
+    ParamsT: consensus::Parameters,
+{
+    change_strategy.compute_balance(
+        params,
+        target_height,
+        transparent_inputs,
+        &[] as &[TxOut],
+        &sapling::EmptyBundleView,
+        #[cfg(feature = "orchard")]
+        &orchard_fees::EmptyBundleView,
+        None,
+        wallet_meta,
+    )
+}
+
+#[cfg(all(test, feature = "transparent-inputs"))]
+mod tests {
+    use super::shielding_max_inputs;
+
+    #[test]
+    fn shielding_max_inputs_from_block_space_percent() {
+        // max_inputs = (MAX_BLOCK_BYTES * percent / 100) / P2PKH_STANDARD_INPUT_SIZE
+        //            = (2_000_000 * percent / 100) / 150
+        assert_eq!(shielding_max_inputs(0), 0);
+        assert_eq!(shielding_max_inputs(1), 133); // 20_000 / 150
+        assert_eq!(shielding_max_inputs(10), 1333); // 200_000 / 150
+        assert_eq!(shielding_max_inputs(100), 13333); // 2_000_000 / 150
     }
 }

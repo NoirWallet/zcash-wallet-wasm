@@ -8,11 +8,60 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
+## [0.8.0] - PLANNED
+
+### Changed
+- Migrated to `zcash_protocol 0.10.0-pre.0`, `zcash_transparent 0.9.0-pre.0`,
+  `zcash_primitives 0.29.0-pre.0`, `zcash_proofs 0.29.0-pre.0`.
+- `pczt::roles::creator::Creator::new` is now fallible, returning
+  `Result<Self, pczt::roles::creator::Error>`; it rejects unrecognized consensus
+  branch IDs and upgrades that predate the v5 transaction format.
+- `pczt::roles::creator::Creator::with_orchard_flags` is now fallible, returning
+  `Result<Self, pczt::roles::creator::Error>`. The Orchard bundle version (and
+  hence the note-plaintext version and flag-byte encoding) is now derived from the
+  consensus branch ID passed to `Creator::new` rather than supplied by the caller,
+  and the flags are validated against it.
+- PCZT version 1 is now treated as a serialization format for the logical
+  `pczt::Pczt` type.
+- The Orchard PCZT logical model now tracks the Orchard bundle's note plaintext
+  version separately from the version 1 serialization format.
+- PCZT version 2 serialization now omits empty Transparent, Sapling, and
+  Orchard bundles.
+- Direct `serde` serialization implementations have been removed from the
+  logical `pczt::orchard::{Bundle, Action, Spend, Output}` types.
+- `pczt::Pczt::serialize` now consumes `self` and returns
+  `Result<Vec<u8>, pczt::EncodingError>` rather than borrowing `self` and
+  returning `Vec<u8>`.
+
+### Added
+- `pczt::roles::creator::Error`, the error type returned by the now-fallible
+  `Creator` methods.
+- `pczt::parse`, a free function for parsing PCZT encodings.
+- `pczt::EncodingError`, for errors that can occur during PCZT encoding.
+- `pczt::EncodingError::UnsupportedOrchardNoteVersion`, returned when an
+  Orchard note plaintext version cannot be represented in the version 1 PCZT
+  encoding.
+- `pczt::v1`, a module providing the version 1 PCZT serialization format via
+  `pczt::v1::Pczt`.
+- PCZT version 2 serialization, which encodes the Orchard note plaintext
+  version at the Orchard bundle level.
+- `PartialEq` is now derived for the logical `pczt::transparent::{Bundle, Input,
+  Output}`, `pczt::sapling::{Bundle, Spend, Output}`, and
+  `pczt::orchard::{Bundle, Action, Spend, Output}` types (used to detect empty
+  bundles for v2 serialization).
+- The logical `pczt::Pczt` type now includes an Ironwood bundle.
+- Ironwood PCZT role support.
+
 ## [0.7.0] - 2026-06-02
 
 ### Changed
 - Migrated to `zcash_protocol 0.9.0`, `zcash_transparent 0.8.0`, `zcash_primitives 0.28.0`,
   `zcash_proofs 0.28.0`.
+
+### Fixed
+- Updated to crate versions that fix an Orchard soundness vulnerability
+  (GHSA-ww9q-8r59-xv46) and Orchard non-canonical proof size issue
+  (GHSA-2x4w-pxqw-58v9).
 
 ## [0.6.0] - 2026-04-27
 

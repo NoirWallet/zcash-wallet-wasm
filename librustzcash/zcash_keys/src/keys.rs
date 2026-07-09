@@ -1147,10 +1147,8 @@ impl UnifiedFullViewingKey {
     pub fn subsumes_ufvk(&self, other: &UnifiedFullViewingKey) -> bool {
         #[cfg(feature = "orchard")]
         match (&other.orchard, &self.orchard) {
-            (Some(e), Some(n)) => {
-                if e != n {
-                    return false;
-                }
+            (Some(e), Some(n)) if e != n => {
+                return false;
             }
             (Some(_), None) => return false,
             _ => {}
@@ -1158,10 +1156,8 @@ impl UnifiedFullViewingKey {
 
         #[cfg(feature = "sapling")]
         match (&other.sapling, &self.sapling) {
-            (Some(e), Some(n)) => {
-                if e != n {
-                    return false;
-                }
+            (Some(e), Some(n)) if e != n => {
+                return false;
             }
             (Some(_), None) => return false,
             _ => {}
@@ -1169,10 +1165,8 @@ impl UnifiedFullViewingKey {
 
         #[cfg(feature = "transparent-inputs")]
         match (&other.transparent, &self.transparent) {
-            (Some(e), Some(n)) => {
-                if e != n {
-                    return false;
-                }
+            (Some(e), Some(n)) if e != n => {
+                return false;
             }
             (Some(_), None) => return false,
             _ => {}
@@ -1552,10 +1546,8 @@ impl UnifiedIncomingViewingKey {
     pub fn subsumes(&self, other: &UnifiedIncomingViewingKey) -> bool {
         #[cfg(feature = "orchard")]
         match (other.orchard(), &self.orchard) {
-            (Some(e), Some(n)) => {
-                if e != n {
-                    return false;
-                }
+            (Some(e), Some(n)) if e != n => {
+                return false;
             }
             (Some(_), None) => return false,
             _ => {}
@@ -1563,10 +1555,8 @@ impl UnifiedIncomingViewingKey {
 
         #[cfg(feature = "sapling")]
         match (other.sapling(), &self.sapling) {
-            (Some(e), Some(n)) => {
-                if e != n {
-                    return false;
-                }
+            (Some(e), Some(n)) if e != n => {
+                return false;
             }
             (Some(_), None) => return false,
             _ => {}
@@ -1574,10 +1564,8 @@ impl UnifiedIncomingViewingKey {
 
         #[cfg(feature = "transparent-inputs")]
         match (other.transparent(), &self.transparent) {
-            (Some(e), Some(n)) => {
-                if e != n {
-                    return false;
-                }
+            (Some(e), Some(n)) if e != n => {
+                return false;
             }
             (Some(_), None) => return false,
             _ => {}

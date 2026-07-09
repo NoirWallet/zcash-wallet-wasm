@@ -11,9 +11,10 @@ impl super::Verifier {
             transparent,
             sapling,
             orchard,
+            ironwood,
         } = self.pczt;
 
-        let bundle = orchard.into_parsed().map_err(OrchardError::Parse)?;
+        let bundle = orchard.into_orchard_parsed().map_err(OrchardError::Parse)?;
 
         f(&bundle)?;
 
@@ -23,6 +24,7 @@ impl super::Verifier {
                 transparent,
                 sapling,
                 orchard: crate::orchard::Bundle::serialize_from(bundle),
+                ironwood,
             },
         })
     }

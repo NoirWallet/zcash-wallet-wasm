@@ -1,7 +1,7 @@
 //! Utilities for testing wallets based upon the [`crate::data_api`] traits.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     convert::Infallible,
     fmt,
     hash::Hash,
@@ -62,7 +62,7 @@ use super::{
     },
 };
 use crate::{
-    data_api::{MaxSpendMode, TargetValue, wallet::TargetHeight},
+    data_api::{MaxSpendMode, TargetValue, error::RewindError, wallet::TargetHeight},
     fees::{
         ChangeStrategy, DustOutputPolicy, StandardFeeRule,
         standard::{self, SingleOutputChangeStrategy},
@@ -621,6 +621,8 @@ where
         cb.chain_metadata = Some(compact_formats::ChainMetadata {
             sapling_commitment_tree_size: prior_cached_block.sapling_end_size,
             orchard_commitment_tree_size: prior_cached_block.orchard_end_size,
+            // The test framework does not generate Ironwood notes.
+            ironwood_commitment_tree_size: 0,
         });
 
         let res = self.cache_block(&prior_cached_block, cb);
@@ -862,6 +864,34 @@ where
             &mut self.wallet_data,
             from_height,
             &prior_cached_block.chain_state,
+            limit,
+        )
+    }
+
+    /// Invokes [`scan_cached_blocks`] with a caller-supplied `from_state` instead of deriving it
+    /// from the block cache.
+    ///
+    /// This is primarily useful for tests that need to drive [`WalletWrite::put_blocks`] with a
+    /// `from_state` that is deliberately inconsistent with the wallet's stored note commitment
+    /// tree state, in order to exercise the resulting error paths.
+    pub fn try_scan_cached_blocks_with_state(
+        &mut self,
+        from_height: BlockHeight,
+        from_state: &ChainState,
+        limit: usize,
+    ) -> Result<
+        ScanSummary,
+        super::chain::error::Error<
+            <DbT as WalletRead>::Error,
+            <Cache::BlockSource as BlockSource>::Error,
+        >,
+    > {
+        scan_cached_blocks(
+            &self.network,
+            self.cache.block_source(),
+            &mut self.wallet_data,
+            from_height,
+            from_state,
             limit,
         )
     }
@@ -1132,6 +1162,46 @@ where
             to_account,
             confirmations_policy,
             output_filter,
+        )
+    }
+
+    /// Invokes [`propose_shielding_coinbase`] with the given arguments.
+    ///
+    /// [`propose_shielding_coinbase`]: crate::data_api::wallet::propose_shielding_coinbase
+    #[cfg(feature = "transparent-inputs")]
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
+    pub fn propose_shielding_coinbase<InputsT, FeeRuleT>(
+        &mut self,
+        input_selector: &InputsT,
+        fee_rule: &FeeRuleT,
+        shielding_threshold: Zatoshis,
+        from_addrs: &[TransparentAddress],
+        to_address: zcash_address::ZcashAddress,
+        memo: Option<zcash_protocol::memo::MemoBytes>,
+        limit: Option<usize>,
+    ) -> Result<
+        Proposal<FeeRuleT, Infallible>,
+        super::wallet::ProposeShieldingCoinbaseErrT<DbT, Infallible, InputsT, FeeRuleT>,
+    >
+    where
+        InputsT: ShieldingSelector<InputSource = DbT>,
+        FeeRuleT: zcash_primitives::transaction::fees::FeeRule + Clone,
+    {
+        use super::wallet::propose_shielding_coinbase;
+
+        let network = self.network().clone();
+        propose_shielding_coinbase::<_, _, _, _, Infallible>(
+            self.wallet_mut(),
+            &network,
+            input_selector,
+            fee_rule,
+            shielding_threshold,
+            from_addrs,
+            to_address,
+            memo,
+            limit,
         )
     }
 
@@ -1473,10 +1543,9 @@ impl TestBuilder<(), ()> {
         nu6: None,
         nu6_1: None,
         nu6_2: None,
+        nu6_3: None,
         #[cfg(zcash_unstable = "nu7")]
         nu7: None,
-        #[cfg(zcash_unstable = "zfuture")]
-        z_future: None,
     };
 
     /// Constructs a new test environment builder.
@@ -2005,7 +2074,7 @@ impl TestFvk for DiversifiableFullViewingKey {
             compact_sapling_output(params, height, recipient, value, sender_ovk.copied(), rng);
         ctx.outputs.push(cout);
 
-        note.nf(&self.fvk().vk.nk, position as u64)
+        note.nf(&self.fvk().vk.nk, u64::from(position))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2217,8 +2286,17 @@ fn compact_orchard_action<R: RngCore + CryptoRng>(
         CompactOrchardAction {
             nullifier: compact_action.nullifier().to_bytes().to_vec(),
             cmx: compact_action.cmx().to_bytes().to_vec(),
-            ephemeral_key: compact_action.ephemeral_key().0.to_vec(),
-            ciphertext: compact_action.enc_ciphertext()[..52].to_vec(),
+            ephemeral_key:
+                ShieldedOutput::<::orchard::note_encryption::OrchardDomain, 52>::ephemeral_key(
+                    &compact_action,
+                )
+                .0
+                .to_vec(),
+            ciphertext:
+                ShieldedOutput::<::orchard::note_encryption::OrchardDomain, 52>::enc_ciphertext(
+                    &compact_action,
+                )[..52]
+                    .to_vec(),
         },
         note,
     )
@@ -2483,6 +2561,8 @@ fn fake_compact_block_from_compact_tx(
             + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
         orchard_commitment_tree_size: initial_orchard_tree_size
             + cb.vtx.iter().map(|tx| tx.actions.len() as u32).sum::<u32>(),
+        // The test framework does not generate Ironwood notes.
+        ironwood_commitment_tree_size: 0,
     });
     cb
 }
@@ -2992,14 +3072,18 @@ impl WalletWrite for MockWalletDb {
         Err(())
     }
 
-    fn rewind_to_height(&mut self, _max_height: BlockHeight) -> Result<BlockHeight, Self::Error> {
-        Err(())
+    fn rewind_to_chain_state(
+        &mut self,
+        _chain_state: ChainState,
+        _reset_account_birthdays: HashSet<Self::AccountId>,
+    ) -> Result<(), RewindError<Self::AccountId, Self::Error>> {
+        Err(RewindError::DataSource(()))
     }
 
     /// Adds a transparent UTXO received by the wallet to the data store.
     fn put_received_transparent_utxo(
         &mut self,
-        _output: &WalletTransparentOutput,
+        _output: &WalletTransparentOutput<Self::AccountId>,
     ) -> Result<Self::UtxoRef, Self::Error> {
         Ok(0)
     }

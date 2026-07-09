@@ -138,6 +138,9 @@ pub struct Note {
     pub rho: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     #[prost(message, optional, tag = "5")]
     pub rseed: ::core::option::Option<RSeed>,
+    /// Orchard note plaintext version. Missing legacy values are V2.
+    #[prost(uint32, optional, tag = "6")]
+    pub note_version: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RSeed {
@@ -284,6 +287,7 @@ pub enum RecipientType {
     ExternalRecipient = 0,
     EphemeralTransparent = 1,
     InternalAccount = 2,
+    InternalTransparent = 3,
 }
 impl RecipientType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -295,6 +299,7 @@ impl RecipientType {
             Self::ExternalRecipient => "ExternalRecipient",
             Self::EphemeralTransparent => "EphemeralTransparent",
             Self::InternalAccount => "InternalAccount",
+            Self::InternalTransparent => "InternalTransparent",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -303,6 +308,7 @@ impl RecipientType {
             "ExternalRecipient" => Some(Self::ExternalRecipient),
             "EphemeralTransparent" => Some(Self::EphemeralTransparent),
             "InternalAccount" => Some(Self::InternalAccount),
+            "InternalTransparent" => Some(Self::InternalTransparent),
             _ => None,
         }
     }

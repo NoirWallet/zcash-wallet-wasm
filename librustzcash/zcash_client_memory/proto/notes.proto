@@ -10,6 +10,7 @@ message Note {
   uint64 value = 3;
   optional bytes rho = 4;
   RSeed rseed = 5;
+  optional uint32 note_version = 6; // Orchard note plaintext version. Missing legacy values are V2.
 }
 
 message RSeed {
@@ -61,6 +62,7 @@ enum RecipientType {
   ExternalRecipient = 0;
   EphemeralTransparent = 1;
   InternalAccount = 2;
+  InternalTransparent = 3;
 }
 
 // associates a note and a transaction where it was spent

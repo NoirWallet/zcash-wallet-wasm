@@ -1046,7 +1046,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     #[cfg(feature = "transparent-inputs")]
     pub(crate) fn put_transparent_output(
         &mut self,
-        output: &WalletTransparentOutput,
+        output: &WalletTransparentOutput<AccountId>,
         receiving_account: &AccountId,
         known_unspent: bool,
     ) -> Result<OutPoint, Error> {

@@ -71,6 +71,7 @@ mod serialization {
                         }),
                     },
                     rho: None,
+                    note_version: None,
                 },
                 #[cfg(feature = "orchard")]
                 Note::Orchard(note) => Self {
@@ -82,6 +83,10 @@ mod serialization {
                         payload: note.rseed().as_bytes().to_vec(),
                     }),
                     rho: Some(note.rho().to_bytes().to_vec()),
+                    note_version: Some(match note.version() {
+                        orchard::NoteVersion::V2 => 2,
+                        orchard::NoteVersion::V3 => 3,
+                    }),
                 },
             }
         }
@@ -125,7 +130,15 @@ mod serialization {
                         &rho,
                     )
                     .unwrap();
-                    Self::Orchard(orchard::Note::from_parts(recipient, value, rho, rseed).unwrap())
+                    let note_version = match note.note_version.unwrap_or(2) {
+                        2 => orchard::NoteVersion::V2,
+                        3 => orchard::NoteVersion::V3,
+                        other => panic!("unsupported Orchard note version {other}"),
+                    };
+                    Self::Orchard(
+                        orchard::Note::from_parts(recipient, value, rho, rseed, note_version)
+                            .unwrap(),
+                    )
                 }
                 #[cfg(not(feature = "orchard"))]
                 _ => panic!("invalid protocol"),

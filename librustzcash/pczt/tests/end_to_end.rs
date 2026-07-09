@@ -15,6 +15,7 @@ use pczt::{
         signer::Signer, spend_finalizer::SpendFinalizer, tx_extractor::TransactionExtractor,
         updater::Updater,
     },
+    v1, v2,
 };
 use rand_core::OsRng;
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
@@ -37,12 +38,30 @@ use zcash_script::script::{self, Evaluable};
 static ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
 
 fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
-    ORCHARD_PROVING_KEY.get_or_init(orchard::circuit::ProvingKey::build)
+    ORCHARD_PROVING_KEY.get_or_init(|| {
+        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2)
+    })
 }
 
 fn check_round_trip(pczt: &Pczt) {
-    let encoded = pczt.serialize();
-    assert_eq!(encoded, Pczt::parse(&encoded).unwrap().serialize());
+    // The v1 encoding remains available explicitly.
+    v1::Pczt::try_from(pczt.clone())
+        .expect("v1 encoding succeeds")
+        .serialize();
+
+    // The default encoding is the latest (v2) encoding.
+    let v2_encoded = v2::Pczt::try_from(pczt.clone())
+        .expect("v2 encoding succeeds")
+        .serialize();
+
+    let encoded = pczt.clone().serialize().expect("serialization succeeds");
+    assert_eq!(encoded, v2_encoded);
+
+    let reencoded = Pczt::parse(&encoded)
+        .expect("can parse encoded PCZT")
+        .serialize()
+        .expect("serialization succeeds");
+    assert_eq!(encoded, reencoded);
 }
 
 #[test]
@@ -82,6 +101,7 @@ fn transparent_to_orchard() {
     let mut builder = Builder::new(params, 10_000_000.into(), BuildConfig::Standard {
         sapling_anchor: None,
         orchard_anchor: Some(orchard::Anchor::empty_tree()),
+        ironwood_anchor: None,
     });
     builder
         .add_transparent_p2pkh_input(transparent_pubkey, utxo, coin.clone())
@@ -242,6 +262,7 @@ fn transparent_p2sh_multisig_to_orchard() {
     let mut builder = Builder::new(params, 10_000_000.into(), BuildConfig::Standard {
         sapling_anchor: None,
         orchard_anchor: Some(orchard::Anchor::empty_tree()),
+        ironwood_anchor: None,
     });
     builder
         .add_transparent_p2sh_input(redeem_script, utxo, coin.clone())
@@ -446,6 +467,7 @@ fn sapling_to_orchard() {
     let mut builder = Builder::new(MainNetwork, 10_000_000.into(), BuildConfig::Standard {
         sapling_anchor: Some(anchor),
         orchard_anchor: Some(orchard::Anchor::empty_tree()),
+        ironwood_anchor: None,
     });
     builder
         .add_sapling_spend::<zip317::FeeRule>(sapling_dfvk.fvk().clone(), note, merkle_path)
@@ -513,7 +535,7 @@ fn sapling_to_orchard() {
 
     // Pass the PCZT to be signed through a serialization cycle to ensure we don't lose
     // any information. This emulates passing it to another device.
-    let pczt = Pczt::parse(&pczt.serialize()).unwrap();
+    let pczt = Pczt::parse(&pczt.serialize().unwrap()).unwrap();
 
     // Apply signatures.
     let mut signer = Signer::new(pczt).unwrap();
@@ -525,7 +547,7 @@ fn sapling_to_orchard() {
 
     // Emulate passing the signed PCZT back to the first device.
     let pczt_with_sapling_signatures =
-        Pczt::parse(&pczt_with_sapling_signatures.serialize()).unwrap();
+        Pczt::parse(&pczt_with_sapling_signatures.serialize().unwrap()).unwrap();
 
     // Combine the three PCZTs into one.
     let pczt = Combiner::new(vec![
@@ -564,8 +586,11 @@ fn orchard_to_orchard() {
     let note = {
         let mut orchard_builder = orchard::builder::Builder::new(
             orchard::builder::BundleType::DEFAULT,
+            orchard::bundle::BundleVersion::orchard_v2(),
+            orchard::bundle::BundleVersion::orchard_v2().default_flags(),
             orchard::Anchor::empty_tree(),
-        );
+        )
+        .unwrap();
         orchard_builder
             .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
             .unwrap();
@@ -601,6 +626,7 @@ fn orchard_to_orchard() {
     let mut builder = Builder::new(MainNetwork, 10_000_000.into(), BuildConfig::Standard {
         sapling_anchor: None,
         orchard_anchor: Some(anchor),
+        ironwood_anchor: None,
     });
     builder
         .add_orchard_spend::<zip317::FeeRule>(orchard_fvk.clone(), note, merkle_path)

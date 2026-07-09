@@ -8,10 +8,61 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
+## Unreleased
+
+### Added
+- `zcash_client_sqlite::error::SqliteClientError::PutBlocksCommitmentTree`, a
+  new variant that records the shielded pool and the range of block heights
+  being added to the wallet when a note commitment tree error occurs during a
+  `put_blocks` operation. Previously such errors (for example a `shardtree`
+  `InsertionError::Conflict` raised by `insert_frontier`) surfaced as the
+  generic `CommitmentTree` variant, which only reported the conflicting tree
+  node address and not the affected pool or block range.
+- `zcash_client_sqlite::error::SqliteClientError::TruncateCommitmentTree`, a
+  new variant that records the shielded pool and the block height that the
+  wallet was being truncated to when a note commitment tree error occurs
+  during a truncation operation (`truncate_to_height` or
+  `truncate_to_chain_state`). Previously such errors surfaced as the generic
+  `CommitmentTree` variant without the affected pool or target height.
+
+### Changed
+- Migrated to `zcash_protocol 0.10.0-pre.0`, `zcash_address 0.13.0-pre.0`,
+  `zcash_transparent 0.9.0-pre.0`, `zcash_keys 0.15.0-pre.0`,
+  `zcash_primitives 0.29.0-pre.0`, `zcash_proofs 0.29.0-pre.0`.
+- (behind the new `spend-index` feature) `WalletRead::transaction_data_requests`
+  emits `TransactionDataRequest::GetSpendingTx` for transparent spend
+  detection instead of `TransactionDataRequest::TransactionsInvolvingAddress`.
+  `TransactionsInvolvingAddress` is still emitted for ephemeral-address discovery,
+  and for spend detection when `spend-index` is disabled.
+- The database schema now includes a `UNIQUE` index on
+  `addresses.cached_transparent_receiver_address`, making account-by-transparent-address
+  lookups index-backed (previously a full table scan) and enforcing that each transparent
+  receiver belongs to at most one address record. If a pre-existing database already contains
+  duplicate cached transparent receiver addresses, the migration that adds the index resolves
+  them in place: within a single account it keeps a canonical record (preferring an HD-derived
+  record over an imported one), repoints the affected received outputs to it, and deletes the
+  redundant records. A receiver duplicated across more than one account cannot be safely merged
+  and causes the migration to abort.
+
+## [0.21.1] - 2026-06-19
+
+### Fixed
+- Fixed a bug in `WalletDb::delete_account` that caused it to fail with
+  `rusqlite::Error::InvalidParameterName(":address")` when the account being
+  deleted was referenced by a `sent_notes` row via its `to_account_id` column
+  (for example, after an internal transfer to an address belonging to the
+  account being deleted). The `sent_notes` update statement bound a parameter
+  named `:address` while the SQL expected `:to_address`.
+
 ## [0.21.0] - 2026-06-02
 
 ### Changed
 - Migrated to `zcash_protocol 0.9.0`, `zcash_address 0.12.0`, `zcash_transparent 0.8.0`, `zip321 0.8.0`, `zcash_keys 0.14.0`, `zcash_primitives 0.28.0`, `zcash_proofs 0.28.0`.
+
+### Fixed
+- Updated to crate versions that fix an Orchard soundness vulnerability
+  (GHSA-ww9q-8r59-xv46) and Orchard non-canonical proof size issue
+  (GHSA-2x4w-pxqw-58v9).
 
 ## [0.20.2] - 2026-05-07
 
@@ -69,8 +120,8 @@ workspace.
   `SqliteClientError::CommitmentTree` variant.
 
 ### Changed
-- Migrated to `sapling-crypto 0.7`, `orchard 0.13`, `zcash_encoding 0.4`, 
-  `zcash_protocol 0.8`, `zcash_address 0.11`, `zip321 0.7`, `zcash_transparent 0.7`, 
+- Migrated to `sapling-crypto 0.7`, `orchard 0.13`, `zcash_encoding 0.4`,
+  `zcash_protocol 0.8`, `zcash_address 0.11`, `zip321 0.7`, `zcash_transparent 0.7`,
   `zcash_primitives 0.27`, `zcash_proofs 0.27`, `zcash_keys 0.13`, `pczt 0.6`,
   `zcash_client_backend 0.22`
 - The `accounts` table now stores IVK item caches instead of FVK item caches for
