@@ -46,7 +46,7 @@ use zcash_proofs::prover::LocalTxProver;
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::ShieldedProtocol;
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::consensus::{BranchId, Parameters};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
@@ -112,27 +112,101 @@ fn get_prover() -> &'static LocalTxProver {
     })
 }
 
-/// Global Orchard proving key instance, initialized once on first use
-/// This avoids repeatedly building the expensive Orchard proving key
-static ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
+/// Global Orchard proving key instances, initialized once on first use.
+/// This avoids repeatedly building the expensive Orchard proving keys.
+static ORCHARD_PROVING_KEY_INSECURE_PRE_NU6_2: OnceLock<orchard::circuit::ProvingKey> =
+    OnceLock::new();
+static ORCHARD_PROVING_KEY_FIXED_POST_NU6_2: OnceLock<orchard::circuit::ProvingKey> =
+    OnceLock::new();
+static ORCHARD_PROVING_KEY_POST_NU6_3: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
 
-/// Get or initialize the global Orchard proving key
-fn get_orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
-    ORCHARD_PROVING_KEY.get_or_init(|| {
-        tracing::info!("🔧 Initializing Orchard ProvingKey...");
-        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3)
+/// Global Orchard verifying key instances, initialized once on first use.
+/// This avoids repeatedly building the expensive Orchard verifying keys.
+static ORCHARD_VERIFYING_KEY_INSECURE_PRE_NU6_2: OnceLock<orchard::circuit::VerifyingKey> =
+    OnceLock::new();
+static ORCHARD_VERIFYING_KEY_FIXED_POST_NU6_2: OnceLock<orchard::circuit::VerifyingKey> =
+    OnceLock::new();
+static ORCHARD_VERIFYING_KEY_POST_NU6_3: OnceLock<orchard::circuit::VerifyingKey> = OnceLock::new();
+
+fn orchard_circuit_version_for_branch(
+    branch_id: BranchId,
+) -> orchard::circuit::OrchardCircuitVersion {
+    match branch_id {
+        BranchId::Nu6_3 => orchard::circuit::OrchardCircuitVersion::PostNu6_3,
+        BranchId::Nu6_2 => orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
+        // NU7 is still behind a cfg in librustzcash; if this crate is compiled with
+        // that cfg enabled, its placeholder branch ID uses the post-NU6.3 circuit.
+        branch_id if u32::from(branch_id) == 0xffff_ffff => {
+            orchard::circuit::OrchardCircuitVersion::PostNu6_3
+        }
+        _ => orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2,
+    }
+}
+
+fn orchard_circuit_version_for_pczt(
+    pczt: &Pczt,
+) -> Result<orchard::circuit::OrchardCircuitVersion, Error> {
+    let consensus_branch_id = *pczt.global().consensus_branch_id();
+    BranchId::try_from(consensus_branch_id)
+        .map(orchard_circuit_version_for_branch)
+        .map_err(|_| {
+            Error::Generic(format!(
+                "Unsupported consensus branch ID in PCZT: 0x{consensus_branch_id:08x}"
+            ))
+        })
+}
+
+fn orchard_proving_key_lock(
+    circuit_version: orchard::circuit::OrchardCircuitVersion,
+) -> &'static OnceLock<orchard::circuit::ProvingKey> {
+    match circuit_version {
+        orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2 => {
+            &ORCHARD_PROVING_KEY_INSECURE_PRE_NU6_2
+        }
+        orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2 => {
+            &ORCHARD_PROVING_KEY_FIXED_POST_NU6_2
+        }
+        orchard::circuit::OrchardCircuitVersion::PostNu6_3 => &ORCHARD_PROVING_KEY_POST_NU6_3,
+    }
+}
+
+fn orchard_verifying_key_lock(
+    circuit_version: orchard::circuit::OrchardCircuitVersion,
+) -> &'static OnceLock<orchard::circuit::VerifyingKey> {
+    match circuit_version {
+        orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2 => {
+            &ORCHARD_VERIFYING_KEY_INSECURE_PRE_NU6_2
+        }
+        orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2 => {
+            &ORCHARD_VERIFYING_KEY_FIXED_POST_NU6_2
+        }
+        orchard::circuit::OrchardCircuitVersion::PostNu6_3 => &ORCHARD_VERIFYING_KEY_POST_NU6_3,
+    }
+}
+
+/// Get or initialize the global Orchard proving key for the given circuit version.
+fn get_orchard_proving_key(
+    circuit_version: orchard::circuit::OrchardCircuitVersion,
+) -> &'static orchard::circuit::ProvingKey {
+    orchard_proving_key_lock(circuit_version).get_or_init(|| {
+        tracing::info!(
+            "🔧 Initializing Orchard ProvingKey for {:?}...",
+            circuit_version
+        );
+        orchard::circuit::ProvingKey::build(circuit_version)
     })
 }
 
-/// Global Orchard verifying key instance, initialized once on first use
-/// This avoids repeatedly building the expensive Orchard verifying key
-static ORCHARD_VERIFYING_KEY: OnceLock<orchard::circuit::VerifyingKey> = OnceLock::new();
-
-/// Get or initialize the global Orchard verifying key
-fn get_orchard_verifying_key() -> &'static orchard::circuit::VerifyingKey {
-    ORCHARD_VERIFYING_KEY.get_or_init(|| {
-        tracing::info!("🔧 Initializing Orchard VerifyingKey...");
-        orchard::circuit::VerifyingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3)
+/// Get or initialize the global Orchard verifying key for the given circuit version.
+fn get_orchard_verifying_key(
+    circuit_version: orchard::circuit::OrchardCircuitVersion,
+) -> &'static orchard::circuit::VerifyingKey {
+    orchard_verifying_key_lock(circuit_version).get_or_init(|| {
+        tracing::info!(
+            "🔧 Initializing Orchard VerifyingKey for {:?}...",
+            circuit_version
+        );
+        orchard::circuit::VerifyingKey::build(circuit_version)
     })
 }
 
@@ -227,8 +301,6 @@ where
 
     pub fn new(db: W, client: T, network: Network) -> Result<Self, Error> {
         get_prover();
-        get_orchard_proving_key();
-        get_orchard_verifying_key();
         Ok(Wallet {
             db: Arc::new(RwLock::new(db)),
             client: CompactTxStreamerClient::new(client),
@@ -1588,19 +1660,42 @@ where
         };
 
         let prover = get_prover();
-        let orchard_proving_key = get_orchard_proving_key();
+        let orchard_circuit_version = orchard_circuit_version_for_pczt(&pczt)?;
 
         let total_start = js_sys::Date::now();
         let mut prover_instance = Prover::new(pczt);
 
         // Time Orchard proof generation
-        tracing::info!("🔧 Starting Orchard proof generation...");
-        let orchard_start = js_sys::Date::now();
-        prover_instance = prover_instance
-            .create_orchard_proof(orchard_proving_key)
-            .map_err(|e| Error::PcztProve(format!("Failed to create Orchard proof: {:?}", e)))?;
-        let orchard_elapsed = (js_sys::Date::now() - orchard_start) / 1000.0;
-        tracing::info!("✅ Orchard proof completed in {:.2}s", orchard_elapsed);
+        let mut orchard_elapsed = 0.0;
+        if prover_instance.requires_orchard_proof() {
+            let orchard_proving_key = get_orchard_proving_key(orchard_circuit_version);
+
+            tracing::info!("🔧 Starting Orchard proof generation...");
+            let orchard_start = js_sys::Date::now();
+            prover_instance = prover_instance
+                .create_orchard_proof(orchard_proving_key)
+                .map_err(|e| {
+                    Error::PcztProve(format!("Failed to create Orchard proof: {:?}", e))
+                })?;
+            orchard_elapsed = (js_sys::Date::now() - orchard_start) / 1000.0;
+            tracing::info!("✅ Orchard proof completed in {:.2}s", orchard_elapsed);
+        }
+
+        // Time Ironwood proof generation
+        let mut ironwood_elapsed = 0.0;
+        if prover_instance.requires_ironwood_proof() {
+            let orchard_proving_key = get_orchard_proving_key(orchard_circuit_version);
+
+            tracing::info!("🔧 Starting Ironwood proof generation...");
+            let ironwood_start = js_sys::Date::now();
+            prover_instance = prover_instance
+                .create_ironwood_proof(orchard_proving_key)
+                .map_err(|e| {
+                    Error::PcztProve(format!("Failed to create Ironwood proof: {:?}", e))
+                })?;
+            ironwood_elapsed = (js_sys::Date::now() - ironwood_start) / 1000.0;
+            tracing::info!("✅ Ironwood proof completed in {:.2}s", ironwood_elapsed);
+        }
 
         // Time Sapling proof generation
         tracing::info!("🔧 Starting Sapling proofs generation...");
@@ -1614,9 +1709,10 @@ where
         let pczt = prover_instance.finish();
         let total_elapsed = (js_sys::Date::now() - total_start) / 1000.0;
         tracing::info!(
-            "⏱️ Total proof generation: {:.2}s (Orchard: {:.2}s, Sapling: {:.2}s)",
+            "⏱️ Total proof generation: {:.2}s (Orchard: {:.2}s, Ironwood: {:.2}s, Sapling: {:.2}s)",
             total_elapsed,
             orchard_elapsed,
+            ironwood_elapsed,
             sapling_elapsed
         );
         Ok(pczt)
@@ -1625,9 +1721,10 @@ where
     pub async fn pczt_send(&self, pczt: Pczt) -> Result<String, Error> {
         let prover = get_prover();
         let (spend_vk, output_vk) = prover.verifying_keys();
+        let orchard_circuit_version = orchard_circuit_version_for_pczt(&pczt)?;
         let mut db = self.db.write().await;
 
-        let orchard_verifying_key = get_orchard_verifying_key();
+        let orchard_verifying_key = get_orchard_verifying_key(orchard_circuit_version);
         tracing::info!("📤 Extracting and storing transaction from PCZT...");
         let start_time = js_sys::Date::now();
         let txid = extract_and_store_transaction_from_pczt::<_, ()>(
