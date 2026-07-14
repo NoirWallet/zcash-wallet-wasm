@@ -126,11 +126,14 @@ impl Digits {
                         as u8
                 })
                 .collect::<Vec<_>>();
-            snafu::ensure!(places.len() >= min, DigitsMinimumSnafu {
-                min,
-                digits_len: places.len(),
-                input: i
-            });
+            snafu::ensure!(
+                places.len() >= min,
+                DigitsMinimumSnafu {
+                    min,
+                    digits_len: places.len(),
+                    input: i
+                }
+            );
             Ok((i, Digits { places }))
         }
     }
@@ -266,11 +269,14 @@ impl HexDigits {
     pub fn parse_min(min: usize) -> impl Fn(&str) -> nom::IResult<&str, Self, ParseError<'_>> {
         move |i| {
             let (i, data) = take_while(|c: char| c.is_ascii_hexdigit())(i)?;
-            snafu::ensure!(data.len() >= min, DigitsMinimumSnafu {
-                min,
-                digits_len: data.len(),
-                input: i
-            });
+            snafu::ensure!(
+                data.len() >= min,
+                DigitsMinimumSnafu {
+                    min,
+                    digits_len: data.len(),
+                    input: i
+                }
+            );
             let mut places = vec![];
             for c in data.chars() {
                 let digit = CaseSensitiveHexDigit::from_char(c)?;
@@ -304,9 +310,12 @@ impl HexDigits {
 
     /// Validates the digits as an Ethereum address according to ERC-55, if possible.   
     pub fn validate_erc55(&self) -> Result<(), ValidationError> {
-        snafu::ensure!(self.places.len() == 40, IncorrectEthAddressLenSnafu {
-            len: self.places.len()
-        });
+        snafu::ensure!(
+            self.places.len() == 40,
+            IncorrectEthAddressLenSnafu {
+                len: self.places.len()
+            }
+        );
 
         // Construct an ERC-55 checksummed address and compare that to the input
         let address_input = self.to_string();
@@ -330,22 +339,25 @@ impl HexDigits {
                 }
             })
             .collect::<String>();
-        snafu::ensure!(address_input == address_checksummed, Erc55ValidationSnafu {
-            reason: {
-                // It's possible that this was not a checksummed address. It's pretty rare that a checksummed
-                // address is all lowercase or all uppercase (a probability of 0.0004942706034105575)
-                if self.is_all_lowercase() {
-                    Erc55ValidationFailureReason::AllLowercase
-                } else if self.is_all_uppercase() {
-                    Erc55ValidationFailureReason::AllUppercase
-                } else {
-                    Erc55ValidationFailureReason::ChecksumDoesNotMatch {
-                        expected: address_checksummed,
-                        saw: address_input,
+        snafu::ensure!(
+            address_input == address_checksummed,
+            Erc55ValidationSnafu {
+                reason: {
+                    // It's possible that this was not a checksummed address. It's pretty rare that a checksummed
+                    // address is all lowercase or all uppercase (a probability of 0.0004942706034105575)
+                    if self.is_all_lowercase() {
+                        Erc55ValidationFailureReason::AllLowercase
+                    } else if self.is_all_uppercase() {
+                        Erc55ValidationFailureReason::AllUppercase
+                    } else {
+                        Erc55ValidationFailureReason::ChecksumDoesNotMatch {
+                            expected: address_checksummed,
+                            saw: address_input,
+                        }
                     }
                 }
             }
-        });
+        );
 
         Ok(())
     }
@@ -674,10 +686,13 @@ impl EnsName {
         let normalized_name = ens_normalize_rs::normalize(name).context(EnsNormalizationSnafu)?;
         // According to <https://eips.ethereum.org/EIPS/eip-137#name-syntax> each label in a name
         // must be a valid, normalized label, so the input `name` should match `normalized_name`.
-        snafu::ensure!(normalized_name == name, NotNormalizedSnafu {
-            expected: normalized_name,
-            seen: name.to_string(),
-        });
+        snafu::ensure!(
+            normalized_name == name,
+            NotNormalizedSnafu {
+                expected: normalized_name,
+                seen: name.to_string(),
+            }
+        );
 
         Ok((i, EnsName(normalized_name)))
     }
@@ -988,9 +1003,12 @@ impl Parameter {
             "gasPrice" => parse_number(Parameter::GasPrice)(i)?,
             other_key_blob => {
                 let (remaining_name_input, type_name) = EthereumAbiTypeName::parse(other_key_blob)?;
-                snafu::ensure!(remaining_name_input.is_empty(), InvalidParameterKeySnafu {
-                    key: other_key_blob.to_string()
-                });
+                snafu::ensure!(
+                    remaining_name_input.is_empty(),
+                    InvalidParameterKeySnafu {
+                        key: other_key_blob.to_string()
+                    }
+                );
                 let (i, value) =
                     Value::parse(i).map_err(|_| ParseError::InvalidParameterValue {
                         ty: type_name.to_string(),
@@ -1063,13 +1081,16 @@ impl Parameters {
             };
             values.insert(("value", number), n.clone());
         }
-        snafu::ensure!(values.len() <= 1, MultipleParameterValuesSnafu {
-            key: "value",
-            values: values
-                .into_iter()
-                .map(|((k, _), n)| (k, Value::Number(n)))
-                .collect::<Vec<_>>(),
-        });
+        snafu::ensure!(
+            values.len() <= 1,
+            MultipleParameterValuesSnafu {
+                key: "value",
+                values: values
+                    .into_iter()
+                    .map(|((k, _), n)| (k, Value::Number(n)))
+                    .collect::<Vec<_>>(),
+            }
+        );
         Ok(values.into_iter().next().map(|(_, n)| n))
     }
 
@@ -1089,13 +1110,16 @@ impl Parameters {
             // Also return the actual key for error reporting
             values.insert(("gasLimit", number), (k, n.clone()));
         }
-        snafu::ensure!(values.len() <= 1, MultipleParameterValuesSnafu {
-            key: "gasLimit",
-            values: values
-                .into_iter()
-                .map(|(_, (k, n))| (k, Value::Number(n)))
-                .collect::<Vec<_>>(),
-        });
+        snafu::ensure!(
+            values.len() <= 1,
+            MultipleParameterValuesSnafu {
+                key: "gasLimit",
+                values: values
+                    .into_iter()
+                    .map(|(_, (k, n))| (k, Value::Number(n)))
+                    .collect::<Vec<_>>(),
+            }
+        );
         Ok(values.into_iter().next().map(|(_, (_, n))| n))
     }
 
@@ -1114,13 +1138,16 @@ impl Parameters {
             };
             values.insert(("gasPrice", number), n.clone());
         }
-        snafu::ensure!(values.len() <= 1, MultipleParameterValuesSnafu {
-            key: "gasPrice",
-            values: values
-                .into_iter()
-                .map(|((k, _), n)| (k, Value::Number(n)))
-                .collect::<Vec<_>>(),
-        });
+        snafu::ensure!(
+            values.len() <= 1,
+            MultipleParameterValuesSnafu {
+                key: "gasPrice",
+                values: values
+                    .into_iter()
+                    .map(|((k, _), n)| (k, Value::Number(n)))
+                    .collect::<Vec<_>>(),
+            }
+        );
         Ok(values.into_iter().next().map(|(_, n)| n))
     }
 

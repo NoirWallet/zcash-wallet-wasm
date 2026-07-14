@@ -24,8 +24,8 @@ impl TransactionRequest {
     pub fn payment_requests(&self) -> Vec<PaymentRequest> {
         self.0
             .payments()
-            .iter()
-            .map(|(_index, p)| PaymentRequest(p.clone()))
+            .values()
+            .map(|p| PaymentRequest(p.clone()))
             .collect()
     }
 

@@ -483,12 +483,14 @@ impl Account {
                             ephemeral_ivk
                                 .derive_ephemeral_address(address_index)
                                 .map(|addr| {
-                                    self.ephemeral_addresses
-                                        .insert(raw_index, EphemeralAddress {
+                                    self.ephemeral_addresses.insert(
+                                        raw_index,
+                                        EphemeralAddress {
                                             address: addr,
                                             seen: None,
                                             used: None,
-                                        });
+                                        },
+                                    );
                                     (
                                         addr,
                                         TransparentAddressMetadata::derived(
@@ -587,6 +589,8 @@ impl zcash_client_backend::data_api::Account for Account {
 }
 
 mod serialization {
+    #[cfg(feature = "orchard")]
+    use incrementalmerkletree::frontier::Frontier;
     use zcash_client_backend::data_api::Zip32Derivation;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_keys::encoding::AddressCodec;
@@ -758,17 +762,27 @@ mod serialization {
                     .into_iter()
                     .map(|address_record| {
                         let address = read_optional!(address_record, ephemeral_address)?;
-                        Ok((address_record.index, EphemeralAddress {
-                            address: TransparentAddress::decode(&EncodingParams, &address.address)?,
-                            used: address
-                                .used_in_tx
-                                .map::<Result<_, Error>, _>(|s| Ok(TxId::from_bytes(s.try_into()?)))
-                                .transpose()?,
-                            seen: address
-                                .seen_in_tx
-                                .map::<Result<_, Error>, _>(|s| Ok(TxId::from_bytes(s.try_into()?)))
-                                .transpose()?,
-                        }))
+                        Ok((
+                            address_record.index,
+                            EphemeralAddress {
+                                address: TransparentAddress::decode(
+                                    &EncodingParams,
+                                    &address.address,
+                                )?,
+                                used: address
+                                    .used_in_tx
+                                    .map::<Result<_, Error>, _>(|s| {
+                                        Ok(TxId::from_bytes(s.try_into()?))
+                                    })
+                                    .transpose()?,
+                                seen: address
+                                    .seen_in_tx
+                                    .map::<Result<_, Error>, _>(|s| {
+                                        Ok(TxId::from_bytes(s.try_into()?))
+                                    })
+                                    .transpose()?,
+                            },
+                        ))
                     })
                     .collect::<Result<_, Error>>()?,
                 #[cfg(not(feature = "transparent-inputs"))]
@@ -794,6 +808,14 @@ mod serialization {
             };
             #[cfg(not(feature = "orchard"))]
             let orchard_tree_bytes = vec![];
+            #[cfg(feature = "orchard")]
+            let ironwood_tree_bytes = {
+                let mut ironwood_tree_bytes = vec![];
+                write_frontier_v1(&mut ironwood_tree_bytes, cstate.final_ironwood_tree())?;
+                ironwood_tree_bytes
+            };
+            #[cfg(not(feature = "orchard"))]
+            let ironwood_tree_bytes = vec![];
 
             Ok(Self {
                 prior_chain_state: Some(proto::ChainState {
@@ -801,6 +823,7 @@ mod serialization {
                     block_hash: cstate.block_hash().0.to_vec(),
                     final_sapling_tree: sapling_tree_bytes,
                     final_orchard_tree: orchard_tree_bytes,
+                    final_ironwood_tree: ironwood_tree_bytes,
                 }),
                 recover_until: birthday.recover_until().map(|r| r.into()),
             })
@@ -818,6 +841,12 @@ mod serialization {
                 read_frontier_v1(&cs.final_sapling_tree[..])?,
                 #[cfg(feature = "orchard")]
                 read_frontier_v1(&cs.final_orchard_tree[..])?,
+                #[cfg(feature = "orchard")]
+                if cs.final_ironwood_tree.is_empty() {
+                    Frontier::empty()
+                } else {
+                    read_frontier_v1(&cs.final_ironwood_tree[..])?
+                },
             );
 
             let recover_until = birthday.recover_until.map(|r| r.into());

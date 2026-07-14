@@ -22,13 +22,13 @@ use tonic::{
     codegen::{Body, Bytes, StdError},
 };
 use zcash_address::ZcashAddress;
-use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
+use zcash_client_backend::data_api::wallet::input_selection::{GreedyInputSelector, SpendPolicy};
 use zcash_client_backend::data_api::wallet::{
-    ConfirmationsPolicy, create_pczt_from_proposal, create_pczt_from_proposal_with_expiry_delta,
-    extract_and_store_transaction_from_pczt, propose_shielding, propose_transfer,
+    ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
+    propose_send_max_transfer, propose_shielding, propose_transfer,
 };
 use zcash_client_backend::data_api::{
-    Account, AccountBirthday, AccountPurpose, TransparentOutputFilter, WalletSummary,
+    Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, WalletSummary,
     Zip32Derivation,
 };
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
@@ -40,13 +40,13 @@ use zcash_client_backend::{
     data_api::{InputSource, WalletCommitmentTrees, WalletRead, WalletWrite},
     proto::service::{self, compact_tx_streamer_client::CompactTxStreamerClient},
 };
-use zcash_primitives::transaction::TxId;
 use zcash_primitives::transaction::fees::{FeeRule, zip317 as prim_zip317};
+use zcash_primitives::transaction::{TxId, TxVersion};
 use zcash_proofs::prover::LocalTxProver;
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
-use zcash_protocol::ShieldedProtocol;
-use zcash_protocol::consensus::{BranchId, Parameters};
+use zcash_protocol::ShieldedPool;
+use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
@@ -929,6 +929,38 @@ where
         db.put_orchard_subtree_roots(0, &orchard_roots)
             .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
 
+        let mut request = service::GetSubtreeRootsArg::default();
+        request.set_shielded_protocol(service::ShieldedProtocol::Ironwood);
+        let ironwood_roots: Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>> =
+            match client.get_subtree_roots(request).await {
+                Ok(response) => response
+                    .into_inner()
+                    .and_then(|root| async move {
+                        let root_hash =
+                            orchard::tree::MerkleHashOrchard::read(&root.root_hash[..])?;
+                        Ok(CommitmentTreeRoot::from_parts(
+                            BlockHeight::from_u32(root.completing_block_height as u32),
+                            root_hash,
+                        ))
+                    })
+                    .try_collect()
+                    .await
+                    .map_err(|e| Error::Generic(format!("Stream error: {e}")))?,
+                Err(status)
+                    if matches!(
+                        status.code(),
+                        tonic::Code::InvalidArgument | tonic::Code::Unimplemented
+                    ) =>
+                {
+                    // Mainnet-compatible fallback for lightwalletd instances that have not yet
+                    // deployed the Ironwood subtree-roots request.
+                    Vec::new()
+                }
+                Err(status) => return Err(Error::Generic(format!("gRPC error: {status}"))),
+            };
+        db.put_ironwood_subtree_roots(0, &ironwood_roots)
+            .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
         Ok(())
     }
 
@@ -993,12 +1025,11 @@ where
 
         // Find the account with matching name
         for account_id in account_ids {
-            if let Some(account) = db.get_account(account_id)? {
-                if let Some(name) = account.name() {
-                    if name == account_name {
-                        return Ok(account_id);
-                    }
-                }
+            if let Some(account) = db.get_account(account_id)?
+                && let Some(name) = account.name()
+                && name == account_name
+            {
+                return Ok(account_id);
             }
         }
 
@@ -1009,6 +1040,12 @@ where
         let db = self.db.read().await;
         let birthday_height = db.get_account_birthday(account_id)?;
         Ok(birthday_height.into())
+    }
+
+    pub fn ironwood_activation_height(&self) -> Option<u32> {
+        self.network
+            .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+            .map(Into::into)
     }
 
     /// Get the timestamp (Unix time) of a block at a given height
@@ -1133,7 +1170,7 @@ where
         let change_strategy = MultiOutputChangeStrategy::new(
             StandardFeeRule::Zip317,
             None,
-            ShieldedProtocol::Orchard,
+            ShieldedPool::Orchard,
             DustOutputPolicy::default(),
             SplitPolicy::with_min_output_value(
                 NonZeroUsize::new(self.target_note_count)
@@ -1179,9 +1216,9 @@ where
             &from_addrs,
             account_id,
             self.confirmations_policy(),
-            TransparentOutputFilter::All,
+            CoinbaseFilter::AllTransparentOutputs,
         )
-        .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
 
         let pczt = create_pczt_from_proposal::<
             _,
@@ -1196,8 +1233,10 @@ where
             account_id,
             OvkPolicy::Sender,
             &proposal,
+            None,
+            orchard::builder::BundleType::DEFAULT,
         )
-        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {e:?}")))?;
 
         Ok(pczt)
     }
@@ -1213,7 +1252,7 @@ where
         let change_strategy = MultiOutputChangeStrategy::new(
             StandardFeeRule::Zip317,
             None,
-            ShieldedProtocol::Orchard,
+            ShieldedPool::Orchard,
             DustOutputPolicy::default(),
             SplitPolicy::with_min_output_value(
                 NonZeroUsize::new(self.target_note_count)
@@ -1243,8 +1282,10 @@ where
             &change_strategy,
             request,
             self.confirmations_policy(),
+            &SpendPolicy::default(),
+            None,
         )
-            .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {:?}", e)))?;
+            .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {e:?}")))?;
         let pczt = create_pczt_from_proposal::<
             _,
             _,
@@ -1258,8 +1299,10 @@ where
             account_id,
             OvkPolicy::Sender,
             &proposal,
+            None,
+            orchard::builder::BundleType::DEFAULT,
         )
-        .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {e:?}")))?;
         Ok(pczt)
     }
 
@@ -1293,7 +1336,7 @@ where
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
                 None,
-                ShieldedProtocol::Orchard,
+                ShieldedPool::Orchard,
                 DustOutputPolicy::default(),
                 SplitPolicy::with_min_output_value(
                     NonZeroUsize::new(self.target_note_count)
@@ -1343,12 +1386,12 @@ where
             &from_addrs,
             account_id,
             self.confirmations_policy(),
-            TransparentOutputFilter::All,
+            CoinbaseFilter::AllTransparentOutputs,
         )
-        .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
 
         let pczt = match expiry_delta_blocks {
-            Some(expiry_delta_blocks) => create_pczt_from_proposal_with_expiry_delta::<
+            Some(expiry_delta_blocks) => create_pczt_from_proposal::<
                 _,
                 _,
                 <MemoryWalletDb<Network> as InputSource>::Error,
@@ -1361,7 +1404,8 @@ where
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
-                expiry_delta_blocks,
+                Some(BlockHeight::from(proposal.min_target_height()) + expiry_delta_blocks),
+                orchard::builder::BundleType::DEFAULT,
             ),
             None => create_pczt_from_proposal::<
                 _,
@@ -1376,9 +1420,11 @@ where
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
+                None,
+                orchard::builder::BundleType::DEFAULT,
             ),
         }
-        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {e:?}")))?;
 
         Ok(pczt)
     }
@@ -1436,7 +1482,7 @@ where
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
                 None,
-                ShieldedProtocol::Orchard,
+                ShieldedPool::Orchard,
                 DustOutputPolicy::default(),
                 SplitPolicy::with_min_output_value(
                     NonZeroUsize::new(self.target_note_count)
@@ -1466,10 +1512,12 @@ where
             &change_strategy,
             request,
             self.confirmations_policy(),
+            &SpendPolicy::default(),
+            None,
         )
-        .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {e:?}")))?;
         let pczt = match expiry_delta_blocks {
-            Some(expiry_delta_blocks) => create_pczt_from_proposal_with_expiry_delta::<
+            Some(expiry_delta_blocks) => create_pczt_from_proposal::<
                 _,
                 _,
                 <MemoryWalletDb<Network> as InputSource>::Error,
@@ -1482,7 +1530,8 @@ where
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
-                expiry_delta_blocks,
+                Some(BlockHeight::from(proposal.min_target_height()) + expiry_delta_blocks),
+                orchard::builder::BundleType::DEFAULT,
             ),
             None => create_pczt_from_proposal::<
                 _,
@@ -1497,10 +1546,152 @@ where
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
+                None,
+                orchard::builder::BundleType::DEFAULT,
             ),
         }
-        .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {e:?}")))?;
         Ok(pczt)
+    }
+
+    /// Sweeps all currently spendable Orchard notes into the Ironwood pool.
+    ///
+    /// The destination must belong to the same wallet account. The proposal is restricted to
+    /// Orchard inputs and transaction V6; after NU6.3, its Orchard receiver is carried by the
+    /// Ironwood bundle.
+    pub async fn pczt_create_orchard_migration(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<Pczt, Error> {
+        let expiry_delta_blocks = expiry_delta_blocks
+            .map(validate_expiry_delta_blocks)
+            .transpose()?;
+        let wallet_address = zcash_client_backend::address::Address::try_from_zcash_address(
+            &self.network,
+            to_address.clone(),
+        )
+        .map_err(|e| Error::Generic(format!("Invalid migration address: {e:?}")))?;
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let fee_rule = dynamic_zip317_fee_rule(marginal_fee_zats)?;
+        let mut db = self.db.write().await;
+
+        let destination_account = db
+            .find_account_for_address(&self.network, &wallet_address)
+            .map_err(|e| Error::Generic(format!("Failed to validate migration address: {e:?}")))?;
+        if destination_account != Some(account_id) {
+            return Err(Error::Generic(
+                "Orchard migration destination must belong to the source account".into(),
+            ));
+        }
+
+        let target_height = db
+            .chain_height()?
+            .map(|height| height + 1)
+            .ok_or_else(|| Error::Generic("Wallet must be synced before migration".into()))?;
+        let activation_height = self
+            .network
+            .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+            .ok_or_else(|| Error::Generic("NU6.3 is not configured for this network".into()))?;
+        if target_height < activation_height {
+            return Err(Error::Generic(format!(
+                "Ironwood is not active until height {}",
+                u32::from(activation_height)
+            )));
+        }
+
+        let proposal = propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &[ShieldedPool::Orchard],
+            &fee_rule,
+            to_address,
+            memo,
+            MaxSpendMode::MaxSpendable,
+            self.confirmations_policy(),
+        )
+        .map_err(|e| Error::Generic(format!("Failed to propose Orchard migration: {e:?}")))?
+        .with_proposed_version(Some(TxVersion::V6));
+
+        create_pczt_from_proposal::<
+            _,
+            _,
+            <MemoryWalletDb<Network> as InputSource>::Error,
+            _,
+            <prim_zip317::FeeRule as FeeRule>::Error,
+            _,
+        >(
+            &mut *db,
+            &self.network,
+            account_id,
+            OvkPolicy::Sender,
+            &proposal,
+            expiry_delta_blocks
+                .map(|delta| BlockHeight::from(proposal.min_target_height()) + delta),
+            orchard::builder::BundleType::DEFAULT,
+        )
+        .map_err(|e| Error::Generic(format!("Failed to create migration PCZT: {e:?}")))
+    }
+
+    pub async fn estimate_orchard_migration_fee(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<u64, Error> {
+        let wallet_address = zcash_client_backend::address::Address::try_from_zcash_address(
+            &self.network,
+            to_address.clone(),
+        )
+        .map_err(|e| Error::Generic(format!("Invalid migration address: {e:?}")))?;
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let fee_rule = dynamic_zip317_fee_rule(marginal_fee_zats)?;
+        let mut db = self.db.write().await;
+
+        let destination_account = db
+            .find_account_for_address(&self.network, &wallet_address)
+            .map_err(|e| Error::Generic(format!("Failed to validate migration address: {e:?}")))?;
+        if destination_account != Some(account_id) {
+            return Err(Error::Generic(
+                "Orchard migration destination must belong to the source account".into(),
+            ));
+        }
+
+        let target_height = db
+            .chain_height()?
+            .map(|height| height + 1)
+            .ok_or_else(|| Error::Generic("Wallet must be synced before migration".into()))?;
+        let activation_height = self
+            .network
+            .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+            .ok_or_else(|| Error::Generic("NU6.3 is not configured for this network".into()))?;
+        if target_height < activation_height {
+            return Err(Error::Generic(format!(
+                "Ironwood is not active until height {}",
+                u32::from(activation_height)
+            )));
+        }
+
+        let proposal = propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &[ShieldedPool::Orchard],
+            &fee_rule,
+            to_address,
+            memo,
+            MaxSpendMode::MaxSpendable,
+            self.confirmations_policy(),
+        )
+        .map_err(|e| Error::Generic(format!("Failed to estimate Orchard migration: {e:?}")))?
+        .with_proposed_version(Some(TxVersion::V6));
+
+        proposal_fee_required_zats(&proposal)
     }
 
     pub async fn estimate_pczt_shield_fee(
@@ -1512,7 +1703,7 @@ where
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
                 None,
-                ShieldedProtocol::Orchard,
+                ShieldedPool::Orchard,
                 DustOutputPolicy::default(),
                 SplitPolicy::with_min_output_value(
                     NonZeroUsize::new(self.target_note_count)
@@ -1556,9 +1747,9 @@ where
             &from_addrs,
             account_id,
             self.confirmations_policy(),
-            TransparentOutputFilter::All,
+            CoinbaseFilter::AllTransparentOutputs,
         )
-        .map_err(|e| Error::Generic(format!("Error when estimating shielding fee: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Error when estimating shielding fee: {e:?}")))?;
 
         proposal_fee_required_zats(&proposal)
     }
@@ -1575,7 +1766,7 @@ where
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
                 None,
-                ShieldedProtocol::Orchard,
+                ShieldedPool::Orchard,
                 DustOutputPolicy::default(),
                 SplitPolicy::with_min_output_value(
                     NonZeroUsize::new(self.target_note_count)
@@ -1605,8 +1796,10 @@ where
             &change_strategy,
             request,
             self.confirmations_policy(),
+            &SpendPolicy::default(),
+            None,
         )
-        .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {e:?}")))?;
 
         proposal_fee_required_zats(&proposal)
     }
@@ -1649,10 +1842,7 @@ where
                     Ok(())
                 })
                 .map_err(|e| {
-                    Error::PcztProve(format!(
-                        "Failed to add Sapling proof generation key: {:?}",
-                        e
-                    ))
+                    Error::PcztProve(format!("Failed to add Sapling proof generation key: {e:?}"))
                 })?
                 .finish()
         } else {
@@ -1674,9 +1864,7 @@ where
             let orchard_start = js_sys::Date::now();
             prover_instance = prover_instance
                 .create_orchard_proof(orchard_proving_key)
-                .map_err(|e| {
-                    Error::PcztProve(format!("Failed to create Orchard proof: {:?}", e))
-                })?;
+                .map_err(|e| Error::PcztProve(format!("Failed to create Orchard proof: {e:?}")))?;
             orchard_elapsed = (js_sys::Date::now() - orchard_start) / 1000.0;
             tracing::info!("✅ Orchard proof completed in {:.2}s", orchard_elapsed);
         }
@@ -1690,9 +1878,7 @@ where
             let ironwood_start = js_sys::Date::now();
             prover_instance = prover_instance
                 .create_ironwood_proof(orchard_proving_key)
-                .map_err(|e| {
-                    Error::PcztProve(format!("Failed to create Ironwood proof: {:?}", e))
-                })?;
+                .map_err(|e| Error::PcztProve(format!("Failed to create Ironwood proof: {e:?}")))?;
             ironwood_elapsed = (js_sys::Date::now() - ironwood_start) / 1000.0;
             tracing::info!("✅ Ironwood proof completed in {:.2}s", ironwood_elapsed);
         }
@@ -1702,7 +1888,7 @@ where
         let sapling_start = js_sys::Date::now();
         prover_instance = prover_instance
             .create_sapling_proofs(prover, prover)
-            .map_err(|e| Error::PcztProve(format!("Failed to create Sapling proofs: {:?}", e)))?;
+            .map_err(|e| Error::PcztProve(format!("Failed to create Sapling proofs: {e:?}")))?;
         let sapling_elapsed = (js_sys::Date::now() - sapling_start) / 1000.0;
         tracing::info!("✅ Sapling proofs completed in {:.2}s", sapling_elapsed);
 
@@ -1735,8 +1921,7 @@ where
         )
         .map_err(|e| {
             Error::PcztSend(format!(
-                "Failed to extract and store transaction from PCZT: {:?}",
-                e
+                "Failed to extract and store transaction from PCZT: {e:?}"
             ))
         })?;
         let end_time = js_sys::Date::now();

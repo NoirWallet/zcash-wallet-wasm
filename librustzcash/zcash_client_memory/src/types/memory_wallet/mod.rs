@@ -31,13 +31,16 @@ use zcash_client_backend::{
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
-    ShieldedProtocol, TxId,
+    ShieldedPool, TxId,
     consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
 };
 use zip32::{Scope, fingerprint::SeedFingerprint};
 
 #[cfg(feature = "orchard")]
-use zcash_client_backend::{data_api::ORCHARD_SHARD_HEIGHT, wallet::WalletOrchardOutput};
+use zcash_client_backend::{
+    data_api::ORCHARD_SHARD_HEIGHT,
+    wallet::{WalletIronwoodOutput, WalletOrchardOutput},
+};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -90,6 +93,16 @@ pub struct MemoryWalletDb<P: consensus::Parameters> {
     #[cfg(feature = "orchard")]
     /// Stores the block height corresponding to the last note commitment in a shard
     pub(crate) orchard_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
+    /// Ironwood commitment tree.
+    #[cfg(feature = "orchard")]
+    pub(crate) ironwood_tree: ShardTree<
+        MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
+        { ORCHARD_SHARD_HEIGHT * 2 },
+        ORCHARD_SHARD_HEIGHT,
+    >,
+    /// Stores the block height corresponding to the last Ironwood note commitment in a shard.
+    #[cfg(feature = "orchard")]
+    pub(crate) ironwood_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
 
     /// Transparent outputs received by the wallet
     pub(crate) transparent_received_outputs: TransparentReceivedOutputs,
@@ -109,8 +122,9 @@ impl<P: consensus::Parameters + PartialEq> PartialEq for MemoryWalletDb<P> {
     /// but does NOT compare the sapling_tree and orchard_tree fields.
     fn eq(&self, other: &Self) -> bool {
         #[cfg(feature = "orchard")]
-        let orchard_comparisons =
-            { self.orchard_tree_shard_end_heights == other.orchard_tree_shard_end_heights };
+        let orchard_comparisons = self.orchard_tree_shard_end_heights
+            == other.orchard_tree_shard_end_heights
+            && self.ironwood_tree_shard_end_heights == other.ironwood_tree_shard_end_heights;
         #[cfg(not(feature = "orchard"))]
         let orchard_comparisons = true;
 
@@ -153,6 +167,10 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             orchard_tree: ShardTree::new(MemoryShardStore::empty(), max_checkpoints),
             #[cfg(feature = "orchard")]
             orchard_tree_shard_end_heights: BTreeMap::new(),
+            #[cfg(feature = "orchard")]
+            ironwood_tree: ShardTree::new(MemoryShardStore::empty(), max_checkpoints),
+            #[cfg(feature = "orchard")]
+            ironwood_tree_shard_end_heights: BTreeMap::new(),
             tx_table: TransactionTable::new(),
             received_notes: ReceivedNoteTable::new(),
             sent_notes: SentNoteTable::new(),
@@ -189,8 +207,9 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         // birthday frontier is the empty frontier, we don't need to do anything.
         if let Some(frontier) = birthday.sapling_frontier().value() {
             tracing::debug!("Inserting Sapling frontier into ShardTree: {:?}", frontier);
-            self.sapling_tree
-                .insert_frontier_nodes(frontier.clone(), Retention::Checkpoint {
+            self.sapling_tree.insert_frontier_nodes(
+                frontier.clone(),
+                Retention::Checkpoint {
                     // This subtraction is safe, because all leaves in the tree appear in blocks, and
                     // the invariant that birthday.height() always corresponds to the block for which
                     // `frontier` is the tree state at the start of the block. Together, this means
@@ -198,14 +217,16 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     // the block.
                     id: birthday.height() - 1,
                     marking: Marking::Reference,
-                })?;
+                },
+            )?;
         }
 
         #[cfg(feature = "orchard")]
         if let Some(frontier) = birthday.orchard_frontier().value() {
             tracing::debug!("Inserting Orchard frontier into ShardTree: {:?}", frontier);
-            self.orchard_tree
-                .insert_frontier_nodes(frontier.clone(), Retention::Checkpoint {
+            self.orchard_tree.insert_frontier_nodes(
+                frontier.clone(),
+                Retention::Checkpoint {
                     // This subtraction is safe, because all leaves in the tree appear in blocks, and
                     // the invariant that birthday.height() always corresponds to the block for which
                     // `frontier` is the tree state at the start of the block. Together, this means
@@ -213,7 +234,20 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     // the block.
                     id: birthday.height() - 1,
                     marking: Marking::Reference,
-                })?;
+                },
+            )?;
+        }
+
+        #[cfg(feature = "orchard")]
+        if let Some(frontier) = birthday.prior_chain_state().final_ironwood_tree().value() {
+            tracing::debug!("Inserting Ironwood frontier into ShardTree: {:?}", frontier);
+            self.ironwood_tree.insert_frontier_nodes(
+                frontier.clone(),
+                Retention::Checkpoint {
+                    id: birthday.height() - 1,
+                    marking: Marking::Reference,
+                },
+            )?;
         }
 
         // The ignored range always starts at Sapling activation
@@ -313,6 +347,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     .flat_map(|bundle| bundle.actions().iter().map(|action| action.nullifier())),
             )?,
         );
+        #[cfg(feature = "orchard")]
+        funding_accounts.extend(
+            self.received_notes.detect_orchard_spending_accounts(
+                tx.ironwood_bundle()
+                    .iter()
+                    .flat_map(|bundle| bundle.actions().iter().map(|action| action.nullifier())),
+            )?,
+        );
 
         Ok(funding_accounts)
     }
@@ -405,7 +447,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .get(&note.txid())
             .ok_or_else(|| Error::TransactionNotFound(note.txid()))?;
 
-        let unscanned_ranges = self.unscanned_ranges();
+        let unscanned_ranges = self.unscanned_ranges(note.note.pool());
         let anchor_height = target_height - u32::from(confirmations_policy.trusted());
 
         let note_in_unscanned_range =
@@ -506,6 +548,22 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         Ok(())
     }
 
+    #[cfg(feature = "orchard")]
+    pub(crate) fn mark_ironwood_note_spent(
+        &mut self,
+        nf: orchard::note::Nullifier,
+        txid: TxId,
+    ) -> Result<(), Error> {
+        let note_id = self
+            .received_notes
+            .iter()
+            .find(|v| v.nullifier() == Some(&Nullifier::Ironwood(nf)))
+            .map(|v| v.note_id())
+            .ok_or(Error::NoteNotFound)?;
+        self.received_note_spends.insert_spend(note_id, txid);
+        Ok(())
+    }
+
     pub(crate) fn max_zip32_account_index(
         &self,
         seed_fingerprint: &SeedFingerprint,
@@ -546,6 +604,19 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     ) {
         self.received_notes
             .insert_received_note(ReceivedNote::from_wallet_orchard_output(note_id, output));
+        if let Some(spent_in) = spent_in {
+            self.received_note_spends.insert_spend(note_id, spent_in);
+        }
+    }
+    #[cfg(feature = "orchard")]
+    pub(crate) fn insert_received_ironwood_note(
+        &mut self,
+        note_id: NoteId,
+        output: &WalletIronwoodOutput<AccountId>,
+        spent_in: Option<TxId>,
+    ) {
+        self.received_notes
+            .insert_received_note(ReceivedNote::from_wallet_ironwood_output(note_id, output));
         if let Some(spent_in) = spent_in {
             self.received_note_spends.insert_spend(note_id, spent_in);
         }
@@ -605,6 +676,31 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         Ok(())
     }
 
+    #[cfg(feature = "orchard")]
+    pub(crate) fn insert_ironwood_nullifier_map(
+        &mut self,
+        block_height: BlockHeight,
+        new_entries: &[(TxIndex, TxId, Vec<orchard::note::Nullifier>)],
+    ) -> Result<(), Error> {
+        for (tx_index, txid, nullifiers) in new_entries {
+            for nf in nullifiers {
+                self.nullifiers.insert(
+                    block_height,
+                    u32::from(*tx_index),
+                    Nullifier::Ironwood(*nf),
+                );
+            }
+            match self.tx_locator.entry((block_height, u32::from(*tx_index))) {
+                Entry::Occupied(x) if txid == x.get() => {}
+                Entry::Occupied(_) => return Err(Error::ConflictingTxLocator),
+                Entry::Vacant(entry) => {
+                    entry.insert(*txid);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn block_height_extrema(&self) -> Option<RangeInclusive<BlockHeight>> {
         let (min, max) = self.blocks.keys().fold((None, None), |(min, max), height| {
             (
@@ -626,6 +722,11 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     #[cfg(feature = "orchard")]
     pub(crate) fn orchard_tip_shard_end_height(&self) -> Option<BlockHeight> {
         self.orchard_tree_shard_end_heights.values().max().copied()
+    }
+
+    #[cfg(feature = "orchard")]
+    pub(crate) fn ironwood_tip_shard_end_height(&self) -> Option<BlockHeight> {
+        self.ironwood_tree_shard_end_heights.values().max().copied()
     }
 
     pub(crate) fn get_sapling_max_checkpointed_height(
@@ -663,10 +764,33 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         Ok(None)
     }
 
-    /// Get the unscanned ranges from the scan queue and their corresponding sapling tree indices
+    #[cfg(feature = "orchard")]
+    pub(crate) fn get_ironwood_max_checkpointed_height(
+        &self,
+        chain_tip_height: BlockHeight,
+        min_confirmations: NonZeroU32,
+    ) -> Result<Option<BlockHeight>, Error> {
+        let max_checkpoint_height =
+            u32::from(chain_tip_height).saturating_sub(u32::from(min_confirmations) - 1);
+        for height in (0..=max_checkpoint_height).rev() {
+            let height = BlockHeight::from_u32(height);
+            if self
+                .ironwood_tree
+                .store()
+                .get_checkpoint(&height)?
+                .is_some()
+            {
+                return Ok(Some(height));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Get the unscanned ranges from the scan queue and their corresponding tree indices.
     /// This can be used to determine if a note is in an unscanned range and therefore not spendable
     pub(crate) fn unscanned_ranges(
         &self,
+        pool: ShieldedPool,
     ) -> Vec<(BlockHeight, BlockHeight, Option<Position>, Option<Position>)> {
         self.scan_queue
             .iter()
@@ -675,35 +799,53 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 (
                     *start,
                     *end,
-                    self.first_subtree_for_height(start)
+                    self.first_subtree_for_height(pool, start)
                         .map(|a| a.position_range_start()),
-                    self.last_subtree_for_height(end)
+                    self.last_subtree_for_height(pool, end)
                         .map(|a| a.position_range_end()),
                 )
             })
             .collect()
     }
 
-    /// Return the address of the last subtree in the sapling tree where note for a give block height was found
-    pub(crate) fn last_subtree_for_height(&self, height: &BlockHeight) -> Option<Address> {
-        self.sapling_tree_shard_end_heights
+    /// Return the last subtree in the selected tree that ended at the given block height.
+    pub(crate) fn last_subtree_for_height(
+        &self,
+        pool: ShieldedPool,
+        height: &BlockHeight,
+    ) -> Option<Address> {
+        let shard_end_heights = match pool {
+            ShieldedPool::Sapling => &self.sapling_tree_shard_end_heights,
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Orchard => &self.orchard_tree_shard_end_heights,
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Ironwood => &self.ironwood_tree_shard_end_heights,
+            #[cfg(not(feature = "orchard"))]
+            ShieldedPool::Orchard | ShieldedPool::Ironwood => return None,
+        };
+
+        shard_end_heights
             .iter()
             .filter(|(_, h)| *h == height)
             .map(|(a, _)| *a)
             .max()
     }
 
-    ///  Return the address of the first subtree in the sapling tree where note for a give block height was found
-    pub(crate) fn first_subtree_for_height(&self, height: &BlockHeight) -> Option<Address> {
+    /// Return the first subtree in the selected tree for the given block height.
+    pub(crate) fn first_subtree_for_height(
+        &self,
+        pool: ShieldedPool,
+        height: &BlockHeight,
+    ) -> Option<Address> {
         // The first subtree is the last subtree for the previous height
-        self.last_subtree_for_height(&height.saturating_sub(1))
+        self.last_subtree_for_height(pool, &height.saturating_sub(1))
     }
 
     /// Makes the required changes to the scan queue to reflect the completion of a scan
     pub(crate) fn scan_complete(
         &mut self,
         range: Range<BlockHeight>,
-        wallet_note_positions: &[(ShieldedProtocol, Position)],
+        wallet_note_positions: &[(ShieldedPool, Position)],
     ) -> Result<(), Error> {
         let wallet_birthday = self.get_wallet_birthday()?;
 
@@ -716,16 +858,27 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let mut required_sapling_subtrees = BTreeSet::new();
             #[cfg(feature = "orchard")]
             let mut required_orchard_subtrees = BTreeSet::new();
+            #[cfg(feature = "orchard")]
+            let mut required_ironwood_subtrees = BTreeSet::new();
             for (protocol, position) in wallet_note_positions {
                 match protocol {
-                    ShieldedProtocol::Sapling => {
+                    ShieldedPool::Sapling => {
                         required_sapling_subtrees.insert(
                             Address::above_position(SAPLING_SHARD_HEIGHT.into(), *position).index(),
                         );
                     }
-                    ShieldedProtocol::Orchard => {
+                    ShieldedPool::Orchard => {
                         #[cfg(feature = "orchard")]
                         required_orchard_subtrees.insert(
+                            Address::above_position(ORCHARD_SHARD_HEIGHT.into(), *position).index(),
+                        );
+
+                        #[cfg(not(feature = "orchard"))]
+                        return Err(Error::OrchardNotEnabled);
+                    }
+                    ShieldedPool::Ironwood => {
+                        #[cfg(feature = "orchard")]
+                        required_ironwood_subtrees.insert(
                             Address::above_position(ORCHARD_SHARD_HEIGHT.into(), *position).index(),
                         );
 
@@ -736,7 +889,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             }
 
             let extended_range = self.extend_range(
-                &ShieldedProtocol::Sapling,
+                &ShieldedPool::Sapling,
                 &range,
                 required_sapling_subtrees,
                 self.params.activation_height(NetworkUpgrade::Sapling),
@@ -746,10 +899,21 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             #[cfg(feature = "orchard")]
             let extended_range = self
                 .extend_range(
-                    &ShieldedProtocol::Orchard,
+                    &ShieldedPool::Orchard,
                     extended_range.as_ref().unwrap_or(&range),
                     required_orchard_subtrees,
                     self.params.activation_height(NetworkUpgrade::Nu5),
+                    wallet_birthday,
+                )?
+                .or(extended_range);
+
+            #[cfg(feature = "orchard")]
+            let extended_range = self
+                .extend_range(
+                    &ShieldedPool::Ironwood,
+                    extended_range.as_ref().unwrap_or(&range),
+                    required_ironwood_subtrees,
+                    self.params.activation_height(NetworkUpgrade::Nu6_3),
                     wallet_birthday,
                 )?
                 .or(extended_range);
@@ -789,7 +953,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
     // given subtree indices, bounded by the wallet birthday and the fallback start height.
     fn extend_range(
         &self,
-        pool: &ShieldedProtocol,
+        pool: &ShieldedPool,
         range: &Range<BlockHeight>,
         required_subtree_indices: BTreeSet<u64>,
         fallback_start_height: Option<BlockHeight>,
@@ -803,15 +967,26 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
         let shard_end = |index| -> Result<_, Error> {
             match pool {
-                ShieldedProtocol::Sapling => Ok(self
+                ShieldedPool::Sapling => Ok(self
                     .sapling_tree_shard_end_heights
                     .get(&Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index))
                     .cloned()),
-                ShieldedProtocol::Orchard => {
+                ShieldedPool::Orchard => {
                     #[cfg(feature = "orchard")]
                     {
                         Ok(self
                             .orchard_tree_shard_end_heights
+                            .get(&Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index))
+                            .cloned())
+                    }
+                    #[cfg(not(feature = "orchard"))]
+                    panic!("Unsupported pool")
+                }
+                ShieldedPool::Ironwood => {
+                    #[cfg(feature = "orchard")]
+                    {
+                        Ok(self
+                            .ironwood_tree_shard_end_heights
                             .get(&Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index))
                             .cloned())
                     }
@@ -1001,6 +1176,75 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
+            let min_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
+            let max_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
+
+            Ok(start_size.or(min_tree_size).zip(max_tree_size).and_then(
+                |(min_tree_size, max_tree_size)| {
+                    max_tree_size
+                        .checked_sub(min_tree_size)
+                        .map(|tree_size| Ratio::new(scanned_count, tree_size))
+                },
+            ))
+        }
+    }
+
+    #[cfg(feature = "orchard")]
+    pub(crate) fn ironwood_scan_progress(
+        &self,
+        birthday_height: &BlockHeight,
+        fully_scanned_height: &BlockHeight,
+        chain_tip_height: &BlockHeight,
+    ) -> Result<Option<Ratio<u64>>, Error> {
+        if fully_scanned_height == chain_tip_height {
+            let actions_sum = self
+                .blocks
+                .iter()
+                .filter(|(height, _)| height >= &birthday_height)
+                .fold(0, |sum, (_, block)| {
+                    sum + block.ironwood_action_count.unwrap_or(0)
+                });
+            Ok(Some(Ratio::new(actions_sum as u64, actions_sum as u64)))
+        } else {
+            let start_size = self
+                .accounts
+                .values()
+                .find_map(|account| {
+                    (account.birthday().height() == *birthday_height).then(|| {
+                        account
+                            .birthday()
+                            .prior_chain_state()
+                            .final_ironwood_tree()
+                            .tree_size()
+                    })
+                })
+                .or_else(|| {
+                    self.blocks
+                        .iter()
+                        .filter(|(height, _)| height <= &birthday_height)
+                        .map(|(_, block)| {
+                            (block.ironwood_commitment_tree_size.unwrap_or(0)
+                                - block.ironwood_action_count.unwrap_or(0))
+                                as u64
+                        })
+                        .max()
+                });
+
+            let scanned_count = self
+                .blocks
+                .iter()
+                .filter(|(height, _)| height > &birthday_height)
+                .fold(0_u64, |acc, (_, block)| {
+                    acc + block.ironwood_action_count.unwrap_or(0) as u64
+                });
+
+            let shard_index_iter = self
+                .ironwood_tree_shard_end_heights
+                .iter()
+                .filter(|(_, height)| height > &birthday_height)
+                .map(|(address, _)| address.index());
+            let min_idx = shard_index_iter.clone().min().unwrap_or(0);
+            let max_idx = shard_index_iter.max().unwrap_or(0);
             let min_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
             let max_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
 

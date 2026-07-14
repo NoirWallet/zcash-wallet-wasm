@@ -187,6 +187,11 @@ impl WebWallet {
         self.inner.get_latest_height().await
     }
 
+    /// Returns the configured NU6.3 activation height for the selected network.
+    pub fn get_ironwood_activation_height(&self) -> Option<u32> {
+        self.inner.ironwood_activation_height()
+    }
+
     /// Find the block height closest to a given Unix timestamp
     ///
     /// Uses binary search to efficiently locate the block height corresponding
@@ -587,6 +592,69 @@ impl WebWallet {
             .map(Into::into)
     }
 
+    /// Create a V6 PCZT that sweeps spendable Orchard funds to this account's Ironwood pool.
+    pub async fn pczt_orchard_migration_create(
+        &self,
+        account_id: u32,
+        to_address: String,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<WasmPczt, Error> {
+        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+        self.inner
+            .pczt_create_orchard_migration(
+                account_id.into(),
+                to_address,
+                memo,
+                marginal_fee_zats,
+                expiry_delta_blocks,
+            )
+            .await
+            .map(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn oneclick_pczt_orchard_migration(
+        &self,
+        account_id: u32,
+        to_address: String,
+        usk: super::UnifiedSpendingKey,
+        seed_fp: SeedFingerprint,
+        sapling_proof_gen_key: Option<ProofGenerationKey>,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<String, Error> {
+        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+        let pczt = self
+            .inner
+            .pczt_create_orchard_migration(
+                account_id.into(),
+                to_address,
+                memo,
+                marginal_fee_zats,
+                expiry_delta_blocks,
+            )
+            .await?;
+
+        self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
+            .await
+    }
+
+    pub async fn estimate_orchard_migration_fee(
+        &self,
+        account_id: u32,
+        to_address: String,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<u64, Error> {
+        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+        self.inner
+            .estimate_orchard_migration_fee(account_id.into(), to_address, memo, marginal_fee_zats)
+            .await
+    }
+
     /// Prove and broadcast an externally signed PCZT (hardware wallet flow).
     ///
     /// Hardware-wallet accounts never hold Sapling notes (Keystone supports
@@ -774,6 +842,7 @@ pub struct WalletSummary {
     // scan_progress: Option<Ratio<u64>>,
     pub next_sapling_subtree_index: u64,
     pub next_orchard_subtree_index: u64,
+    pub next_ironwood_subtree_index: u64,
 }
 
 #[wasm_bindgen]
@@ -788,12 +857,15 @@ impl WalletSummary {
 pub struct AccountBalance {
     pub sapling_balance: u64,
     pub orchard_balance: u64,
+    pub ironwood_balance: u64,
     pub unshielded_balance: u64,
     pub sapling_pending_balance: u64,
     pub orchard_pending_balance: u64,
+    pub ironwood_pending_balance: u64,
     pub unshielded_pending_balance: u64,
     pub sapling_total_balance: u64,
     pub orchard_total_balance: u64,
+    pub ironwood_total_balance: u64,
     pub unshielded_total_balance: u64,
     pub spendable_balance: u64,
     pub pending_balance: u64,
@@ -816,6 +888,7 @@ impl TryFrom<zcash_client_backend::data_api::AccountBalance> for AccountBalance 
 
         let sapling_pending_balance = pending_value(balance.sapling_balance())?;
         let orchard_pending_balance = pending_value(balance.orchard_balance())?;
+        let ironwood_pending_balance = pending_value(balance.ironwood_balance())?;
         let unshielded_pending_balance = pending_value(balance.unshielded_balance())?;
         let pending_balance = (balance.change_pending_confirmation()
             + balance.value_pending_spendability())
@@ -825,12 +898,15 @@ impl TryFrom<zcash_client_backend::data_api::AccountBalance> for AccountBalance 
         Ok(AccountBalance {
             sapling_balance: balance.sapling_balance().spendable_value().into(),
             orchard_balance: balance.orchard_balance().spendable_value().into(),
+            ironwood_balance: balance.ironwood_balance().spendable_value().into(),
             unshielded_balance: balance.unshielded_balance().spendable_value().into(),
             sapling_pending_balance: sapling_pending_balance.into(),
             orchard_pending_balance: orchard_pending_balance.into(),
+            ironwood_pending_balance: ironwood_pending_balance.into(),
             unshielded_pending_balance: unshielded_pending_balance.into(),
             sapling_total_balance: balance.sapling_balance().total().into(),
             orchard_total_balance: balance.orchard_balance().total().into(),
+            ironwood_total_balance: balance.ironwood_balance().total().into(),
             unshielded_total_balance: balance.unshielded_balance().total().into(),
             spendable_balance: balance.spendable_value().into(),
             pending_balance: pending_balance.into(),
@@ -862,6 +938,7 @@ where
             fully_scanned_height: summary.fully_scanned_height().into(),
             next_sapling_subtree_index: summary.next_sapling_subtree_index(),
             next_orchard_subtree_index: summary.next_orchard_subtree_index(),
+            next_ironwood_subtree_index: summary.next_ironwood_subtree_index(),
         })
     }
 }

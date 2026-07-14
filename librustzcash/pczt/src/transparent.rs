@@ -27,6 +27,13 @@ pub struct Bundle {
     pub(crate) outputs: Vec<Output>,
 }
 
+/// The canonical empty transparent bundle: the form the transparent bundle of a PCZT
+/// takes when it carries no transparent data.
+pub(crate) const EMPTY_BUNDLE: Bundle = Bundle {
+    inputs: Vec::new(),
+    outputs: Vec::new(),
+};
+
 /// Information about a transparent input within a transaction.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Getters)]
@@ -402,15 +409,18 @@ impl Bundle {
                     .bip32_derivation()
                     .iter()
                     .map(|(k, v)| {
-                        (*k, Zip32Derivation {
-                            seed_fingerprint: *v.seed_fingerprint(),
-                            derivation_path: v
-                                .derivation_path()
-                                .iter()
-                                .copied()
-                                .map(u32::from)
-                                .collect(),
-                        })
+                        (
+                            *k,
+                            Zip32Derivation {
+                                seed_fingerprint: *v.seed_fingerprint(),
+                                derivation_path: v
+                                    .derivation_path()
+                                    .iter()
+                                    .copied()
+                                    .map(u32::from)
+                                    .collect(),
+                            },
+                        )
                     })
                     .collect(),
                 ripemd160_preimages: input.ripemd160_preimages().clone(),
@@ -435,15 +445,18 @@ impl Bundle {
                     .bip32_derivation()
                     .iter()
                     .map(|(k, v)| {
-                        (*k, Zip32Derivation {
-                            seed_fingerprint: *v.seed_fingerprint(),
-                            derivation_path: v
-                                .derivation_path()
-                                .iter()
-                                .copied()
-                                .map(u32::from)
-                                .collect(),
-                        })
+                        (
+                            *k,
+                            Zip32Derivation {
+                                seed_fingerprint: *v.seed_fingerprint(),
+                                derivation_path: v
+                                    .derivation_path()
+                                    .iter()
+                                    .copied()
+                                    .map(u32::from)
+                                    .collect(),
+                            },
+                        )
                     })
                     .collect(),
                 user_address: output.user_address().clone(),

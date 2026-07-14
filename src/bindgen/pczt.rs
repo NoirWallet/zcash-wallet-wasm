@@ -36,14 +36,14 @@ impl Pczt {
         self.0
             .clone()
             .serialize()
-            .map_err(|e| Error::Generic(format!("Failed to serialize PCZT: {:?}", e)))
+            .map_err(|e| Error::Generic(format!("Failed to serialize PCZT: {e:?}")))
     }
 
     /// Deserialize to a Pczt from postcard bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Pczt, Error> {
         pczt::Pczt::parse(bytes)
             .map(Self)
-            .map_err(|e| Error::Generic(format!("Failed to parse PCZT bytes: {:?}", e)))
+            .map_err(|e| Error::Generic(format!("Failed to parse PCZT bytes: {e:?}")))
     }
 
     /// Strips prover-only data so the PCZT is small enough to transport to an
@@ -92,6 +92,6 @@ impl Pczt {
         Combiner::new(vec![self.0.clone(), other.0.clone()])
             .combine()
             .map(Pczt)
-            .map_err(|e| Error::Generic(format!("Failed to combine PCZTs: {:?}", e)))
+            .map_err(|e| Error::Generic(format!("Failed to combine PCZTs: {e:?}")))
     }
 }

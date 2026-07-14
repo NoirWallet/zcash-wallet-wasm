@@ -107,13 +107,16 @@ impl Builder {
     ) -> (Handle<AccountId, IvkTag>, Engine<AccountId, IvkTag>) {
         let (handle, queue) = mpsc::channel(self.queue_size);
 
-        (Handle { handle }, Engine {
-            queue,
-            sapling_batch_size_threshold: self.sapling_batch_size_threshold,
-            #[cfg(feature = "orchard")]
-            orchard_batch_size_threshold: self.orchard_batch_size_threshold,
-            batch_start_delay: self.batch_start_delay,
-        })
+        (
+            Handle { handle },
+            Engine {
+                queue,
+                sapling_batch_size_threshold: self.sapling_batch_size_threshold,
+                #[cfg(feature = "orchard")]
+                orchard_batch_size_threshold: self.orchard_batch_size_threshold,
+                batch_start_delay: self.batch_start_delay,
+            },
+        )
     }
 }
 
@@ -336,8 +339,11 @@ where
         P: consensus::Parameters + Send + 'static,
     {
         let mut scanning_keys = Arc::new(reload_keys()?);
-        let mut runners = BatchRunners::<_, (), ()>::for_keys(
+        let mut runners = BatchRunners::<_, (), (), ()>::for_keys(
             self.sapling_batch_size_threshold,
+            #[cfg(feature = "orchard")]
+            self.orchard_batch_size_threshold,
+            // Ironwood outputs are Orchard-shaped, so they use the same batching threshold.
             #[cfg(feature = "orchard")]
             self.orchard_batch_size_threshold,
             &scanning_keys,
@@ -421,6 +427,10 @@ where
                         scanning_keys = Arc::new(reload_keys()?);
                         runners = BatchRunners::for_keys(
                             self.sapling_batch_size_threshold,
+                            #[cfg(feature = "orchard")]
+                            self.orchard_batch_size_threshold,
+                            // Ironwood outputs are Orchard-shaped, so they use the same batching
+                            // threshold.
                             #[cfg(feature = "orchard")]
                             self.orchard_batch_size_threshold,
                             &scanning_keys,

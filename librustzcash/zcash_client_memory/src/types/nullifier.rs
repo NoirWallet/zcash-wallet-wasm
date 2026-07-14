@@ -32,6 +32,8 @@ pub(crate) enum Nullifier {
     Sapling(sapling::Nullifier),
     #[cfg(feature = "orchard")]
     Orchard(orchard::note::Nullifier),
+    #[cfg(feature = "orchard")]
+    Ironwood(orchard::note::Nullifier),
 }
 
 impl Nullifier {
@@ -40,6 +42,8 @@ impl Nullifier {
             Nullifier::Sapling(_) => PoolType::SAPLING,
             #[cfg(feature = "orchard")]
             Nullifier::Orchard(_) => PoolType::ORCHARD,
+            #[cfg(feature = "orchard")]
+            Nullifier::Ironwood(_) => PoolType::IRONWOOD,
         }
     }
 }
@@ -51,12 +55,6 @@ impl From<sapling::Nullifier> for Nullifier {
 }
 
 #[cfg(feature = "orchard")]
-impl From<orchard::note::Nullifier> for Nullifier {
-    fn from(n: orchard::note::Nullifier) -> Self {
-        Nullifier::Orchard(n)
-    }
-}
-
 mod serialization {
     use super::*;
     use crate::{Error, proto::memwallet as proto};
@@ -71,6 +69,11 @@ mod serialization {
                 #[cfg(feature = "orchard")]
                 Nullifier::Orchard(n) => Self {
                     protocol: proto::ShieldedProtocol::Orchard.into(),
+                    nullifier: n.to_bytes().to_vec(),
+                },
+                #[cfg(feature = "orchard")]
+                Nullifier::Ironwood(n) => Self {
+                    protocol: proto::ShieldedProtocol::Ironwood.into(),
                     nullifier: n.to_bytes().to_vec(),
                 },
             }
@@ -95,7 +98,34 @@ mod serialization {
                             .ok_or(Error::CorruptedData("Invalid Orchard nullifier".into()))?,
                     )
                 }
+                proto::ShieldedProtocol::Ironwood => {
+                    #[cfg(not(feature = "orchard"))]
+                    return Err(Error::Other("Ironwood support is not enabled".into()));
+                    #[cfg(feature = "orchard")]
+                    Nullifier::Ironwood(
+                        orchard::note::Nullifier::from_bytes(&nullifier.nullifier.try_into()?)
+                            .into_option()
+                            .ok_or(Error::CorruptedData("Invalid Ironwood nullifier".into()))?,
+                    )
+                }
             })
+        }
+    }
+
+    #[cfg(all(test, feature = "orchard"))]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ironwood_nullifier_roundtrip() {
+            let nf = Nullifier::Ironwood(
+                orchard::note::Nullifier::from_bytes(&[1; 32])
+                    .into_option()
+                    .unwrap(),
+            );
+            let encoded: proto::Nullifier = nf.into();
+            assert_eq!(encoded.protocol(), proto::ShieldedProtocol::Ironwood);
+            assert_eq!(Nullifier::try_from(encoded).unwrap(), nf);
         }
     }
 }

@@ -54,7 +54,7 @@ pub(crate) async fn pczt_sign_inner(
             }
             Ok(())
         })
-        .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {:?}", e)))?
+        .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {e:?}")))?
         .with_sapling::<Infallible, _>(|bundle| {
             for (index, spend) in bundle.spends().iter().enumerate() {
                 if let Some(account_index) =
@@ -72,7 +72,7 @@ pub(crate) async fn pczt_sign_inner(
             }
             Ok(())
         })
-        .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {:?}", e)))?
+        .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {e:?}")))?
         .with_transparent::<Infallible, _>(|bundle| {
             for (index, input) in bundle.inputs().iter().enumerate() {
                 for derivation in input.bip32_derivation().values() {
@@ -98,7 +98,7 @@ pub(crate) async fn pczt_sign_inner(
             }
             Ok(())
         })
-        .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {:?}", e)))?
+        .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {e:?}")))?
         .finish();
 
     // Add proof generation key for Sapling spends before signing.
@@ -170,12 +170,12 @@ pub(crate) async fn pczt_sign_inner(
 
                 Ok(())
             })
-            .map_err(|e| Error::PcztSign(format!("Failed to add proof generation key: {:?}", e)))?
+            .map_err(|e| Error::PcztSign(format!("Failed to add proof generation key: {e:?}")))?
             .finish()
     };
 
     let mut signer = Signer::new(pczt)
-        .map_err(|e| Error::PcztSign(format!("Failed to initialize signer: {:?}", e)))?;
+        .map_err(|e| Error::PcztSign(format!("Failed to initialize signer: {e:?}")))?;
     for (_, spends) in keys {
         // let usk = UnifiedSpendingKey::from_seed(&params, seed, account_index)?;
         for keyref in spends {
@@ -187,20 +187,14 @@ pub(crate) async fn pczt_sign_inner(
                             &orchard::keys::SpendAuthorizingKey::from(usk.orchard()),
                         )
                         .map_err(|e| {
-                            Error::PcztSign(format!(
-                                "Failed to sign Orchard spend {index}: {:?}",
-                                e
-                            ))
+                            Error::PcztSign(format!("Failed to sign Orchard spend {index}: {e:?}"))
                         })?;
                 }
                 KeyRef::Sapling { index } => {
                     signer
                         .sign_sapling(index, &usk.sapling().expsk.ask)
                         .map_err(|e| {
-                            Error::PcztSign(format!(
-                                "Failed to sign Sapling spend {index}: {:?}",
-                                e
-                            ))
+                            Error::PcztSign(format!("Failed to sign Sapling spend {index}: {e:?}"))
                         })?;
                 }
                 KeyRef::Transparent {
@@ -215,15 +209,13 @@ pub(crate) async fn pczt_sign_inner(
                                 .derive_secret_key(scope, address_index)
                                 .map_err(|e| {
                                     Error::PcztSign(format!(
-                                        "Failed to derive transparent key at .../{:?}/{:?}: {:?}",
-                                        scope, address_index, e,
+                                        "Failed to derive transparent key at .../{scope:?}/{address_index:?}: {e:?}",
                                     ))
                                 })?,
                         )
                         .map_err(|e| {
                             Error::PcztSign(format!(
-                                "Failed to sign transparent input {index}: {:?}",
-                                e
+                                "Failed to sign transparent input {index}: {e:?}"
                             ))
                         })?;
                 }
@@ -316,9 +308,7 @@ pub fn sign_message_with_transparent(
             let uivk = ufvk.to_unified_incoming_viewing_key();
             let (ua, diversifier_idx) = uivk
                 .default_address(UnifiedAddressRequest::AllAvailableKeys)
-                .map_err(|e| {
-                    Error::Generic(format!("Failed to derive default address: {:?}", e))
-                })?;
+                .map_err(|e| Error::Generic(format!("Failed to derive default address: {e:?}")))?;
             let transparent_j =
                 crate::bindgen::mnemonic::transparent_address_index(&ua, diversifier_idx)
                     .ok_or_else(|| Error::Generic("Invalid transparent child index".into()))?;
@@ -330,18 +320,18 @@ pub fn sign_message_with_transparent(
     let address_obj = transparent_key
         .to_account_pubkey()
         .derive_external_ivk()
-        .map_err(|e| Error::Generic(format!("Failed to derive IVK: {:?}", e)))?
+        .map_err(|e| Error::Generic(format!("Failed to derive IVK: {e:?}")))?
         .derive_address(address_index)
-        .map_err(|e| Error::Generic(format!("Failed to derive address: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to derive address: {e:?}")))?;
     let address_str = address_obj.encode(&net);
 
     let privkey = transparent_key
         .derive_external_secret_key(address_index)
-        .map_err(|e| Error::Generic(format!("Failed to derive private key: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to derive private key: {e:?}")))?;
 
     // Convert to secp256k1 SecretKey
     let secret_key = SecretKey::from_slice(privkey.as_ref())
-        .map_err(|e| Error::Generic(format!("Invalid private key: {}", e)))?;
+        .map_err(|e| Error::Generic(format!("Invalid private key: {e}")))?;
 
     let secp = Secp256k1::new();
 
@@ -362,7 +352,7 @@ pub fn sign_message_with_transparent(
     // Double SHA256
     let hash = sha256d::Hash::hash(&msg_bytes);
     let message_hash = Secp256k1Message::from_slice(hash.as_ref())
-        .map_err(|e| Error::Generic(format!("Failed to create message: {}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to create message: {e}")))?;
 
     // Sign with recovery ID
     let signature = secp.sign_ecdsa_recoverable(&message_hash, &secret_key);

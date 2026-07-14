@@ -33,7 +33,7 @@ impl TryFrom<(u32, &[u8])> for Receiver {
             }),
         }
         .map_err(|e| {
-            ParseError::InvalidEncoding(format!("Invalid address for typecode {}: {}", typecode, e))
+            ParseError::InvalidEncoding(format!("Invalid address for typecode {typecode}: {e}"))
         })
     }
 }
@@ -428,15 +428,18 @@ mod tests {
         ]);
 
         // `Address::receivers` sorts the receivers in priority order.
-        assert_eq!(ua.items(), vec![
-            Receiver::Orchard([0; 43]),
-            Receiver::Sapling([0; 43]),
-            Receiver::P2pkh([0; 20]),
-            Receiver::Unknown {
-                typecode: 0xff,
-                data: vec![],
-            },
-        ])
+        assert_eq!(
+            ua.items(),
+            vec![
+                Receiver::Orchard([0; 43]),
+                Receiver::Sapling([0; 43]),
+                Receiver::P2pkh([0; 20]),
+                Receiver::Unknown {
+                    typecode: 0xff,
+                    data: vec![],
+                },
+            ]
+        )
     }
 
     #[test]
@@ -470,10 +473,13 @@ mod tests {
         assert!(transparent_only.has_receiver_of_type(PoolType::TRANSPARENT));
 
         // Unknown receiver does not count for any pool type
-        let with_unknown = Address(vec![Receiver::Orchard([0; 43]), Receiver::Unknown {
-            typecode: 0xAA,
-            data: vec![0; 32],
-        }]);
+        let with_unknown = Address(vec![
+            Receiver::Orchard([0; 43]),
+            Receiver::Unknown {
+                typecode: 0xAA,
+                data: vec![0; 32],
+            },
+        ]);
         assert!(!with_unknown.has_receiver_of_type(PoolType::SAPLING));
         // Unknown receiver is NOT counted as transparent
         assert!(!with_unknown.has_receiver_of_type(PoolType::TRANSPARENT));

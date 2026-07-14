@@ -82,15 +82,6 @@ pub mod tor;
 
 pub use decrypt::{DecryptedOutput, TransferType, decrypt_transaction};
 
-/// Orchard bundle version for fee and change call sites that should not select a concrete
-/// branch-specific policy.
-///
-/// These paths only need a bundle version to drive the Orchard action-count policy; the chosen
-/// value preserves the legacy pre-NU6.3 Orchard behavior those paths used historically.
-#[cfg(feature = "orchard")]
-pub(crate) const ANY_ORCHARD_BUNDLE_VERSION: ::orchard::bundle::BundleVersion =
-    ::orchard::bundle::BundleVersion::orchard_v2();
-
 #[deprecated(note = "This module is deprecated; use `::zcash_keys::address` instead.")]
 pub mod address {
     pub use zcash_keys::address::*;
@@ -105,8 +96,8 @@ pub mod keys {
 }
 #[deprecated(note = "use ::zcash_protocol::PoolType instead")]
 pub type PoolType = zcash_protocol::PoolType;
-#[deprecated(note = "use ::zcash_protocol::ShieldedProtocol instead")]
-pub type ShieldedProtocol = zcash_protocol::ShieldedProtocol;
+#[deprecated(note = "use ::zcash_protocol::ShieldedPool instead")]
+pub type ShieldedPool = zcash_protocol::ShieldedPool;
 #[deprecated(note = "This module is deprecated; use the `zip321` crate instead.")]
 pub mod zip321 {
     pub use zip321::*;

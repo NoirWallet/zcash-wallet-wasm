@@ -356,11 +356,16 @@ mod tests {
         let (_, internal_addr) = sapling_dfvk.change_address();
 
         // Create a shielding transaction that has an external note and an internal note.
-        let mut builder = Builder::new(db_data.params.clone(), height, BuildConfig::Standard {
-            sapling_anchor: Some(sapling::Anchor::empty_tree()),
-            orchard_anchor: None,
-            ironwood_anchor: None,
-        });
+        let mut builder = Builder::new(
+            db_data.params.clone(),
+            height,
+            BuildConfig::Standard {
+                sapling_anchor: Some(sapling::Anchor::empty_tree()),
+                orchard_anchor: None,
+                ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
+            },
+        );
         let mut transparent_signing_set = TransparentSigningSet::new();
         builder
             .add_transparent_p2pkh_input(
@@ -522,10 +527,13 @@ mod tests {
             WalletDb::for_path(data_file.path(), params, test_clock(), test_rng()).unwrap();
         WalletMigrator::new()
             .ignore_seed_relevance()
-            .init_or_migrate_to(&mut db_data, &[
-                add_account_birthdays::MIGRATION_ID,
-                shardtree_support::MIGRATION_ID,
-            ])
+            .init_or_migrate_to(
+                &mut db_data,
+                &[
+                    add_account_birthdays::MIGRATION_ID,
+                    shardtree_support::MIGRATION_ID,
+                ],
+            )
             .unwrap();
 
         let (ufvk0, height, res) = prepare_wallet_state(&mut db_data);
@@ -626,10 +634,13 @@ mod tests {
             WalletDb::for_path(data_file.path(), params, test_clock(), test_rng()).unwrap();
         WalletMigrator::new()
             .ignore_seed_relevance()
-            .init_or_migrate_to(&mut db_data, &[
-                wallet_summaries::MIGRATION_ID,
-                shardtree_support::MIGRATION_ID,
-            ])
+            .init_or_migrate_to(
+                &mut db_data,
+                &[
+                    wallet_summaries::MIGRATION_ID,
+                    shardtree_support::MIGRATION_ID,
+                ],
+            )
             .unwrap();
 
         let (ufvk0, height, res) = prepare_wallet_state(&mut db_data);
@@ -660,6 +671,8 @@ mod tests {
             Some(&BlockMetadata::from_parts(
                 height - 1,
                 prev_hash,
+                Some(0),
+                #[cfg(feature = "orchard")]
                 Some(0),
                 #[cfg(feature = "orchard")]
                 Some(0),

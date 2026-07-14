@@ -78,6 +78,7 @@ impl<'a> TransactionExtractor<'a> {
         } = self;
 
         let crate::ParsedPczt { tx_data, .. } = pczt.extract_tx_data::<Unbound, Error>(
+            crate::common::AnchorRequirement::Required,
             |t| {
                 t.extract()
                     .map_err(|e| Error::Transparent(TransparentError::Extract(e)))
@@ -133,7 +134,7 @@ impl<'a> TransactionExtractor<'a> {
                 .map_err(Error::Orchard)?;
         }
         if let Some(bundle) = tx.ironwood_bundle() {
-            orchard::verify_ironwood_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
+            orchard::verify_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
                 .map_err(Error::Ironwood)?;
         }
 
@@ -153,12 +154,12 @@ impl Authorization for Unbound {
 #[derive(Debug)]
 pub enum Error {
     Extract(crate::ExtractError),
+    Ironwood(IronwoodError),
     Orchard(OrchardError),
     Sapling(SaplingError),
     SaplingRequired,
     SighashMismatch,
     Transparent(TransparentError),
-    Ironwood(IronwoodError),
 }
 
 impl From<crate::ExtractError> for Error {

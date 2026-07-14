@@ -9,6 +9,11 @@ fn send_single_step_proposed_transfer() {
 }
 
 #[test]
+fn send_max_routes_orchard_to_ironwood() {
+    testing::pool::orchard_send_max_routes_to_ironwood()
+}
+
+#[test]
 #[ignore] //FIXME
 #[cfg(feature = "transparent-inputs")]
 fn send_multi_step_proposed_transfer() {

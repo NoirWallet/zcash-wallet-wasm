@@ -291,10 +291,10 @@ fn test_sapling_bundle(
         crate::transaction::components::sapling::testing::arb_bundle_for_version(TxVersion::V6);
 
     for _ in 0..100 {
-        if let Some(bundle) = bundle_strategy.new_tree(runner).unwrap().current() {
-            if !bundle.shielded_spends().is_empty() {
-                return bundle;
-            }
+        if let Some(bundle) = bundle_strategy.new_tree(runner).unwrap().current()
+            && !bundle.shielded_spends().is_empty()
+        {
+            return bundle;
         }
     }
 
@@ -311,10 +311,11 @@ fn test_sapling_output_only_bundle(
         crate::transaction::components::sapling::testing::arb_bundle_for_version(TxVersion::V6);
 
     for _ in 0..1000 {
-        if let Some(bundle) = bundle_strategy.new_tree(runner).unwrap().current() {
-            if bundle.shielded_spends().is_empty() && !bundle.shielded_outputs().is_empty() {
-                return bundle;
-            }
+        if let Some(bundle) = bundle_strategy.new_tree(runner).unwrap().current()
+            && bundle.shielded_spends().is_empty()
+            && !bundle.shielded_outputs().is_empty()
+        {
+            return bundle;
         }
     }
 
@@ -1122,11 +1123,13 @@ fn zip_0244() {
 
 #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
 #[test]
+#[ignore = "The ZIP 233 test vectors were generated using the placeholder v6 version group ID \
+            and must be regenerated now that `V6_VERSION_GROUP_ID` has been finalized."]
 fn zip_0233() {
     fn to_test_txdata(
         tv: &self::data::zip_0233::TestVector,
     ) -> (TransactionData<TestUnauthorized>, TxDigests<Blake2bHash>) {
-        let tx = Transaction::read(&tv.tx[..], BranchId::Nu7).unwrap();
+        let tx = Transaction::read(tv.tx, BranchId::Nu7).unwrap();
 
         assert_eq!(tx.txid.as_ref(), &tv.txid);
         assert_eq!(tx.auth_commitment().as_ref(), &tv.auth_digest);

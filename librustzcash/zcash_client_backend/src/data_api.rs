@@ -83,7 +83,7 @@ use zcash_keys::{
 };
 use zcash_primitives::{block::BlockHash, transaction::Transaction};
 use zcash_protocol::{
-    PoolType, ShieldedProtocol, TxId,
+    PoolType, ShieldedPool, TxId,
     consensus::{self, BlockHeight, TxIndex},
     memo::{Memo, MemoBytes},
     value::{BalanceError, Zatoshis},
@@ -106,6 +106,7 @@ use crate::{
 
 #[cfg(feature = "transparent-inputs")]
 use {
+    crate::fees::StandardFeeRule,
     crate::wallet::TransparentAddressMetadata,
     getset::{CopyGetters, Getters},
     std::time::SystemTime,
@@ -163,6 +164,13 @@ pub const SAPLING_SHARD_HEIGHT: u8 = sapling::NOTE_COMMITMENT_TREE_DEPTH / 2;
 /// `lightwalletd` when using the `GetSubtreeRoots` GRPC call.
 #[cfg(feature = "orchard")]
 pub const ORCHARD_SHARD_HEIGHT: u8 = { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 } / 2;
+
+/// The height of subtree roots in the Ironwood note commitment tree.
+///
+/// This conforms to the structure of subtree data returned by
+/// `lightwalletd` when using the `GetSubtreeRoots` GRPC call.
+#[cfg(feature = "orchard")]
+pub const IRONWOOD_SHARD_HEIGHT: u8 = { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 } / 2;
 
 /// An enumeration of constraints that can be applied when querying for nullifiers for notes
 /// belonging to the wallet.
@@ -317,6 +325,7 @@ impl core::ops::Add<Balance> for Balance {
 pub struct AccountBalance {
     sapling_balance: Balance,
     orchard_balance: Balance,
+    ironwood_balance: Balance,
     unshielded_balance: Balance,
 }
 
@@ -325,12 +334,14 @@ impl AccountBalance {
     pub const ZERO: Self = Self {
         sapling_balance: Balance::ZERO,
         orchard_balance: Balance::ZERO,
+        ironwood_balance: Balance::ZERO,
         unshielded_balance: Balance::ZERO,
     };
 
     fn check_total(&self) -> Result<Zatoshis, BalanceError> {
         (self.sapling_balance.total()
             + self.orchard_balance.total()
+            + self.ironwood_balance.total()
             + self.unshielded_balance.total())
         .ok_or(BalanceError::Overflow)
     }
@@ -365,6 +376,23 @@ impl AccountBalance {
         f: impl FnOnce(&mut Balance) -> Result<A, E>,
     ) -> Result<A, E> {
         let result = f(&mut self.orchard_balance)?;
+        self.check_total()?;
+        Ok(result)
+    }
+
+    /// Returns the [`Balance`] of Ironwood funds in the account.
+    pub fn ironwood_balance(&self) -> &Balance {
+        &self.ironwood_balance
+    }
+
+    /// Provides a mutable reference to the [`Balance`] of Ironwood funds in the account
+    /// to the specified callback, checking invariants after the callback's action has been
+    /// evaluated.
+    pub fn with_ironwood_balance_mut<A, E: From<BalanceError>>(
+        &mut self,
+        f: impl FnOnce(&mut Balance) -> Result<A, E>,
+    ) -> Result<A, E> {
+        let result = f(&mut self.ironwood_balance)?;
         self.check_total()?;
         Ok(result)
     }
@@ -406,14 +434,17 @@ impl AccountBalance {
     pub fn total(&self) -> Zatoshis {
         (self.sapling_balance.total()
             + self.orchard_balance.total()
+            + self.ironwood_balance.total()
             + self.unshielded_balance.total())
         .expect("Account balance cannot overflow MAX_MONEY")
     }
 
-    /// Returns the total value of shielded (Sapling and Orchard) funds that may immediately be
-    /// spent.
+    /// Returns the total value of shielded (Sapling, Orchard, and Ironwood) funds that may
+    /// immediately be spent.
     pub fn spendable_value(&self) -> Zatoshis {
-        (self.sapling_balance.spendable_value + self.orchard_balance.spendable_value)
+        (self.sapling_balance.spendable_value
+            + self.orchard_balance.spendable_value
+            + self.ironwood_balance.spendable_value)
             .expect("Account balance cannot overflow MAX_MONEY")
     }
 
@@ -421,7 +452,8 @@ impl AccountBalance {
     /// sufficient confirmations for spendability.
     pub fn change_pending_confirmation(&self) -> Zatoshis {
         (self.sapling_balance.change_pending_confirmation
-            + self.orchard_balance.change_pending_confirmation)
+            + self.orchard_balance.change_pending_confirmation
+            + self.ironwood_balance.change_pending_confirmation)
             .expect("Account balance cannot overflow MAX_MONEY")
     }
 
@@ -429,7 +461,8 @@ impl AccountBalance {
     /// is required before it will be possible to derive witnesses for the associated notes.
     pub fn value_pending_spendability(&self) -> Zatoshis {
         (self.sapling_balance.value_pending_spendability
-            + self.orchard_balance.value_pending_spendability)
+            + self.orchard_balance.value_pending_spendability
+            + self.ironwood_balance.value_pending_spendability)
             .expect("Account balance cannot overflow MAX_MONEY")
     }
 
@@ -438,6 +471,7 @@ impl AccountBalance {
     pub fn uneconomic_value(&self) -> Zatoshis {
         (self.sapling_balance.uneconomic_value
             + self.orchard_balance.uneconomic_value
+            + self.ironwood_balance.uneconomic_value
             + self.unshielded_balance.uneconomic_value)
             .expect("Account balance cannot overflow MAX_MONEY")
     }
@@ -813,6 +847,8 @@ pub struct WalletSummary<AccountId: Eq + Hash> {
     next_sapling_subtree_index: u64,
     #[cfg(feature = "orchard")]
     next_orchard_subtree_index: u64,
+    #[cfg(feature = "orchard")]
+    next_ironwood_subtree_index: u64,
 }
 
 impl<AccountId: Eq + Hash> WalletSummary<AccountId> {
@@ -824,6 +860,7 @@ impl<AccountId: Eq + Hash> WalletSummary<AccountId> {
         progress: Progress,
         next_sapling_subtree_index: u64,
         #[cfg(feature = "orchard")] next_orchard_subtree_index: u64,
+        #[cfg(feature = "orchard")] next_ironwood_subtree_index: u64,
     ) -> Self {
         Self {
             account_balances,
@@ -833,6 +870,8 @@ impl<AccountId: Eq + Hash> WalletSummary<AccountId> {
             next_sapling_subtree_index,
             #[cfg(feature = "orchard")]
             next_orchard_subtree_index,
+            #[cfg(feature = "orchard")]
+            next_ironwood_subtree_index,
         }
     }
 
@@ -884,6 +923,13 @@ impl<AccountId: Eq + Hash> WalletSummary<AccountId> {
         self.next_orchard_subtree_index
     }
 
+    /// Returns the Ironwood subtree index that should start the next range of subtree
+    /// roots passed to [`WalletCommitmentTrees::put_ironwood_subtree_roots`].
+    #[cfg(feature = "orchard")]
+    pub fn next_ironwood_subtree_index(&self) -> u64 {
+        self.next_ironwood_subtree_index
+    }
+
     /// Returns whether or not wallet scanning is complete.
     pub fn is_synced(&self) -> bool {
         self.chain_tip_height == self.fully_scanned_height
@@ -898,12 +944,18 @@ pub trait NoteRetention<NoteRef> {
     /// Returns whether the specified Orchard note should be retained.
     #[cfg(feature = "orchard")]
     fn should_retain_orchard(&self, note: &ReceivedNote<NoteRef, orchard::note::Note>) -> bool;
+    /// Returns whether the specified Ironwood note should be retained. Ironwood notes are
+    /// Orchard-shaped, so this uses the same note type as Orchard.
+    #[cfg(feature = "orchard")]
+    fn should_retain_ironwood(&self, note: &ReceivedNote<NoteRef, orchard::note::Note>) -> bool;
 }
 
 pub(crate) struct SimpleNoteRetention {
     pub(crate) sapling: bool,
     #[cfg(feature = "orchard")]
     pub(crate) orchard: bool,
+    #[cfg(feature = "orchard")]
+    pub(crate) ironwood: bool,
 }
 
 impl<NoteRef> NoteRetention<NoteRef> for SimpleNoteRetention {
@@ -915,6 +967,11 @@ impl<NoteRef> NoteRetention<NoteRef> for SimpleNoteRetention {
     fn should_retain_orchard(&self, _: &ReceivedNote<NoteRef, orchard::note::Note>) -> bool {
         self.orchard
     }
+
+    #[cfg(feature = "orchard")]
+    fn should_retain_ironwood(&self, _: &ReceivedNote<NoteRef, orchard::note::Note>) -> bool {
+        self.ironwood
+    }
 }
 
 /// Shielded outputs that were received by the wallet.
@@ -923,12 +980,19 @@ pub struct ReceivedNotes<NoteRef> {
     sapling: Vec<ReceivedNote<NoteRef, sapling::Note>>,
     #[cfg(feature = "orchard")]
     orchard: Vec<ReceivedNote<NoteRef, orchard::note::Note>>,
+    // Ironwood notes are Orchard-shaped `orchard::note::Note` values (note plaintext version 3),
+    // but are tracked as a distinct pool so that Orchard and Ironwood value and bundle action
+    // counts are accounted for separately.
+    #[cfg(feature = "orchard")]
+    ironwood: Vec<ReceivedNote<NoteRef, orchard::note::Note>>,
 }
 
 impl<NoteRef> ReceivedNotes<NoteRef> {
     /// Construct a new empty [`ReceivedNotes`].
     pub fn empty() -> Self {
         Self::new(
+            vec![],
+            #[cfg(feature = "orchard")]
             vec![],
             #[cfg(feature = "orchard")]
             vec![],
@@ -939,11 +1003,14 @@ impl<NoteRef> ReceivedNotes<NoteRef> {
     pub fn new(
         sapling: Vec<ReceivedNote<NoteRef, sapling::Note>>,
         #[cfg(feature = "orchard")] orchard: Vec<ReceivedNote<NoteRef, orchard::note::Note>>,
+        #[cfg(feature = "orchard")] ironwood: Vec<ReceivedNote<NoteRef, orchard::note::Note>>,
     ) -> Self {
         Self {
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(feature = "orchard")]
+            ironwood,
         }
     }
 
@@ -969,6 +1036,18 @@ impl<NoteRef> ReceivedNotes<NoteRef> {
         self.orchard
     }
 
+    /// Returns the set of spendable Ironwood notes.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood(&self) -> &[ReceivedNote<NoteRef, orchard::note::Note>] {
+        self.ironwood.as_ref()
+    }
+
+    /// Consumes this value and returns the Ironwood notes contained within it.
+    #[cfg(feature = "orchard")]
+    pub fn take_ironwood(self) -> Vec<ReceivedNote<NoteRef, orchard::note::Note>> {
+        self.ironwood
+    }
+
     /// Computes the total value of Sapling notes.
     pub fn sapling_value(&self) -> Result<Zatoshis, BalanceError> {
         self.sapling.iter().try_fold(Zatoshis::ZERO, |acc, n| {
@@ -976,10 +1055,18 @@ impl<NoteRef> ReceivedNotes<NoteRef> {
         })
     }
 
-    /// Computes the total value of Sapling notes.
+    /// Computes the total value of Orchard notes.
     #[cfg(feature = "orchard")]
     pub fn orchard_value(&self) -> Result<Zatoshis, BalanceError> {
         self.orchard.iter().try_fold(Zatoshis::ZERO, |acc, n| {
+            (acc + n.note_value()?).ok_or(BalanceError::Overflow)
+        })
+    }
+
+    /// Computes the total value of Ironwood notes.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood_value(&self) -> Result<Zatoshis, BalanceError> {
+        self.ironwood.iter().try_fold(Zatoshis::ZERO, |acc, n| {
             (acc + n.note_value()?).ok_or(BalanceError::Overflow)
         })
     }
@@ -990,7 +1077,8 @@ impl<NoteRef> ReceivedNotes<NoteRef> {
         return self.sapling_value();
 
         #[cfg(feature = "orchard")]
-        return (self.sapling_value()? + self.orchard_value()?).ok_or(BalanceError::Overflow);
+        return (self.sapling_value()? + self.orchard_value()? + self.ironwood_value()?)
+            .ok_or(BalanceError::Overflow);
     }
 
     /// Consumes this [`ReceivedNotes`] value and produces a vector of
@@ -1007,9 +1095,24 @@ impl<NoteRef> ReceivedNotes<NoteRef> {
 
         #[cfg(feature = "orchard")]
         let iter = iter.chain(self.orchard.into_iter().filter_map(|n| {
-            retention
-                .should_retain_orchard(&n)
-                .then(|| n.map_note(Note::Orchard))
+            retention.should_retain_orchard(&n).then(|| {
+                n.map_note(|note| Note::Orchard {
+                    note,
+                    pool: orchard::ValuePool::Orchard,
+                })
+            })
+        }));
+
+        // Ironwood notes are `orchard::note::Note` values, so they are emitted as `Note::Orchard`;
+        // the transaction builder routes them to the Ironwood bundle by their version 3 plaintext.
+        #[cfg(feature = "orchard")]
+        let iter = iter.chain(self.ironwood.into_iter().filter_map(|n| {
+            retention.should_retain_ironwood(&n).then(|| {
+                n.map_note(|note| Note::Orchard {
+                    note,
+                    pool: orchard::ValuePool::Ironwood,
+                })
+            })
         }));
 
         iter.collect()
@@ -1250,12 +1353,23 @@ impl PoolMeta {
 pub struct AccountMeta {
     sapling: Option<PoolMeta>,
     orchard: Option<PoolMeta>,
+    ironwood: Option<PoolMeta>,
 }
 
 impl AccountMeta {
     /// Constructs a new [`AccountMeta`] value from its constituent parts.
-    pub fn new(sapling: Option<PoolMeta>, orchard: Option<PoolMeta>) -> Self {
-        Self { sapling, orchard }
+    ///
+    /// Ironwood metadata is tracked separately from Orchard, as Ironwood is a distinct pool.
+    pub fn new(
+        sapling: Option<PoolMeta>,
+        orchard: Option<PoolMeta>,
+        ironwood: Option<PoolMeta>,
+    ) -> Self {
+        Self {
+            sapling,
+            orchard,
+            ironwood,
+        }
     }
 
     /// Returns metadata about Sapling notes belonging to the account for which this was generated.
@@ -1274,6 +1388,15 @@ impl AccountMeta {
         self.orchard.as_ref()
     }
 
+    /// Returns metadata about Ironwood notes belonging to the account for which this was generated.
+    ///
+    /// Ironwood notes are Orchard-shaped but belong to a pool distinct from Orchard. Returns
+    /// [`None`] if no metadata is available or it was not possible to evaluate the query described
+    /// by a [`NoteFilter`] given the available wallet data.
+    pub fn ironwood(&self) -> Option<&PoolMeta> {
+        self.ironwood.as_ref()
+    }
+
     fn sapling_note_count(&self) -> Option<usize> {
         self.sapling.as_ref().map(|m| m.note_count)
     }
@@ -1282,11 +1405,16 @@ impl AccountMeta {
         self.orchard.as_ref().map(|m| m.note_count)
     }
 
-    /// Returns the number of unspent notes in the wallet for the given shielded protocol.
-    pub fn note_count(&self, protocol: ShieldedProtocol) -> Option<usize> {
+    fn ironwood_note_count(&self) -> Option<usize> {
+        self.ironwood.as_ref().map(|m| m.note_count)
+    }
+
+    /// Returns the number of unspent notes in the wallet for the given shielded pool.
+    pub fn note_count(&self, protocol: ShieldedPool) -> Option<usize> {
         match protocol {
-            ShieldedProtocol::Sapling => self.sapling_note_count(),
-            ShieldedProtocol::Orchard => self.orchard_note_count(),
+            ShieldedPool::Sapling => self.sapling_note_count(),
+            ShieldedPool::Orchard => self.orchard_note_count(),
+            ShieldedPool::Ironwood => self.ironwood_note_count(),
         }
     }
 
@@ -1297,9 +1425,14 @@ impl AccountMeta {
     /// described by a [`NoteFilter`] given the available wallet data. If metadata is available
     /// only for a single pool, the metadata for that pool will be returned.
     pub fn total_note_count(&self) -> Option<usize> {
-        let s = self.sapling_note_count();
-        let o = self.orchard_note_count();
-        s.zip(o).map(|(s, o)| s + o).or(s).or(o)
+        [
+            self.sapling_note_count(),
+            self.orchard_note_count(),
+            self.ironwood_note_count(),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|a, b| a + b)
     }
 
     fn sapling_value(&self) -> Option<Zatoshis> {
@@ -1310,18 +1443,24 @@ impl AccountMeta {
         self.orchard.as_ref().map(|m| m.value)
     }
 
+    fn ironwood_value(&self) -> Option<Zatoshis> {
+        self.ironwood.as_ref().map(|m| m.value)
+    }
+
     /// Returns the total value of shielded notes represented by [`Self::total_note_count`]
     ///
     /// Returns [`None`] if no metadata is available or it was not possible to evaluate the query
     /// described by a [`NoteFilter`] given the available wallet data. If metadata is available
     /// only for a single pool, the metadata for that pool will be returned.
     pub fn total_value(&self) -> Option<Zatoshis> {
-        let s = self.sapling_value();
-        let o = self.orchard_value();
-        s.zip(o)
-            .map(|(s, o)| (s + o).expect("Does not overflow Zcash maximum value."))
-            .or(s)
-            .or(o)
+        [
+            self.sapling_value(),
+            self.orchard_value(),
+            self.ironwood_value(),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|a, b| (a + b).expect("Does not overflow Zcash maximum value."))
     }
 }
 
@@ -1420,13 +1559,14 @@ impl NoteFilter {
     }
 }
 
-/// Controls which transparent outputs are eligible for selection.
+/// Controls which transparent outputs are eligible for selection. This is an
+/// input-selection control only; it does not encode any consensus rule.
 #[cfg(feature = "transparent-inputs")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TransparentOutputFilter {
+pub enum CoinbaseFilter {
     /// Select all spendable transparent outputs.
     #[default]
-    All,
+    AllTransparentOutputs,
     /// Select only coinbase transparent outputs.
     ///
     /// Coinbase transactions are identified by having `tx_index == 0` within
@@ -1434,6 +1574,14 @@ pub enum TransparentOutputFilter {
     /// unknown are conservatively treated as non-coinbase and will be excluded
     /// when this filter is active.
     CoinbaseOnly,
+    /// Select only non-coinbase transparent outputs.
+    ///
+    /// Used for general (non-shielding) transfers, which may produce transparent
+    /// change; coinbase funds must instead be shielded via
+    /// [`propose_shielding_coinbase`](crate::data_api::wallet::propose_shielding_coinbase).
+    /// Outputs whose transaction index is unknown are treated as non-coinbase
+    /// and are included.
+    NonCoinbaseOnly,
 }
 
 /// A trait representing the capability to query a data store for unspent transaction outputs
@@ -1464,7 +1612,7 @@ pub trait InputSource {
     fn get_spendable_note(
         &self,
         txid: &TxId,
-        protocol: ShieldedProtocol,
+        protocol: ShieldedPool,
         index: u32,
         target_height: TargetHeight,
     ) -> Result<Option<ReceivedNote<Self::NoteRef, Note>>, Self::Error>;
@@ -1476,7 +1624,7 @@ pub trait InputSource {
         &self,
         account: Self::AccountId,
         target_value: TargetValue,
-        sources: &[ShieldedProtocol],
+        sources: &[ShieldedPool],
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         exclude: &[Self::NoteRef],
@@ -1487,7 +1635,7 @@ pub trait InputSource {
     fn select_unspent_notes(
         &self,
         account: Self::AccountId,
-        sources: &[ShieldedProtocol],
+        sources: &[ShieldedPool],
         target_height: TargetHeight,
         exclude: &[Self::NoteRef],
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error>;
@@ -1533,7 +1681,7 @@ pub trait InputSource {
     ///   `target_height` (also taking into consideration the coinbase maturity rule).
     ///
     /// The `output_filter` parameter controls which transparent outputs are eligible. When set
-    /// to [`TransparentOutputFilter::CoinbaseOnly`], only outputs from coinbase transactions
+    /// to [`CoinbaseFilter::CoinbaseOnly`], only outputs from coinbase transactions
     /// should be returned.
     ///
     /// Any output that is potentially spent by an unmined transaction in the mempool should be
@@ -1544,7 +1692,7 @@ pub trait InputSource {
         _address: &TransparentAddress,
         _target_height: TargetHeight,
         _confirmations_policy: ConfirmationsPolicy,
-        _output_filter: TransparentOutputFilter,
+        _output_filter: CoinbaseFilter,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         unimplemented!(
             "InputSource::get_spendable_transparent_outputs must be overridden for wallets to use the `transparent-inputs` feature"
@@ -1570,7 +1718,7 @@ pub trait InputSource {
         addresses: &[TransparentAddress],
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
-        output_filter: TransparentOutputFilter,
+        output_filter: CoinbaseFilter,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         let mut outputs = Vec::new();
         for address in addresses {
@@ -1582,6 +1730,77 @@ pub trait InputSource {
             )?);
         }
         Ok(outputs)
+    }
+
+    /// Returns the spendable transparent outputs received by `account` whose total post-fee
+    /// value (sum of values minus the cumulative marginal fee cost of the gathered inputs
+    /// themselves, per `fee_rule`) is at least `target_value`, or `max_inputs` outputs
+    /// (whichever is reached first).
+    ///
+    /// The gather is intended to scale to wallets with large numbers of transparent addresses and
+    /// UTXOs: it returns a value-bounded subset rather than every spendable output, so the
+    /// selector does not need to materialize the wallet's full UTXO set. Data stores should
+    /// implement this with a single query that orders eligible UTXOs by descending value and
+    /// accumulates them, recomputing the cumulative fee via `fee_rule` at each step, stopping
+    /// once the post-fee cumulative value meets the bound. This produces a tighter result than a
+    /// static value bound, without requiring a separate round trip to correct an under-estimated
+    /// headroom.
+    ///
+    /// `max_inputs` bounds the number of transparent inputs a single transaction may consume,
+    /// independent of `target_value`: even a small requested value could otherwise require an
+    /// unbounded number of inputs for a wallet holding a very large number of small (e.g. dust)
+    /// UTXOs. When the cap is reached before the value target, the returned set's post-fee value
+    /// may be less than `target_value`; the caller's input-selection loop is expected to surface
+    /// this as an `InsufficientFunds` error, the same as for any other value shortfall.
+    ///
+    /// `fee_rule` is fixed to [`StandardFeeRule`] (rather than being generic over the caller's
+    /// actual [`ChangeStrategy`]) so that implementations of this method do not need to be
+    /// generic over an arbitrary fee rule type. This is a heuristic bound only: the transaction's
+    /// real fee is still computed by the caller's actual change strategy, and if this gather's
+    /// estimate turns out to be insufficient, the caller's input-selection loop will surface an
+    /// `InsufficientFunds` error and can re-invoke this method with a corrected `target_value`.
+    ///
+    /// For `TargetValue::AllFunds`, no value bound is applied and the gather returns every
+    /// eligible output up to `max_inputs`.
+    ///
+    /// When `address_allow_list` is `Some`, only outputs received at one of the listed
+    /// transparent addresses are eligible; when `None`, outputs received at any of the
+    /// account's transparent addresses are eligible. The restriction must be applied
+    /// *within* the gather (not to its results), so that outputs excluded by the allow list
+    /// do not consume the value bound.
+    ///
+    /// This is the value-bounded counterpart to [`InputSource::get_spendable_transparent_outputs`]
+    /// and [`InputSource::get_spendable_transparent_outputs_for_addresses`], intended for use by
+    /// general (non-shielding) input selection in `propose_transaction`.
+    ///
+    /// [`ChangeStrategy`]: crate::fees::ChangeStrategy
+    #[cfg(feature = "transparent-inputs")]
+    #[allow(clippy::too_many_arguments)]
+    fn select_spendable_transparent_outputs(
+        &self,
+        account: Self::AccountId,
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+        output_filter: CoinbaseFilter,
+        address_allow_list: Option<&[TransparentAddress]>,
+        target_value: TargetValue,
+        max_inputs: usize,
+        fee_rule: &StandardFeeRule,
+    ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        let _ = (
+            account,
+            target_height,
+            confirmations_policy,
+            output_filter,
+            address_allow_list,
+            target_value,
+            max_inputs,
+            fee_rule,
+        );
+        unimplemented!(
+            "InputSource::select_spendable_transparent_outputs must be overridden for \
+             wallets to use the value-bounded transparent input gather in propose_transaction"
+        )
     }
 }
 
@@ -1844,6 +2063,20 @@ pub trait WalletRead {
         )
     }
 
+    /// Returns the nullifiers for Ironwood notes that the wallet is tracking, along with their
+    /// associated account IDs, that are either unspent or have not yet been confirmed as spent.
+    /// Ironwood nullifiers are Orchard-shaped but are tracked as a separate pool.
+    ///
+    /// This is a required method (like [`WalletRead::get_sapling_nullifiers`]) rather than
+    /// defaulting to a panic: it is called on the scan path, so a backend that does not override it
+    /// would abort the process on the first scan. Requiring it surfaces the omission at compile
+    /// time instead.
+    #[cfg(feature = "orchard")]
+    fn get_ironwood_nullifiers(
+        &self,
+        query: NullifierQuery,
+    ) -> Result<Vec<(Self::AccountId, orchard::note::Nullifier)>, Self::Error>;
+
     /// Returns the set of non-ephemeral transparent receivers associated with the given
     /// account controlled by this wallet.
     ///
@@ -2016,7 +2249,7 @@ pub trait WalletTest: InputSource + WalletRead {
     fn get_sent_note_ids(
         &self,
         _txid: &TxId,
-        _protocol: ShieldedProtocol,
+        _protocol: ShieldedPool,
     ) -> Result<Vec<NoteId>, <Self as WalletRead>::Error>;
 
     /// Returns the outputs for a transaction sent by the wallet.
@@ -2029,7 +2262,7 @@ pub trait WalletTest: InputSource + WalletRead {
     #[allow(clippy::type_complexity)]
     fn get_checkpoint_history(
         &self,
-        protocol: &ShieldedProtocol,
+        protocol: &ShieldedPool,
     ) -> Result<
         Vec<(BlockHeight, Option<incrementalmerkletree::Position>)>,
         <Self as WalletRead>::Error,
@@ -2063,7 +2296,7 @@ pub trait WalletTest: InputSource + WalletRead {
     /// Returns all the notes that have been received by the wallet.
     fn get_notes(
         &self,
-        protocol: ShieldedProtocol,
+        protocol: ShieldedPool,
     ) -> Result<Vec<ReceivedNote<Self::NoteRef, Note>>, <Self as InputSource>::Error>;
 
     /// Returns a vector of ephemeral transparent addresses associated with the given
@@ -2229,6 +2462,8 @@ pub struct BlockMetadata {
     sapling_tree_size: Option<u32>,
     #[cfg(feature = "orchard")]
     orchard_tree_size: Option<u32>,
+    #[cfg(feature = "orchard")]
+    ironwood_tree_size: Option<u32>,
 }
 
 impl BlockMetadata {
@@ -2238,6 +2473,7 @@ impl BlockMetadata {
         block_hash: BlockHash,
         sapling_tree_size: Option<u32>,
         #[cfg(feature = "orchard")] orchard_tree_size: Option<u32>,
+        #[cfg(feature = "orchard")] ironwood_tree_size: Option<u32>,
     ) -> Self {
         Self {
             block_height,
@@ -2245,6 +2481,8 @@ impl BlockMetadata {
             sapling_tree_size,
             #[cfg(feature = "orchard")]
             orchard_tree_size,
+            #[cfg(feature = "orchard")]
+            ironwood_tree_size,
         }
     }
 
@@ -2269,6 +2507,13 @@ impl BlockMetadata {
     #[cfg(feature = "orchard")]
     pub fn orchard_tree_size(&self) -> Option<u32> {
         self.orchard_tree_size
+    }
+
+    /// Returns the size of the Ironwood note commitment tree for the final treestate of the block
+    /// that this [`BlockMetadata`] describes, if available.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood_tree_size(&self) -> Option<u32> {
+        self.ironwood_tree_size
     }
 }
 
@@ -2327,6 +2572,10 @@ pub struct ScannedBlockCommitments {
     /// Present only when the `orchard` feature is enabled.
     #[cfg(feature = "orchard")]
     pub orchard: Vec<(orchard::tree::MerkleHashOrchard, Retention<BlockHeight>)>,
+    /// The ordered vector of note commitments for Ironwood outputs of the block.
+    /// Present only when the `orchard` feature is enabled.
+    #[cfg(feature = "orchard")]
+    pub ironwood: Vec<(orchard::tree::MerkleHashOrchard, Retention<BlockHeight>)>,
 }
 
 /// The subset of information that is relevant to this wallet that has been
@@ -2341,6 +2590,8 @@ pub struct ScannedBlock<AccountId> {
     sapling: ScannedBundles<sapling::Node, sapling::Nullifier>,
     #[cfg(feature = "orchard")]
     orchard: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
+    #[cfg(feature = "orchard")]
+    ironwood: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
 }
 
 impl<AccountId> ScannedBlock<AccountId> {
@@ -2355,6 +2606,10 @@ impl<AccountId> ScannedBlock<AccountId> {
             orchard::tree::MerkleHashOrchard,
             orchard::note::Nullifier,
         >,
+        #[cfg(feature = "orchard")] ironwood: ScannedBundles<
+            orchard::tree::MerkleHashOrchard,
+            orchard::note::Nullifier,
+        >,
     ) -> Self {
         Self {
             block_height,
@@ -2364,6 +2619,8 @@ impl<AccountId> ScannedBlock<AccountId> {
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(feature = "orchard")]
+            ironwood,
         }
     }
 
@@ -2400,13 +2657,23 @@ impl<AccountId> ScannedBlock<AccountId> {
         &self.orchard
     }
 
-    /// Consumes `self` and returns the lists of Sapling and Orchard note commitments associated
-    /// with the scanned block as an owned value.
+    /// Returns the Ironwood note commitment tree and nullifier data for the block.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood(
+        &self,
+    ) -> &ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier> {
+        &self.ironwood
+    }
+
+    /// Consumes `self` and returns the lists of Sapling, Orchard, and Ironwood note commitments
+    /// associated with the scanned block as an owned value.
     pub fn into_commitments(self) -> ScannedBlockCommitments {
         ScannedBlockCommitments {
             sapling: self.sapling.commitments,
             #[cfg(feature = "orchard")]
             orchard: self.orchard.commitments,
+            #[cfg(feature = "orchard")]
+            ironwood: self.ironwood.commitments,
         }
     }
 
@@ -2418,6 +2685,8 @@ impl<AccountId> ScannedBlock<AccountId> {
             sapling_tree_size: Some(self.sapling.final_tree_size),
             #[cfg(feature = "orchard")]
             orchard_tree_size: Some(self.orchard.final_tree_size),
+            #[cfg(feature = "orchard")]
+            ironwood_tree_size: Some(self.ironwood.final_tree_size),
         }
     }
 }
@@ -2432,7 +2701,7 @@ pub trait DecryptableTransaction<AccountId> {
 impl<AccountId> DecryptableTransaction<AccountId> for Transaction {
     type DecryptedSaplingOutput = DecryptedOutput<sapling::Note, AccountId>;
     #[cfg(feature = "orchard")]
-    type DecryptedOrchardOutput = DecryptedOutput<orchard::Note, AccountId>;
+    type DecryptedOrchardOutput = DecryptedOutput<(orchard::Note, orchard::ValuePool), AccountId>;
 }
 
 /// A transaction that was detected during scanning of the blockchain,
@@ -2446,15 +2715,21 @@ pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, Accou
     sapling_outputs: Vec<Tx::DecryptedSaplingOutput>,
     #[cfg(feature = "orchard")]
     orchard_outputs: Vec<Tx::DecryptedOrchardOutput>,
+    #[cfg(feature = "orchard")]
+    ironwood_outputs: Vec<Tx::DecryptedOrchardOutput>,
 }
 
 impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<'a, Tx, AccountId> {
     /// Constructs a new [`DecryptedTransaction`] from its constituent parts.
+    ///
+    /// Ironwood outputs are Orchard-shaped but belong to a distinct pool, and are passed and
+    /// tracked separately from Orchard outputs.
     pub fn new(
         mined_height: Option<BlockHeight>,
         tx: &'a Tx,
         sapling_outputs: Vec<Tx::DecryptedSaplingOutput>,
         #[cfg(feature = "orchard")] orchard_outputs: Vec<Tx::DecryptedOrchardOutput>,
+        #[cfg(feature = "orchard")] ironwood_outputs: Vec<Tx::DecryptedOrchardOutput>,
     ) -> Self {
         Self {
             mined_height,
@@ -2462,6 +2737,8 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
             sapling_outputs,
             #[cfg(feature = "orchard")]
             orchard_outputs,
+            #[cfg(feature = "orchard")]
+            ironwood_outputs,
         }
     }
 
@@ -2483,11 +2760,19 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
         &self.orchard_outputs
     }
 
+    /// Returns the Ironwood outputs that were decrypted from the transaction.
+    ///
+    /// Ironwood outputs are Orchard-shaped but belong to a pool distinct from Orchard.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood_outputs(&self) -> &[Tx::DecryptedOrchardOutput] {
+        &self.ironwood_outputs
+    }
+
     /// Returns whether the transaction has decrypted outputs
     pub fn has_decrypted_outputs(&self) -> bool {
         let has_sapling = !self.sapling_outputs.is_empty();
         #[cfg(feature = "orchard")]
-        let has_orchard = !self.orchard_outputs.is_empty();
+        let has_orchard = !self.orchard_outputs.is_empty() || !self.ironwood_outputs.is_empty();
         #[cfg(not(feature = "orchard"))]
         let has_orchard = false;
 
@@ -2627,11 +2912,25 @@ impl ReceivedTransactionOutput {
     }
 }
 
+/// Identifies one of the wallet-maintained note commitment trees.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NoteCommitmentTree {
+    /// The Sapling note commitment tree.
+    Sapling,
+    /// The Orchard note commitment tree.
+    #[cfg(feature = "orchard")]
+    Orchard,
+    /// The Ironwood note commitment tree.
+    #[cfg(feature = "orchard")]
+    Ironwood,
+}
+
 /// An output of a transaction generated by the wallet.
 ///
 /// This type is capable of representing both shielded and transparent outputs.
 pub struct SentTransactionOutput<AccountId> {
     output_index: usize,
+    note_commitment_tree: Option<NoteCommitmentTree>,
     recipient: Recipient<AccountId>,
     value: Zatoshis,
     memo: Option<MemoBytes>,
@@ -2655,6 +2954,24 @@ impl<AccountId> SentTransactionOutput<AccountId> {
     ) -> Self {
         Self {
             output_index,
+            note_commitment_tree: None,
+            recipient,
+            value,
+            memo,
+        }
+    }
+
+    /// Constructs a new [`SentTransactionOutput`] with explicit note commitment tree metadata.
+    pub(crate) fn from_parts_in_tree(
+        note_commitment_tree: Option<NoteCommitmentTree>,
+        output_index: usize,
+        recipient: Recipient<AccountId>,
+        value: Zatoshis,
+        memo: Option<MemoBytes>,
+    ) -> Self {
+        Self {
+            output_index,
+            note_commitment_tree,
             recipient,
             value,
             memo,
@@ -2669,6 +2986,10 @@ impl<AccountId> SentTransactionOutput<AccountId> {
     ///   transparent outputs of the transaction.
     pub fn output_index(&self) -> usize {
         self.output_index
+    }
+    /// Returns the note commitment tree for this output, if known.
+    pub fn note_commitment_tree(&self) -> Option<NoteCommitmentTree> {
+        self.note_commitment_tree
     }
     /// Returns the recipient address of the transaction, or the account id and
     /// resulting note/outpoint for wallet-internal outputs.
@@ -3077,6 +3398,28 @@ pub trait WalletWrite: WalletRead {
         )
     }
 
+    /// Imports a batch of standalone transparent pubkeys into the account, adding the associated
+    /// transparent p2pkh addresses. See [`import_standalone_transparent_pubkey`] for the semantics
+    /// and spending limitations that apply to each imported pubkey.
+    ///
+    /// This is equivalent to calling [`import_standalone_transparent_pubkey`] once per pubkey, but
+    /// implementations may validate the target account a single time for the whole batch. The
+    /// default implementation calls [`import_standalone_transparent_pubkey`] for each pubkey; a
+    /// pubkey whose receiver address is already known to the wallet is skipped.
+    ///
+    /// [`import_standalone_transparent_pubkey`]: Self::import_standalone_transparent_pubkey
+    #[cfg(feature = "transparent-key-import")]
+    fn import_standalone_transparent_pubkeys(
+        &mut self,
+        account: Self::AccountId,
+        pubkeys: &[secp256k1::PublicKey],
+    ) -> Result<(), Self::Error> {
+        for pubkey in pubkeys {
+            self.import_standalone_transparent_pubkey(account, *pubkey)?;
+        }
+        Ok(())
+    }
+
     /// Imports the given redeem script into the account without key derivation information, and
     /// adds the associated transparent p2sh address.
     ///
@@ -3295,6 +3638,38 @@ pub trait WalletWrite: WalletRead {
         )
     }
 
+    /// Reserves the next `n` available internal-scope (change) transparent addresses for
+    /// the given account, as described in [BIP 44] under the `change` path level. This
+    /// cannot be undone, so as far as possible, errors associated with transaction
+    /// construction should have been reported before calling this method.
+    ///
+    /// Internal-scope transparent addresses are used to receive change for transactions
+    /// having fully-transparent value flows, when the change strategy in use is configured
+    /// with [`TransparentChangePolicy::TransparentChangeAllowed`].
+    ///
+    /// To ensure that funds sent to internal-scope addresses are recoverable, implementations
+    /// of this method should observe a gap limit as described in [BIP 44]; change addresses
+    /// receive funds immediately upon reservation, so a smaller gap limit than the one used
+    /// for external addresses may be observed.
+    ///
+    /// Returns an error if there is insufficient space within the gap limit to allocate
+    /// the given number of addresses, or if the account identifier does not correspond
+    /// to a known account.
+    ///
+    /// [BIP 44]: https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
+    /// [`TransparentChangePolicy::TransparentChangeAllowed`]: crate::fees::TransparentChangePolicy::TransparentChangeAllowed
+    #[cfg(feature = "transparent-inputs")]
+    fn reserve_next_n_internal_addresses(
+        &mut self,
+        _account_id: Self::AccountId,
+        _n: usize,
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Self::Error> {
+        unimplemented!(
+            "WalletWrite::reserve_next_n_internal_addresses must be overridden for wallets to \
+             create transactions that produce transparent change"
+        )
+    }
+
     /// Updates the wallet backend with respect to the status of a specific transaction, from the
     /// perspective of the main chain.
     ///
@@ -3387,6 +3762,53 @@ pub trait WalletWrite: WalletRead {
     }
 }
 
+/// Applies a batch of note commitment tree changes — shards, an optional replacement tree
+/// cap, and a checkpoint delta — directly to the given tree's backing [`ShardStore`].
+///
+/// `shards` must be in ascending shard-index order; stores may reject sequences that would
+/// leave gaps in the tree. Checkpoint removals are applied before additions, so that a
+/// checkpoint whose data has changed may appear in both lists.
+///
+/// This is the shared implementation of the [`WalletCommitmentTrees`] `put_*_shards`
+/// provided methods.
+///
+/// NOTE: This procedure must be called only within a the context of a transaction, such as
+/// in the scope of a `with_*_tree_mut` call; otherwise, failure of an intermediate step could
+/// lead to data corruption.
+fn apply_tree_changes<H, S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
+    tree: &mut ShardTree<S, DEPTH, SHARD_HEIGHT>,
+    shards: &[shardtree::LocatedPrunableTree<H>],
+    cap: Option<&shardtree::PrunableTree<H>>,
+    checkpoints_remove: &[BlockHeight],
+    checkpoints_add: &[(BlockHeight, shardtree::store::Checkpoint)],
+) -> Result<(), ShardTreeError<S::Error>>
+where
+    H: incrementalmerkletree::Hashable + Clone + PartialEq,
+    S: ShardStore<H = H, CheckpointId = BlockHeight>,
+{
+    for shard in shards {
+        tree.store_mut()
+            .put_shard(shard.clone())
+            .map_err(ShardTreeError::Storage)?;
+    }
+    if let Some(cap) = cap {
+        tree.store_mut()
+            .put_cap(cap.clone())
+            .map_err(ShardTreeError::Storage)?;
+    }
+    for height in checkpoints_remove {
+        tree.store_mut()
+            .remove_checkpoint(height)
+            .map_err(ShardTreeError::Storage)?;
+    }
+    for (height, checkpoint) in checkpoints_add {
+        tree.store_mut()
+            .add_checkpoint(*height, checkpoint.clone())
+            .map_err(ShardTreeError::Storage)?;
+    }
+    Ok(())
+}
+
 /// This trait describes a capability for manipulating wallet note commitment trees.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait WalletCommitmentTrees {
@@ -3450,6 +3872,174 @@ pub trait WalletCommitmentTrees {
         start_index: u64,
         roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
     ) -> Result<(), ShardTreeError<Self::Error>>;
+
+    /// Evaluates the given callback with the Ironwood note commitment tree
+    /// maintained by the wallet, if this backend has one.
+    ///
+    /// The default implementation reports that no Ironwood tree is available.
+    /// Backends that track Ironwood note commitments should override this and
+    /// provide their separate Ironwood tree.
+    #[cfg(feature = "orchard")]
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, _callback: F) -> Result<Option<A>, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::OrchardShardStore<'a>,
+                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        Ok(None)
+    }
+
+    /// Adds a sequence of Ironwood note commitment tree subtree roots to the data store, if this
+    /// backend tracks an Ironwood tree.
+    ///
+    /// Each such value should be the Merkle root of a subtree of the Ironwood note commitment tree
+    /// containing 2^[`ORCHARD_SHARD_HEIGHT`] note commitments; Ironwood shares the Orchard note
+    /// commitment tree's shape, so the same shard height applies.
+    ///
+    /// The default implementation is a no-op, for backends that do not track an Ironwood tree
+    /// (mirroring [`WalletCommitmentTrees::with_ironwood_tree_mut`]). Backends that track Ironwood
+    /// note commitments should override this.
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        _start_index: u64,
+        _roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        Ok(())
+    }
+
+    /// Applies a batch of changes — shards, an optional replacement tree cap, and a
+    /// checkpoint delta — to the wallet's Sapling note commitment tree.
+    ///
+    /// `shards` must be in ascending shard-index order; stores may reject sequences that
+    /// would leave gaps in the tree. Checkpoint removals are applied before additions, so
+    /// that a checkpoint whose data has changed may appear in both lists.
+    ///
+    /// This is intended for wallet stores that accumulate note commitment tree updates
+    /// outside the backing store (for example, in an in-memory tree) and flush them in
+    /// batches. The default implementation applies the changes through
+    /// [`WalletCommitmentTrees::with_sapling_tree_mut`].
+    fn put_sapling_shards(
+        &mut self,
+        shards: &[shardtree::LocatedPrunableTree<sapling::Node>],
+        cap: Option<&shardtree::PrunableTree<sapling::Node>>,
+        checkpoints_remove: &[BlockHeight],
+        checkpoints_add: &[(BlockHeight, shardtree::store::Checkpoint)],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_sapling_tree_mut(|tree| {
+            apply_tree_changes(tree, shards, cap, checkpoints_remove, checkpoints_add)
+        })
+    }
+
+    /// Applies a batch of changes — shards, an optional replacement tree cap, and a
+    /// checkpoint delta — to the wallet's Orchard note commitment tree.
+    ///
+    /// `shards` must be in ascending shard-index order; stores may reject sequences that
+    /// would leave gaps in the tree. Checkpoint removals are applied before additions, so
+    /// that a checkpoint whose data has changed may appear in both lists.
+    ///
+    /// This is intended for wallet stores that accumulate note commitment tree updates
+    /// outside the backing store (for example, in an in-memory tree) and flush them in
+    /// batches. The default implementation applies the changes through
+    /// [`WalletCommitmentTrees::with_orchard_tree_mut`].
+    #[cfg(feature = "orchard")]
+    fn put_orchard_shards(
+        &mut self,
+        shards: &[shardtree::LocatedPrunableTree<orchard::tree::MerkleHashOrchard>],
+        cap: Option<&shardtree::PrunableTree<orchard::tree::MerkleHashOrchard>>,
+        checkpoints_remove: &[BlockHeight],
+        checkpoints_add: &[(BlockHeight, shardtree::store::Checkpoint)],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_orchard_tree_mut(|tree| {
+            apply_tree_changes(tree, shards, cap, checkpoints_remove, checkpoints_add)
+        })
+    }
+
+    /// Applies a batch of changes — shards, an optional replacement tree cap, and a
+    /// checkpoint delta — to the wallet's Ironwood note commitment tree, if this backend
+    /// tracks one.
+    ///
+    /// `shards` must be in ascending shard-index order; stores may reject sequences that
+    /// would leave gaps in the tree. Checkpoint removals are applied before additions, so
+    /// that a checkpoint whose data has changed may appear in both lists.
+    ///
+    /// The default implementation applies the changes through
+    /// [`WalletCommitmentTrees::with_ironwood_tree_mut`]; for backends that do not track an
+    /// Ironwood tree (see that method's documentation), the changes are ignored.
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_shards(
+        &mut self,
+        shards: &[shardtree::LocatedPrunableTree<orchard::tree::MerkleHashOrchard>],
+        cap: Option<&shardtree::PrunableTree<orchard::tree::MerkleHashOrchard>>,
+        checkpoints_remove: &[BlockHeight],
+        checkpoints_add: &[(BlockHeight, shardtree::store::Checkpoint)],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_ironwood_tree_mut(|tree| {
+            apply_tree_changes(tree, shards, cap, checkpoints_remove, checkpoints_add)
+        })?;
+        Ok(())
+    }
+
+    /// Releases all retained ("anchor") checkpoints with height strictly less than `max_height`
+    /// from the wallet's note commitment trees, allowing them to be pruned normally.
+    ///
+    /// Anchor checkpoints are established during scanning (and may be created directly via
+    /// [`ShardTree::ensure_retained`]); they are otherwise exempt from automatic pruning of excess
+    /// checkpoints. This releases the retention of those that have aged below `max_height` in the
+    /// Sapling and (when the `orchard` feature is enabled) the Orchard and Ironwood trees.
+    fn remove_retained_checkpoints_below(
+        &mut self,
+        max_height: BlockHeight,
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_sapling_tree_mut(|tree| {
+            for height in tree
+                .store()
+                .retained_checkpoints()
+                .map_err(ShardTreeError::Storage)?
+            {
+                if height < max_height {
+                    tree.remove_retained_checkpoint(&height)?;
+                }
+            }
+            Ok::<_, ShardTreeError<Self::Error>>(())
+        })?;
+
+        #[cfg(feature = "orchard")]
+        self.with_orchard_tree_mut(|tree| {
+            for height in tree
+                .store()
+                .retained_checkpoints()
+                .map_err(ShardTreeError::Storage)?
+            {
+                if height < max_height {
+                    tree.remove_retained_checkpoint(&height)?;
+                }
+            }
+            Ok::<_, ShardTreeError<Self::Error>>(())
+        })?;
+
+        // A backend that does not track an Ironwood tree returns `None` here and is left unchanged.
+        #[cfg(feature = "orchard")]
+        self.with_ironwood_tree_mut(|tree| {
+            for height in tree
+                .store()
+                .retained_checkpoints()
+                .map_err(ShardTreeError::Storage)?
+            {
+                if height < max_height {
+                    tree.remove_retained_checkpoint(&height)?;
+                }
+            }
+            Ok::<_, ShardTreeError<Self::Error>>(())
+        })?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -3465,6 +4055,231 @@ mod tests {
     use transparent::address::TransparentAddress;
     use zcash_keys::address::{Address, UnifiedAddress};
     use zip32::DiversifierIndex;
+
+    #[test]
+    fn put_sapling_shards_flushes_through_the_interface() {
+        use incrementalmerkletree::{Address, Hashable, Level, Marking, Position};
+        use shardtree::store::Checkpoint;
+
+        let mut db = MockWalletDb::new(zcash_protocol::consensus::Network::TestNetwork);
+
+        // Build a shard-rooted subtree the same way `put_blocks` does, with a checkpoint on
+        // the final leaf.
+        let leaf = <sapling::Node as Hashable>::empty_leaf();
+        let checkpoint_height = BlockHeight::from(3);
+        let commitments = (0u64..4).map(|i| {
+            (
+                leaf,
+                if i == 3 {
+                    Retention::Checkpoint {
+                        id: checkpoint_height,
+                        marking: Marking::None,
+                    }
+                } else {
+                    Retention::Ephemeral
+                },
+            )
+        });
+        let built = shardtree::LocatedTree::from_iter(
+            Position::from(0)..Position::from(4),
+            Level::from(SAPLING_SHARD_HEIGHT),
+            commitments,
+        )
+        .expect("commitments produce a subtree");
+        let checkpoints_add = built
+            .checkpoints
+            .iter()
+            .map(|(height, position)| (*height, Checkpoint::at_position(*position)))
+            .collect::<Vec<_>>();
+
+        db.put_sapling_shards(&[built.subtree], None, &[], &checkpoints_add)
+            .expect("bulk flush succeeds");
+
+        // The shard and checkpoint are visible through the standard tree access path.
+        db.with_sapling_tree_mut(|tree| {
+            assert!(
+                tree.store()
+                    .get_shard(Address::from_parts(Level::from(SAPLING_SHARD_HEIGHT), 0))
+                    .map_err(ShardTreeError::Storage)?
+                    .is_some()
+            );
+            assert_eq!(
+                tree.store()
+                    .max_checkpoint_id()
+                    .map_err(ShardTreeError::Storage)?,
+                Some(checkpoint_height)
+            );
+            Ok::<_, ShardTreeError<_>>(())
+        })
+        .expect("tree reads succeed");
+
+        // Removals are applied before additions, so a checkpoint set can be replaced in a
+        // single call.
+        let new_height = BlockHeight::from(7);
+        db.put_sapling_shards(
+            &[],
+            None,
+            &[checkpoint_height],
+            &[(new_height, Checkpoint::tree_empty())],
+        )
+        .expect("checkpoint replacement succeeds");
+
+        db.with_sapling_tree_mut(|tree| {
+            assert_eq!(
+                tree.store()
+                    .max_checkpoint_id()
+                    .map_err(ShardTreeError::Storage)?,
+                Some(new_height)
+            );
+            assert_eq!(
+                tree.store()
+                    .checkpoint_count()
+                    .map_err(ShardTreeError::Storage)?,
+                1
+            );
+            Ok::<_, ShardTreeError<_>>(())
+        })
+        .expect("tree reads succeed");
+    }
+
+    /// Exercises [`apply_tree_changes`] — the shared implementation of the `put_*_shards`
+    /// provided methods — directly over a [`MemoryShardStore`] of the given node type.
+    ///
+    /// [`MemoryShardStore`]: shardtree::store::memory::MemoryShardStore
+    fn check_apply_tree_changes<H>()
+    where
+        H: incrementalmerkletree::Hashable + Clone + PartialEq + core::fmt::Debug,
+    {
+        use incrementalmerkletree::{Address, Level, Marking, Position};
+        use shardtree::store::{Checkpoint, memory::MemoryShardStore};
+
+        let mut tree: ShardTree<
+            MemoryShardStore<H, BlockHeight>,
+            { SAPLING_SHARD_HEIGHT * 2 },
+            SAPLING_SHARD_HEIGHT,
+        > = ShardTree::new(MemoryShardStore::empty(), 100);
+
+        // Build a shard-rooted subtree the same way `put_blocks` does, with a checkpoint on
+        // the final leaf.
+        let leaf = H::empty_leaf();
+        let checkpoint_height = BlockHeight::from(3);
+        let commitments = (0u64..4).map(|i| {
+            (
+                leaf.clone(),
+                if i == 3 {
+                    Retention::Checkpoint {
+                        id: checkpoint_height,
+                        marking: Marking::None,
+                    }
+                } else {
+                    Retention::Ephemeral
+                },
+            )
+        });
+        let built = shardtree::LocatedTree::from_iter(
+            Position::from(0)..Position::from(4),
+            Level::from(SAPLING_SHARD_HEIGHT),
+            commitments,
+        )
+        .expect("commitments produce a subtree");
+        let checkpoints_add = built
+            .checkpoints
+            .iter()
+            .map(|(height, position)| (*height, Checkpoint::at_position(*position)))
+            .collect::<Vec<_>>();
+
+        apply_tree_changes(&mut tree, &[built.subtree], None, &[], &checkpoints_add)
+            .expect("bulk flush succeeds");
+
+        assert!(
+            tree.store()
+                .get_shard(Address::from_parts(Level::from(SAPLING_SHARD_HEIGHT), 0))
+                .expect("shard read succeeds")
+                .is_some()
+        );
+        assert_eq!(
+            tree.store()
+                .max_checkpoint_id()
+                .expect("checkpoint read succeeds"),
+            Some(checkpoint_height)
+        );
+
+        // Removals are applied before additions, so a checkpoint set can be replaced in a
+        // single call.
+        let new_height = BlockHeight::from(7);
+        apply_tree_changes(
+            &mut tree,
+            &[],
+            None,
+            &[checkpoint_height],
+            &[(new_height, Checkpoint::tree_empty())],
+        )
+        .expect("checkpoint replacement succeeds");
+
+        assert_eq!(
+            tree.store()
+                .max_checkpoint_id()
+                .expect("checkpoint read succeeds"),
+            Some(new_height)
+        );
+        assert_eq!(
+            tree.store()
+                .checkpoint_count()
+                .expect("checkpoint read succeeds"),
+            1
+        );
+    }
+
+    #[test]
+    fn apply_tree_changes_supports_every_pool_node_type() {
+        check_apply_tree_changes::<sapling::Node>();
+        // Orchard and Ironwood both use `MerkleHashOrchard` trees of the same shape.
+        #[cfg(feature = "orchard")]
+        check_apply_tree_changes::<orchard::tree::MerkleHashOrchard>();
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn put_ironwood_shards_is_ignored_without_an_ironwood_tree() {
+        use shardtree::store::Checkpoint;
+
+        // `MockWalletDb` does not track an Ironwood tree, so the default
+        // `with_ironwood_tree_mut` reports no tree and the changes are ignored rather than
+        // returning an error.
+        let mut db = MockWalletDb::new(zcash_protocol::consensus::Network::TestNetwork);
+        db.put_ironwood_shards(
+            &[],
+            None,
+            &[],
+            &[(BlockHeight::from(1), Checkpoint::tree_empty())],
+        )
+        .expect("ignored on backends without an Ironwood tree");
+    }
+
+    #[test]
+    fn account_meta_totals_include_ironwood() {
+        let meta = AccountMeta::new(
+            Some(PoolMeta::new(2, Zatoshis::const_from_u64(200))),
+            Some(PoolMeta::new(3, Zatoshis::const_from_u64(300))),
+            Some(PoolMeta::new(5, Zatoshis::const_from_u64(500))),
+        );
+        assert_eq!(meta.note_count(ShieldedPool::Ironwood), Some(5));
+        assert_eq!(meta.total_note_count(), Some(10));
+        assert_eq!(meta.total_value(), Some(Zatoshis::const_from_u64(1000)));
+
+        // With metadata for only the Ironwood pool, the totals reflect that pool alone.
+        let ironwood_only = AccountMeta::new(
+            None,
+            None,
+            Some(PoolMeta::new(4, Zatoshis::const_from_u64(400))),
+        );
+        assert_eq!(ironwood_only.note_count(ShieldedPool::Ironwood), Some(4));
+        assert_eq!(ironwood_only.total_note_count(), Some(4));
+        assert_eq!(
+            ironwood_only.total_value(),
+            Some(Zatoshis::const_from_u64(400))
+        );
+    }
 
     fn derived_source() -> AddressSource {
         AddressSource::Derived {
@@ -3510,12 +4325,18 @@ mod tests {
         let wallet = MockWalletDb::from_account_addresses(
             zcash_protocol::consensus::Network::MainNetwork,
             [
-                (1, vec![address_info_of(Address::Transparent(
-                    transparent_address_for_tag(1),
-                ))]),
-                (2, vec![address_info_of(Address::Transparent(
-                    transparent_address_for_tag(2),
-                ))]),
+                (
+                    1,
+                    vec![address_info_of(Address::Transparent(
+                        transparent_address_for_tag(1),
+                    ))],
+                ),
+                (
+                    2,
+                    vec![address_info_of(Address::Transparent(
+                        transparent_address_for_tag(2),
+                    ))],
+                ),
             ],
         );
         let result = wallet.find_account_for_address(
@@ -3534,11 +4355,14 @@ mod tests {
         {
             let wallet = MockWalletDb::from_account_addresses(
                 zcash_protocol::consensus::Network::MainNetwork,
-                [(1, vec![address_info_of(unified_account_with(
-                    Some(transparent),
-                    Some(sapling_address),
-                    None,
-                ))])],
+                [(
+                    1,
+                    vec![address_info_of(unified_account_with(
+                        Some(transparent),
+                        Some(sapling_address),
+                        None,
+                    ))],
+                )],
             );
             let result = wallet.find_account_for_address(
                 &zcash_protocol::consensus::Network::MainNetwork,
@@ -3550,10 +4374,13 @@ mod tests {
         {
             let wallet = MockWalletDb::from_account_addresses(
                 zcash_protocol::consensus::Network::MainNetwork,
-                [(1, vec![address_info_of(unified_account_with(
-                    Some(transparent),
-                    Some(sapling_address),
-                ))])],
+                [(
+                    1,
+                    vec![address_info_of(unified_account_with(
+                        Some(transparent),
+                        Some(sapling_address),
+                    ))],
+                )],
             );
             let result = wallet.find_account_for_address(
                 &zcash_protocol::consensus::Network::MainNetwork,
@@ -3690,11 +4517,10 @@ mod tests {
 
         let ufvk1 = test_ufvk(1);
         let ufvk2 = test_ufvk(2);
-        let wallet =
-            MockWalletDb::from_account_ufvks(zcash_protocol::consensus::Network::MainNetwork, [
-                (1, ufvk1.clone()),
-                (2, ufvk2.clone()),
-            ]);
+        let wallet = MockWalletDb::from_account_ufvks(
+            zcash_protocol::consensus::Network::MainNetwork,
+            [(1, ufvk1.clone()), (2, ufvk2.clone())],
+        );
 
         let (ua1, _) = ufvk1
             .default_address(UnifiedAddressRequest::AllAvailableKeys)

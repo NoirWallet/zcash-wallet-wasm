@@ -570,11 +570,14 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..3, Historic),
-            scan_range(3..6, Scanned),
-            scan_range(6..10, ChainTip),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(0..3, Historic),
+                scan_range(3..6, Scanned),
+                scan_range(6..10, ChainTip),
+            ]
+        );
     }
 
     #[test]
@@ -589,13 +592,16 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..2, Historic),
-            scan_range(2..5, Scanned),
-            scan_range(5..6, Historic),
-            scan_range(6..7, ChainTip),
-            scan_range(7..10, Scanned),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(0..2, Historic),
+                scan_range(2..5, Scanned),
+                scan_range(5..6, Historic),
+                scan_range(6..7, ChainTip),
+                scan_range(7..10, Scanned),
+            ]
+        );
     }
 
     #[test]
@@ -611,11 +617,14 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..3, Historic),
-            scan_range(3..8, Scanned),
-            scan_range(8..10, ChainTip),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(0..3, Historic),
+                scan_range(3..8, Scanned),
+                scan_range(8..10, ChainTip),
+            ]
+        );
     }
 
     #[test]
@@ -624,19 +633,22 @@ mod tests {
 
         let t = spanning_tree(&[(0..3, Historic), (6..8, ChainTip)]).unwrap();
 
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..6, Historic),
-            scan_range(6..8, ChainTip),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![scan_range(0..6, Historic), scan_range(6..8, ChainTip),]
+        );
 
         let t = spanning_tree(&[(0..3, Historic), (3..4, Verify), (6..8, ChainTip)]).unwrap();
 
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..3, Historic),
-            scan_range(3..4, Verify),
-            scan_range(4..6, Historic),
-            scan_range(6..8, ChainTip),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(0..3, Historic),
+                scan_range(3..4, Verify),
+                scan_range(4..6, Historic),
+                scan_range(6..8, ChainTip),
+            ]
+        );
     }
 
     #[test]
@@ -662,12 +674,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(t.span(), (3.into())..(12.into()));
-        assert_eq!(t.into_vec(), vec![
-            scan_range(3..6, Historic),
-            scan_range(6..8, Scanned),
-            scan_range(8..10, Historic),
-            scan_range(10..12, ChainTip),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(3..6, Historic),
+                scan_range(6..8, Scanned),
+                scan_range(8..10, Historic),
+                scan_range(10..12, ChainTip),
+            ]
+        );
     }
 
     #[test]
@@ -675,54 +690,75 @@ mod tests {
         use ScanPriority::*;
 
         let t = spanning_tree(&[(0..3, Verify), (2..8, Scanned), (6..10, Verify)]).unwrap();
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..2, Verify),
-            scan_range(2..6, Scanned),
-            scan_range(6..10, Verify),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(0..2, Verify),
+                scan_range(2..6, Scanned),
+                scan_range(6..10, Verify),
+            ]
+        );
 
         let t = spanning_tree(&[(0..3, Verify), (2..8, Historic), (6..10, Verify)]).unwrap();
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..3, Verify),
-            scan_range(3..6, Historic),
-            scan_range(6..10, Verify),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(0..3, Verify),
+                scan_range(3..6, Historic),
+                scan_range(6..10, Verify),
+            ]
+        );
 
         let t = spanning_tree(&[(0..3, Scanned), (2..8, Verify), (6..10, Scanned)]).unwrap();
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..2, Scanned),
-            scan_range(2..6, Verify),
-            scan_range(6..10, Scanned),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(0..2, Scanned),
+                scan_range(2..6, Verify),
+                scan_range(6..10, Scanned),
+            ]
+        );
 
         let t = spanning_tree(&[(0..3, Scanned), (2..8, Historic), (6..10, Scanned)]).unwrap();
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..3, Scanned),
-            scan_range(3..6, Historic),
-            scan_range(6..10, Scanned),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(0..3, Scanned),
+                scan_range(3..6, Historic),
+                scan_range(6..10, Scanned),
+            ]
+        );
 
         // a `ChainTip` insertion should not overwrite a scanned range.
         let mut t = spanning_tree(&[(0..3, ChainTip), (3..5, Scanned), (5..7, ChainTip)]).unwrap();
         t = t.insert(scan_range(0..7, ChainTip), false);
-        assert_eq!(t.into_vec(), vec![
-            scan_range(0..3, ChainTip),
-            scan_range(3..5, Scanned),
-            scan_range(5..7, ChainTip),
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(0..3, ChainTip),
+                scan_range(3..5, Scanned),
+                scan_range(5..7, ChainTip),
+            ]
+        );
 
         let mut t =
             spanning_tree(&[(280300..280310, FoundNote), (280310..280320, Scanned)]).unwrap();
-        assert_eq!(t.clone().into_vec(), vec![
-            scan_range(280300..280310, FoundNote),
-            scan_range(280310..280320, Scanned)
-        ]);
+        assert_eq!(
+            t.clone().into_vec(),
+            vec![
+                scan_range(280300..280310, FoundNote),
+                scan_range(280310..280320, Scanned)
+            ]
+        );
         t = t.insert(scan_range(280300..280340, ChainTip), false);
-        assert_eq!(t.into_vec(), vec![
-            scan_range(280300..280310, ChainTip),
-            scan_range(280310..280320, Scanned),
-            scan_range(280320..280340, ChainTip)
-        ]);
+        assert_eq!(
+            t.into_vec(),
+            vec![
+                scan_range(280300..280310, ChainTip),
+                scan_range(280310..280320, Scanned),
+                scan_range(280320..280340, ChainTip)
+            ]
+        );
     }
 
     #[test]

@@ -30,10 +30,13 @@ impl<P: Parameters> MemoryWalletDb<P> {
         }
 
         for (txid, tx) in &self.tx_table.0 {
-            len += message::encoded_len(4, &proto::TransactionTableRecord {
-                tx_id: Some((*txid).into()),
-                tx_entry: Some(tx.clone().into()),
-            });
+            len += message::encoded_len(
+                4,
+                &proto::TransactionTableRecord {
+                    tx_id: Some((*txid).into()),
+                    tx_entry: Some(tx.clone().into()),
+                },
+            );
         }
 
         for note in self.received_notes.iter() {
@@ -41,33 +44,45 @@ impl<P: Parameters> MemoryWalletDb<P> {
         }
 
         for (note_id, tx_id) in &self.received_note_spends.0 {
-            len += message::encoded_len(6, &proto::ReceivedNoteSpendRecord {
-                note_id: Some((*note_id).into()),
-                tx_id: Some((*tx_id).into()),
-            });
+            len += message::encoded_len(
+                6,
+                &proto::ReceivedNoteSpendRecord {
+                    note_id: Some((*note_id).into()),
+                    tx_id: Some((*tx_id).into()),
+                },
+            );
         }
 
         for (nullifier, (height, tx_index)) in &self.nullifiers.0 {
-            len += message::encoded_len(7, &proto::NullifierRecord {
-                block_height: (*height).into(),
-                tx_index: *tx_index,
-                nullifier: Some((*nullifier).into()),
-            });
+            len += message::encoded_len(
+                7,
+                &proto::NullifierRecord {
+                    block_height: (*height).into(),
+                    tx_index: *tx_index,
+                    nullifier: Some((*nullifier).into()),
+                },
+            );
         }
 
         for (id, note) in &self.sent_notes.0 {
-            len += message::encoded_len(8, &proto::SentNoteRecord {
-                sent_note_id: Some(id.clone().into()),
-                sent_note: Some(proto::SentNote::from(note.clone())),
-            });
+            len += message::encoded_len(
+                8,
+                &proto::SentNoteRecord {
+                    sent_note_id: Some(id.clone().into()),
+                    sent_note: Some(proto::SentNote::from(note.clone())),
+                },
+            );
         }
 
         for ((height, tx_index), txid) in &self.tx_locator.0 {
-            len += message::encoded_len(9, &proto::TxLocatorRecord {
-                block_height: (*height).into(),
-                tx_index: *tx_index,
-                tx_id: Some((*txid).into()),
-            });
+            len += message::encoded_len(
+                9,
+                &proto::TxLocatorRecord {
+                    block_height: (*height).into(),
+                    tx_index: *tx_index,
+                    tx_id: Some((*txid).into()),
+                },
+            );
         }
 
         for r in self.scan_queue.iter() {
@@ -77,11 +92,14 @@ impl<P: Parameters> MemoryWalletDb<P> {
         len += self.encoded_shard_tree_len(11, &self.sapling_tree)?;
 
         for (address, height) in &self.sapling_tree_shard_end_heights {
-            len += message::encoded_len(12, &proto::TreeEndHeightsRecord {
-                level: address.level().into(),
-                index: address.index(),
-                block_height: (*height).into(),
-            });
+            len += message::encoded_len(
+                12,
+                &proto::TreeEndHeightsRecord {
+                    level: address.level().into(),
+                    index: address.index(),
+                    block_height: (*height).into(),
+                },
+            );
         }
 
         #[cfg(feature = "orchard")]
@@ -89,37 +107,64 @@ impl<P: Parameters> MemoryWalletDb<P> {
             len += self.encoded_shard_tree_len(13, &self.orchard_tree)?;
 
             for (address, height) in &self.orchard_tree_shard_end_heights {
-                len += message::encoded_len(14, &proto::TreeEndHeightsRecord {
-                    level: address.level().into(),
-                    index: address.index(),
-                    block_height: (*height).into(),
-                });
+                len += message::encoded_len(
+                    14,
+                    &proto::TreeEndHeightsRecord {
+                        level: address.level().into(),
+                        index: address.index(),
+                        block_height: (*height).into(),
+                    },
+                );
             }
         }
 
         for (outpoint, output) in &self.transparent_received_outputs.0 {
-            len += message::encoded_len(15, &proto::TransparentReceivedOutputRecord {
-                outpoint: Some(proto::OutPoint::from(outpoint.clone())),
-                output: Some(proto::ReceivedTransparentOutput::from(output.clone())),
-            });
+            len += message::encoded_len(
+                15,
+                &proto::TransparentReceivedOutputRecord {
+                    outpoint: Some(proto::OutPoint::from(outpoint.clone())),
+                    output: Some(proto::ReceivedTransparentOutput::from(output.clone())),
+                },
+            );
         }
 
         for (outpoint, txid) in &self.transparent_received_output_spends.0 {
-            len += message::encoded_len(16, &proto::TransparentReceivedOutputSpendRecord {
-                outpoint: Some(proto::OutPoint::from(outpoint.clone())),
-                tx_id: Some((*txid).into()),
-            });
+            len += message::encoded_len(
+                16,
+                &proto::TransparentReceivedOutputSpendRecord {
+                    outpoint: Some(proto::OutPoint::from(outpoint.clone())),
+                    tx_id: Some((*txid).into()),
+                },
+            );
         }
 
         for (txid, outpoint) in &self.transparent_spend_map.0 {
-            len += message::encoded_len(17, &proto::TransparentSpendCacheRecord {
-                tx_id: Some((*txid).into()),
-                outpoint: Some(proto::OutPoint::from(outpoint.clone())),
-            });
+            len += message::encoded_len(
+                17,
+                &proto::TransparentSpendCacheRecord {
+                    tx_id: Some((*txid).into()),
+                    outpoint: Some(proto::OutPoint::from(outpoint.clone())),
+                },
+            );
         }
 
         for request in &self.transaction_data_request_queue.0 {
             len += message::encoded_len(18, &proto::TransactionDataRequest::from(request.clone()));
+        }
+
+        #[cfg(feature = "orchard")]
+        {
+            len += self.encoded_shard_tree_len(19, &self.ironwood_tree)?;
+            for (address, height) in &self.ironwood_tree_shard_end_heights {
+                len += message::encoded_len(
+                    20,
+                    &proto::TreeEndHeightsRecord {
+                        level: address.level().into(),
+                        index: address.index(),
+                        block_height: (*height).into(),
+                    },
+                );
+            }
         }
 
         Ok(len)
@@ -270,6 +315,22 @@ impl<P: Parameters> MemoryWalletDb<P> {
                 &proto::TransactionDataRequest::from(request.clone()),
                 buf,
             );
+        }
+
+        #[cfg(feature = "orchard")]
+        {
+            self.encode_shard_tree(19, &self.ironwood_tree, buf)?;
+            for (address, height) in &self.ironwood_tree_shard_end_heights {
+                message::encode(
+                    20,
+                    &proto::TreeEndHeightsRecord {
+                        level: address.level().into(),
+                        index: address.index(),
+                        block_height: (*height).into(),
+                    },
+                    buf,
+                );
+            }
         }
 
         Ok(())
@@ -510,6 +571,25 @@ impl<P: Parameters> MemoryWalletDb<P> {
                 .collect::<Result<_>>()?;
         };
 
+        #[cfg(feature = "orchard")]
+        {
+            if let Some(tree) = proto_wallet.ironwood_tree {
+                wallet.ironwood_tree = tree_from_protobuf(tree, 100, 16.into())?;
+            }
+            wallet.ironwood_tree_shard_end_heights = proto_wallet
+                .ironwood_tree_shard_end_heights
+                .into_iter()
+                .map(|proto_end_height| {
+                    let address = Address::from_parts(
+                        Level::from(u8::try_from(proto_end_height.level)?),
+                        proto_end_height.index,
+                    );
+                    let height = proto_end_height.block_height.into();
+                    Ok((address, height))
+                })
+                .collect::<Result<_>>()?;
+        }
+
         wallet.transparent_received_outputs = TransparentReceivedOutputs(
             proto_wallet
                 .transparent_received_outputs
@@ -670,13 +750,16 @@ where
         self.tree
             .store()
             .for_each_checkpoint(usize::MAX, |id, checkpoint| {
-                len += message::encoded_len(3, &proto::TreeCheckpoint {
-                    checkpoint_id: (*id).into(),
-                    position: match checkpoint.tree_state() {
-                        shardtree::store::TreeState::Empty => 0,
-                        shardtree::store::TreeState::AtPosition(position) => position.into(),
+                len += message::encoded_len(
+                    3,
+                    &proto::TreeCheckpoint {
+                        checkpoint_id: (*id).into(),
+                        position: match checkpoint.tree_state() {
+                            shardtree::store::TreeState::Empty => 0,
+                            shardtree::store::TreeState::AtPosition(position) => position.into(),
+                        },
                     },
-                });
+                );
                 Ok(())
             })?;
 
@@ -943,6 +1026,25 @@ impl<P: Parameters> From<&MemoryWalletDb<P>> for proto::MemoryWallet {
                 .collect(),
             #[cfg(not(feature = "orchard"))]
             orchard_tree_shard_end_heights: Vec::new(),
+
+            #[cfg(feature = "orchard")]
+            ironwood_tree: tree_to_protobuf(&wallet.ironwood_tree).unwrap(),
+            #[cfg(not(feature = "orchard"))]
+            ironwood_tree: None,
+
+            #[cfg(feature = "orchard")]
+            ironwood_tree_shard_end_heights: wallet
+                .ironwood_tree_shard_end_heights
+                .clone()
+                .into_iter()
+                .map(|(address, height)| proto::TreeEndHeightsRecord {
+                    level: address.level().into(),
+                    index: address.index(),
+                    block_height: height.into(),
+                })
+                .collect(),
+            #[cfg(not(feature = "orchard"))]
+            ironwood_tree_shard_end_heights: Vec::new(),
 
             transparent_received_outputs: wallet
                 .transparent_received_outputs

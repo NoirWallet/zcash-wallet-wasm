@@ -228,9 +228,10 @@ fn truncate_to_height<P: consensus::Parameters>(
         // do not count towards spendability or transaction balalnce.
 
         // Now that they aren't depended on, delete un-mined blocks.
-        conn.execute("DELETE FROM blocks WHERE height > ?", [u32::from(
-            truncation_height,
-        )])?;
+        conn.execute(
+            "DELETE FROM blocks WHERE height > ?",
+            [u32::from(truncation_height)],
+        )?;
 
         // Delete from the nullifier map any entries with a locator referencing a block
         // height greater than the truncation height.

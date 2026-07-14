@@ -31,8 +31,8 @@ impl IoFinalizer {
 
         let has_orchard_actions = !pczt.orchard.actions.is_empty();
         let has_ironwood_actions = !pczt.ironwood.actions.is_empty();
-        let has_shielded_spends =
-            !(pczt.sapling.spends.is_empty() && !has_orchard_actions && !has_ironwood_actions);
+        let has_sapling_spends = !pczt.sapling.spends.is_empty();
+        let has_shielded_spends = has_sapling_spends || has_orchard_actions || has_ironwood_actions;
         let has_shielded_outputs =
             !(pczt.sapling.outputs.is_empty() && !has_orchard_actions && !has_ironwood_actions);
 
@@ -45,6 +45,9 @@ impl IoFinalizer {
             return Err(Error::NoOutputs);
         }
 
+        let anchor_requirement =
+            crate::common::AnchorRequirement::for_pre_authorization(pczt.global.tx_version);
+
         let ParsedPczt {
             mut global,
             transparent,
@@ -53,6 +56,7 @@ impl IoFinalizer {
             mut ironwood,
             tx_data,
         } = pczt.extract_tx_data(
+            anchor_requirement,
             |t| {
                 t.extract_effects()
                     .map_err(ExtractError::TransparentExtract)
@@ -72,22 +76,36 @@ impl IoFinalizer {
         let txid_parts = tx_data.digest(TxIdDigester);
         let shielded_sighash = sighash(&tx_data, &SignableInput::Shielded, &txid_parts);
 
+        // The Sapling bundle is always finalized: unlike the Orchard-protocol
+        // Transaction Extractor, the Sapling one requires `bsk` to be set even when
+        // the bundle is empty.
         sapling
+            .bundle
             .finalize_io(shielded_sighash, OsRng)
             .map_err(Error::SaplingFinalize)?;
-        orchard
-            .finalize_io(shielded_sighash, OsRng)
-            .map_err(Error::OrchardFinalize)?;
-        ironwood
-            .finalize_io(shielded_sighash, OsRng)
-            .map_err(Error::IronwoodFinalize)?;
+        // An empty Orchard-protocol bundle carries no value commitment information
+        // and contributes nothing to the transaction; leave its `bsk` unset so that
+        // it stays in its canonical empty form (and so remains omissible by, or
+        // representable in, the serialization formats).
+        if has_orchard_actions {
+            orchard
+                .bundle
+                .finalize_io(shielded_sighash, OsRng)
+                .map_err(Error::OrchardFinalize)?;
+        }
+        if has_ironwood_actions {
+            ironwood
+                .bundle
+                .finalize_io(shielded_sighash, OsRng)
+                .map_err(Error::IronwoodFinalize)?;
+        }
 
         Ok(Pczt {
             global,
             transparent: crate::transparent::Bundle::serialize_from(transparent),
-            sapling: crate::sapling::Bundle::serialize_from(sapling),
-            orchard: crate::orchard::Bundle::serialize_from(orchard),
-            ironwood: crate::orchard::Bundle::serialize_from(ironwood),
+            sapling: sapling.reserialize(),
+            orchard: orchard.reserialize(),
+            ironwood: ironwood.reserialize(),
         })
     }
 }

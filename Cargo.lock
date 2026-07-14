@@ -1513,9 +1513,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "orchard"
-version = "0.15.0-pre.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8e277dd4b46f5d06deae3ffb8af1a951e8622368f028c2a4d6fe59339566403"
+checksum = "cca2ede6a4a77bd729eed3be9303d98a08b217edc85190dcf4dbe004086d5a65"
 dependencies = [
  "aes",
  "bitvec",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "pczt"
-version = "0.7.0"
+version = "0.8.0-rc.1"
 dependencies = [
  "blake2b_simd",
  "bls12_381",
@@ -2323,9 +2323,9 @@ dependencies = [
 
 [[package]]
 name = "shardtree"
-version = "0.6.2"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "359e552886ae54d1642091645980d83f7db465fd9b5b0248e3680713c1773388"
+checksum = "9cc96e9b6b1c307749019e7e2cf9dd29881b1928ce6866e3702a02a4800aa345"
 dependencies = [
  "bitflags",
  "either",
@@ -3137,7 +3137,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_address"
-version = "0.13.0-pre.0"
+version = "0.13.0"
 dependencies = [
  "bech32 0.11.1",
  "bs58",
@@ -3149,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_client_backend"
-version = "0.23.0"
+version = "0.24.0-rc.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3183,7 +3183,6 @@ dependencies = [
  "shardtree",
  "subtle",
  "time",
- "time-core",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -3253,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_keys"
-version = "0.15.0-pre.0"
+version = "0.15.0"
 dependencies = [
  "bech32 0.11.1",
  "bip32",
@@ -3294,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_primitives"
-version = "0.29.0-pre.0"
+version = "0.29.0"
 dependencies = [
  "blake2b_simd",
  "block-buffer 0.11.0-rc.3",
@@ -3323,7 +3322,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_proofs"
-version = "0.29.0-pre.0"
+version = "0.29.0"
 dependencies = [
  "bellman",
  "blake2b_simd",
@@ -3341,7 +3340,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_protocol"
-version = "0.10.0-pre.0"
+version = "0.10.0"
 dependencies = [
  "corez",
  "document-features",
@@ -3378,7 +3377,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_transparent"
-version = "0.9.0-pre.0"
+version = "0.9.0"
 dependencies = [
  "bip32",
  "bs58",
@@ -3470,7 +3469,7 @@ dependencies = [
 
 [[package]]
 name = "zip321"
-version = "0.8.0"
+version = "0.9.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "nom",

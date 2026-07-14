@@ -16,6 +16,79 @@ pub(crate) fn send_single_step_proposed_transfer<T: ShieldedPoolTester>() {
     )
 }
 
+#[cfg(feature = "orchard")]
+pub(crate) fn orchard_send_max_routes_to_ironwood() {
+    use std::convert::Infallible;
+
+    use zcash_client_backend::data_api::{
+        Account as _, MaxSpendMode,
+        testing::{TestBuilder, pool::dsl::TestDsl},
+        wallet::{ConfirmationsPolicy, propose_send_max_transfer},
+    };
+    use zcash_client_backend::fees::StandardFeeRule;
+    use zcash_primitives::{block::BlockHash, transaction::TxVersion};
+    use zcash_protocol::{
+        PoolType, ShieldedPool, consensus::BlockHeight, local_consensus::LocalNetwork,
+        value::Zatoshis,
+    };
+
+    use zcash_client_backend::data_api::testing::orchard::OrchardPoolTester;
+
+    let activation = BlockHeight::from_u32(100_000);
+    let network = LocalNetwork {
+        nu6: Some(activation),
+        nu6_1: Some(activation),
+        nu6_2: Some(activation),
+        nu6_3: Some(activation),
+        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+    };
+    let mut st = TestDsl::from(
+        TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestMemDbFactory::new())
+            .with_block_cache(MemBlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32])),
+    )
+    .build::<OrchardPoolTester>();
+
+    st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60_000));
+    let account = st.get_account();
+    let to_extsk = OrchardPoolTester::sk(&[0xf5; 32]);
+    let to = OrchardPoolTester::sk_default_address(&to_extsk).to_zcash_address(st.network());
+    let network = *st.network();
+
+    let proposal = propose_send_max_transfer::<_, _, _, Infallible>(
+        st.wallet_mut(),
+        &network,
+        account.id(),
+        &[ShieldedPool::Orchard],
+        &StandardFeeRule::Zip317,
+        to,
+        None,
+        MaxSpendMode::MaxSpendable,
+        ConfirmationsPolicy::MIN,
+    )
+    .expect("Orchard migration send-max proposal should succeed")
+    .with_proposed_version(Some(TxVersion::V6));
+
+    assert_eq!(proposal.proposed_version(), Some(TxVersion::V6));
+    assert_eq!(
+        proposal.steps().head.payment_pools().get(&0),
+        Some(&PoolType::IRONWOOD),
+    );
+    assert_eq!(
+        proposal.steps().head.input_count_in_pool(PoolType::ORCHARD),
+        1,
+    );
+    assert_eq!(
+        proposal
+            .steps()
+            .head
+            .input_count_in_pool(PoolType::IRONWOOD),
+        0,
+    );
+}
+
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn send_multi_step_proposed_transfer<T: ShieldedPoolTester>() {
     zcash_client_backend::data_api::testing::pool::send_multi_step_proposed_transfer::<T, _>(

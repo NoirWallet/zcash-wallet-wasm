@@ -8,6 +8,21 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
+## [Unreleased]
+
+## [0.10.0] - 2026-07-09
+
+This release sets the NU6.3 mainnet activation height to 3428143.
+
+### Added
+- `zcash_protocol::consensus::OrchardProtocolRevision`
+- `zcash_protocol::consensus::BranchId::orchard_protocol_revision`
+- `zcash_protocol::consensus::BranchId::network_upgrade`
+- `zcash_protocol::consensus::NetworkUpgrade::branch_id` (previously private)
+
+### Changed
+- MSRV is now 1.88
+
 ## [0.10.0-pre.0] - 2026-06-30
 
 This release sets the NU6.3 activation height to 4134000 on testnet.

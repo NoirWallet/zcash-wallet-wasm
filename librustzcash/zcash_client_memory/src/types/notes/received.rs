@@ -8,7 +8,7 @@ use std::{
 use zip32::Scope;
 
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::{PoolType, ShieldedProtocol::Sapling, memo::Memo};
+use zcash_protocol::{PoolType, ShieldedPool, memo::Memo};
 
 use zcash_client_backend::{
     data_api::{ReceivedNotes, SentTransactionOutput},
@@ -18,9 +18,7 @@ use zcash_client_backend::{
 use crate::AccountId;
 
 #[cfg(feature = "orchard")]
-use {
-    zcash_client_backend::wallet::WalletOrchardOutput, zcash_protocol::ShieldedProtocol::Orchard,
-};
+use zcash_client_backend::wallet::{WalletIronwoodOutput, WalletOrchardOutput};
 
 use crate::{Nullifier, error::Error};
 
@@ -71,11 +69,7 @@ pub(crate) struct ReceivedNote {
 }
 impl ReceivedNote {
     pub fn pool(&self) -> PoolType {
-        match self.note {
-            Note::Sapling { .. } => PoolType::SAPLING,
-            #[cfg(feature = "orchard")]
-            Note::Orchard { .. } => PoolType::ORCHARD,
-        }
+        PoolType::Shielded(self.note.pool())
     }
     pub fn account_id(&self) -> AccountId {
         self.account_id
@@ -94,13 +88,13 @@ impl ReceivedNote {
         output: &SentTransactionOutput<AccountId>,
     ) -> Result<Self, Error> {
         match output.recipient() {
-            Recipient::InternalAccount {
+            Recipient::InternalShielded {
                 receiving_account,
                 note,
                 ..
             } => match note.as_ref() {
                 Note::Sapling(note) => Ok(ReceivedNote {
-                    note_id: NoteId::new(txid, Sapling, output.output_index() as u16),
+                    note_id: NoteId::new(txid, ShieldedPool::Sapling, output.output_index() as u16),
                     txid,
                     output_index: output.output_index() as u32,
                     account_id: *receiving_account,
@@ -116,12 +110,22 @@ impl ReceivedNote {
                     recipient_key_scope: Some(Scope::Internal),
                 }),
                 #[cfg(feature = "orchard")]
-                Note::Orchard(note) => Ok(ReceivedNote {
-                    note_id: NoteId::new(txid, Orchard, output.output_index() as u16),
+                Note::Orchard { note, pool } => Ok(ReceivedNote {
+                    note_id: NoteId::new(
+                        txid,
+                        match pool {
+                            orchard::ValuePool::Orchard => ShieldedPool::Orchard,
+                            orchard::ValuePool::Ironwood => ShieldedPool::Ironwood,
+                        },
+                        output.output_index() as u16,
+                    ),
                     txid,
                     output_index: output.output_index() as u32,
                     account_id: *receiving_account,
-                    note: Note::Orchard(*note),
+                    note: Note::Orchard {
+                        note: *note,
+                        pool: *pool,
+                    },
                     nf: None,
                     is_change: true,
                     memo: output
@@ -165,8 +169,33 @@ impl ReceivedNote {
             txid: *note_id.txid(),
             output_index: output.index() as u32,
             account_id: *output.account_id(),
-            note: Note::Orchard(*output.note()),
+            note: Note::Orchard {
+                note: output.note().0,
+                pool: output.note().1,
+            },
             nf: output.nf().map(|nf| Nullifier::Orchard(*nf)),
+            is_change: output.is_change(),
+            memo: Memo::Empty,
+            commitment_tree_position: Some(output.note_commitment_tree_position()),
+            recipient_key_scope: output.recipient_key_scope(),
+        }
+    }
+
+    #[cfg(feature = "orchard")]
+    pub fn from_wallet_ironwood_output(
+        note_id: NoteId,
+        output: &WalletIronwoodOutput<AccountId>,
+    ) -> Self {
+        ReceivedNote {
+            note_id,
+            txid: *note_id.txid(),
+            output_index: output.index() as u32,
+            account_id: *output.account_id(),
+            note: Note::Orchard {
+                note: output.note().0,
+                pool: output.note().1,
+            },
+            nf: output.nf().map(|nf| Nullifier::Ironwood(*nf)),
             is_change: output.is_change(),
             memo: Memo::Empty,
             commitment_tree_position: Some(output.note_commitment_tree_position()),
@@ -220,6 +249,18 @@ impl ReceivedNoteTable {
             }
         })
     }
+    #[cfg(feature = "orchard")]
+    pub fn get_ironwood_nullifiers(
+        &self,
+    ) -> impl Iterator<Item = (AccountId, TxId, orchard::note::Nullifier)> + '_ {
+        self.0.iter().filter_map(|entry| {
+            if let Some(Nullifier::Ironwood(nf)) = entry.nullifier() {
+                Some((entry.account_id(), entry.txid(), *nf))
+            } else {
+                None
+            }
+        })
+    }
 
     pub fn insert_received_note(&mut self, note: ReceivedNote) {
         // ensure note_id is unique.
@@ -249,7 +290,9 @@ impl ReceivedNoteTable {
         let mut acc = BTreeSet::new();
         let nfs = nfs.collect::<Vec<_>>();
         for (nf, id) in self.0.iter().filter_map(|n| match (n.nf, n.account_id) {
-            (Some(Nullifier::Orchard(nf)), account_id) => Some((nf, account_id)),
+            (Some(Nullifier::Orchard(nf) | Nullifier::Ironwood(nf)), account_id) => {
+                Some((nf, account_id))
+            }
             _ => None,
         }) {
             if nfs.contains(&&nf) {
@@ -294,6 +337,7 @@ impl DerefMut for ReceivedNoteTable {
 pub(crate) fn to_spendable_notes(
     sapling_received_notes: &[&ReceivedNote],
     #[cfg(feature = "orchard")] orchard_received_notes: &[&ReceivedNote],
+    #[cfg(feature = "orchard")] ironwood_received_notes: &[&ReceivedNote],
 ) -> Result<ReceivedNotes<NoteId>, Error> {
     let sapling = sapling_received_notes
         .iter()
@@ -322,7 +366,11 @@ pub(crate) fn to_spendable_notes(
     let orchard = orchard_received_notes
         .iter()
         .map(|note| {
-            if let Note::Orchard(inner) = &note.note {
+            if let Note::Orchard {
+                note: inner,
+                pool: orchard::ValuePool::Orchard,
+            } = &note.note
+            {
                 Ok(zcash_client_backend::wallet::ReceivedNote::from_parts(
                     note.note_id,
                     note.txid(),
@@ -341,10 +389,39 @@ pub(crate) fn to_spendable_notes(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    #[cfg(feature = "orchard")]
+    let ironwood = ironwood_received_notes
+        .iter()
+        .map(|note| {
+            if let Note::Orchard {
+                note: inner,
+                pool: orchard::ValuePool::Ironwood,
+            } = &note.note
+            {
+                Ok(zcash_client_backend::wallet::ReceivedNote::from_parts(
+                    note.note_id,
+                    note.txid(),
+                    note.output_index.try_into().unwrap(),
+                    *inner,
+                    note.recipient_key_scope
+                        .ok_or(Error::Missing("recipient key scope".into()))?,
+                    note.commitment_tree_position
+                        .ok_or(Error::Missing("commitment tree position".into()))?,
+                    None,
+                    None,
+                ))
+            } else {
+                Err(Error::Other("Note is not an Ironwood note".to_owned()))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(ReceivedNotes::new(
         sapling,
         #[cfg(feature = "orchard")]
         orchard,
+        #[cfg(feature = "orchard")]
+        ironwood,
     ))
 }
 
@@ -377,13 +454,32 @@ mod serialization {
         type Error = Error;
 
         fn try_from(value: proto::ReceivedNote) -> Result<ReceivedNote, Error> {
+            let txid = read_optional!(value, tx_id)?.try_into()?;
+            let note: Note = read_optional!(value, note)?.into();
+            let serialized_note_id: NoteId = read_optional!(value, note_id)?.try_into()?;
+            let note_id = NoteId::new(
+                *serialized_note_id.txid(),
+                note.pool(),
+                serialized_note_id.output_index(),
+            );
+            let nf = value.nullifier.map(|nf| nf.try_into()).transpose()?;
+            #[cfg(feature = "orchard")]
+            let nf = match (note.pool(), nf) {
+                // Compatibility with wallets produced by the previous Ironwood branch, where
+                // V3 notes and nullifiers were serialized under the Orchard pool identifier.
+                (ShieldedPool::Ironwood, Some(Nullifier::Orchard(nf))) => {
+                    Some(Nullifier::Ironwood(nf))
+                }
+                (_, nf) => nf,
+            };
+
             Ok(Self {
-                note_id: read_optional!(value, note_id)?.try_into()?,
-                txid: read_optional!(value, tx_id)?.try_into()?,
+                note_id,
+                txid,
                 output_index: value.output_index,
                 account_id: value.account_id.into(),
-                note: read_optional!(value, note)?.into(),
-                nf: value.nullifier.map(|nf| nf.try_into()).transpose()?,
+                note,
+                nf,
                 is_change: value.is_change,
                 memo: Memo::from_bytes(&value.memo)?,
                 commitment_tree_position: value.commitment_tree_position.map(|pos| pos.into()),

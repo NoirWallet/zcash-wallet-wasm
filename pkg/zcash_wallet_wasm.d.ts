@@ -182,6 +182,7 @@ export class WalletSummary {
     [Symbol.dispose](): void;
     chain_tip_height: number;
     fully_scanned_height: number;
+    next_ironwood_subtree_index: bigint;
     next_orchard_subtree_index: bigint;
     next_sapling_subtree_index: bigint;
     readonly account_balances: any;
@@ -208,6 +209,7 @@ export class WebWallet {
     create_account_ufvk(account_name: string, ufvk: string, seed_fingerprint: Uint8Array, account_hd_index: number, birthday_height?: number | null, key_source?: string | null): Promise<number>;
     db_to_bytes(): Promise<Uint8Array>;
     db_to_bytes_chunked(callback: Function): Promise<void>;
+    estimate_orchard_migration_fee(account_id: number, to_address: string, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<bigint>;
     estimate_pczt_shield_fee(account_id: number, marginal_fee_zats: bigint): Promise<bigint>;
     estimate_pczt_transfer_fee(account_id: number, to_address: string, value: bigint, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<bigint>;
     /**
@@ -314,6 +316,10 @@ export class WebWallet {
      * ```
      */
     get_block_time(height: number): Promise<number>;
+    /**
+     * Returns the configured NU6.3 activation height for the selected network.
+     */
+    get_ironwood_activation_height(): number | undefined;
     get_latest_block(): Promise<bigint>;
     /**
      * Get the latest block height from the blockchain
@@ -375,6 +381,7 @@ export class WebWallet {
     get_unified_addresses(account_id: number): Promise<any>;
     get_wallet_summary(): Promise<WalletSummary | undefined>;
     constructor(network: string, lightwalletd_url: string, db_bytes?: Uint8Array | null);
+    oneclick_pczt_orchard_migration(account_id: number, to_address: string, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint, expiry_delta_blocks?: number | null): Promise<string>;
     oneclick_pczt_shield(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null): Promise<string>;
     oneclick_pczt_shield_dynamic_fee(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, marginal_fee_zats: bigint, expiry_delta_blocks?: number | null): Promise<string>;
     oneclick_pczt_transfer(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null, memo?: Uint8Array | null): Promise<string>;
@@ -388,6 +395,10 @@ export class WebWallet {
      * tier so hardware sends honor the same dynamic-fee tiers as software sends.
      */
     pczt_create(account_id: number, to_address: string, value: bigint, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<Pczt>;
+    /**
+     * Create a V6 PCZT that sweeps spendable Orchard funds to this account's Ironwood pool.
+     */
+    pczt_orchard_migration_create(account_id: number, to_address: string, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint, expiry_delta_blocks?: number | null): Promise<Pczt>;
     /**
      * Prove and broadcast an externally signed PCZT (hardware wallet flow).
      *
@@ -717,6 +728,7 @@ export interface InitOutput {
     readonly webwallet_get_account_birthday: (a: number, b: number) => number;
     readonly webwallet_get_block_time: (a: number, b: number) => number;
     readonly webwallet_get_latest_height: (a: number) => number;
+    readonly webwallet_get_ironwood_activation_height: (a: number) => number;
     readonly webwallet_get_block_by_time: (a: number, b: number) => number;
     readonly webwallet_get_transaction_history: (a: number, b: number) => number;
     readonly webwallet_prepare_sync_batch: (a: number, b: number) => number;
@@ -734,6 +746,9 @@ export interface InitOutput {
     readonly webwallet_create_account_ufvk: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => number;
     readonly webwallet_pczt_create: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: bigint) => number;
     readonly webwallet_pczt_shield_create: (a: number, b: number, c: bigint) => number;
+    readonly webwallet_pczt_orchard_migration_create: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint, h: number) => number;
+    readonly webwallet_oneclick_pczt_orchard_migration: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: bigint, k: number) => number;
+    readonly webwallet_estimate_orchard_migration_fee: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint) => number;
     readonly webwallet_pczt_prove_and_send: (a: number, b: number) => number;
     readonly webwallet_oneclick_pczt_transfer_dynamic_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: bigint, l: number) => number;
     readonly webwallet_oneclick_pczt_shield_dynamic_fee: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number) => number;
@@ -750,6 +765,8 @@ export interface InitOutput {
     readonly __wbg_set_walletsummary_next_sapling_subtree_index: (a: number, b: bigint) => void;
     readonly __wbg_get_walletsummary_next_orchard_subtree_index: (a: number) => bigint;
     readonly __wbg_set_walletsummary_next_orchard_subtree_index: (a: number, b: bigint) => void;
+    readonly __wbg_get_walletsummary_next_ironwood_subtree_index: (a: number) => bigint;
+    readonly __wbg_set_walletsummary_next_ironwood_subtree_index: (a: number, b: bigint) => void;
     readonly walletsummary_account_balances: (a: number, b: number) => void;
     readonly start: () => void;
     readonly __wbg_blockrange_free: (a: number, b: number) => void;
@@ -784,11 +801,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_7611: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_7625: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3095: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_7600: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_3030: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_7844: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_7858: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3254: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_7850: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_3189: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

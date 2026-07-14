@@ -406,10 +406,10 @@ mod tests {
             WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
         WalletMigrator::new()
             .ignore_seed_relevance()
-            .init_or_migrate_to(&mut db_data, &[
-                utxos_table::MIGRATION_ID,
-                ufvk_support::MIGRATION_ID,
-            ])
+            .init_or_migrate_to(
+                &mut db_data,
+                &[utxos_table::MIGRATION_ID, ufvk_support::MIGRATION_ID],
+            )
             .unwrap();
 
         // create a UTXO to spend
