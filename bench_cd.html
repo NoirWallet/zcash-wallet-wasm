@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>C+D Setup Hoist Comparison</title>
+  <style>
+    body { font-family: ui-monospace, monospace; background: #12121c; color: #e6e6e6; padding: 24px; }
+    h1 { color: #00f7a5; font-size: 18px; }
+    .row { margin: 8px 0; }
+    label { display: inline-block; min-width: 160px; color: #9aa; }
+    input { background: #202029; color: #e6e6e6; border: 1px solid #333; padding: 4px 8px; width: 320px; }
+    button { background: #00f7a5; color: #062; border: 0; padding: 8px 16px; font-weight: 700; cursor: pointer; border-radius: 6px; }
+    button:disabled { opacity: 0.5; }
+    pre { background: #0c0c14; border: 1px solid #222; padding: 16px; white-space: pre-wrap; line-height: 1.5; max-height: 320px; overflow: auto; }
+    .ok { color: #00f7a5; } .warn { color: #ffc201; } .err { color: #ff4444; }
+    table { border-collapse: collapse; margin-top: 12px; }
+    td, th { border: 1px solid #333; padding: 6px 14px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>Journal Sync — Setup Hoist (C+D) Comparison</h1>
+  <div class="row"><label>Network</label><input id="network" value="main" /></div>
+  <div class="row"><label>Lightwalletd URL</label><input id="url" value="https://zcash-wallet-grpc-self.deltarpc.com" /></div>
+  <div class="row"><label>Range (blocks)</label><input id="range" value="34560" /></div>
+  <div class="row"><label>Batch size</label><input id="batchSize" value="5000" /></div>
+  <div class="row"><label>Accounts</label><input id="accounts" value="1" /></div>
+  <div class="row"><label>Mnemonic (optional)</label><input id="mnemonic" type="password" autocomplete="off" placeholder="leave blank = random seed; stays local, never logged" /></div>
+  <div class="row"><label>Account index</label><input id="accountIndex" value="0" /></div>
+  <div class="row"><button id="run">Run comparison</button></div>
+  <div id="report"></div>
+  <pre id="out">Ready.</pre>
+
+  <script>
+    const out = document.getElementById('out')
+    const reportEl = document.getElementById('report')
+    const runBtn = document.getElementById('run')
+    const log = (msg, cls) => { out.innerHTML += '\n' + (cls ? `<span class="${cls}">${msg}</span>` : msg); out.scrollTop = out.scrollHeight }
+    const rows = []
+    function render(tip) {
+      let html = `<table><tr><th>Variant</th><th>#batches</th><th>Total (s)</th><th>bps</th><th>txs</th><th>subtree (s)</th><th>setup (s)</th><th>download (s)</th><th>scan (s)</th></tr>`
+      for (const r of rows) {
+        html += `\n<tr><td>${r.variant}</td><td>${r.batches}</td><td>${r.totalS}</td><td>${r.bps}</td><td>${r.txCount}</td><td>${r.sumSubtreeS}</td><td>${r.sumSetupS}</td><td>${r.sumDownloadS}</td><td>${r.sumScanS}</td></tr>`
+      }
+      html += `</table>`
+      if (rows.length === 2) {
+        const a = rows.find((r) => r.variant === 'perbatch'), b = rows.find((r) => r.variant === 'once')
+        if (a && b) {
+          const saved = +(a.totalS - b.totalS).toFixed(1)
+          const pct = a.totalS ? (saved / a.totalS * 100) : 0
+          const cls = pct > 10 ? 'ok' : (pct > 3 ? 'warn' : 'err')
+          html += `\n<div class="row ${cls}">setup-once saves ${saved}s (${pct.toFixed(1)}%) vs per-batch refresh</div>`
+        }
+      }
+      reportEl.innerHTML = (tip ? `<div class="row">tip ${tip}</div>` : '') + html
+    }
+
+    function run() {
+      runBtn.disabled = true
+      out.innerHTML = ''; reportEl.innerHTML = ''; rows.length = 0
+      window.__cdDone = false; window.__cdReport = null; window.__cdError = null; window.__cdRows = rows
+
+      const network = document.getElementById('network').value.trim()
+      const url = document.getElementById('url').value.trim()
+      const rangeBlocks = parseInt(document.getElementById('range').value, 10)
+      const batchSize = parseInt(document.getElementById('batchSize').value, 10) || 5000
+      const accounts = parseInt(document.getElementById('accounts').value, 10) || 1
+      const mnemonic = document.getElementById('mnemonic').value
+      const accountIndex = parseInt(document.getElementById('accountIndex').value, 10) || 0
+      const threads = navigator.hardwareConcurrency || 4
+
+      log(`URL: ${url}  range: ${rangeBlocks}  bs: ${batchSize}  accounts: ${accounts}  seed: ${mnemonic.trim() ? 'real' : 'random'}  threads: ${threads}`)
+      const worker = new Worker('./bench_worker.js', { type: 'module' })
+      worker.onmessage = (e) => {
+        const d = e.data
+        if (d.type === 'console') { if (d.level === 'error') log('  wasm: ' + d.msg, 'err') }
+        else if (d.type === 'log') log(d.msg, 'warn')
+        else if (d.type === 'cdRow') { rows.push(d.row); render(); log(`\n${d.row.variant}: total ${d.row.totalS}s  ${d.row.bps} bps  txs ${d.row.txCount}  | subtree ${d.row.sumSubtreeS}s setup ${d.row.sumSetupS}s dl ${d.row.sumDownloadS}s scan ${d.row.sumScanS}s`, 'ok') }
+        else if (d.type === 'cdReport') { window.__cdReport = d; window.__cdDone = true; render(d.tip); log('\nComparison complete.', 'ok'); runBtn.disabled = false }
+        else if (d.type === 'error') { window.__cdError = d.msg; window.__cdDone = true; log('ERROR: ' + d.msg, 'err'); if (d.stack) log(d.stack, 'err'); runBtn.disabled = false }
+      }
+      worker.onerror = (err) => { window.__cdError = err.message; window.__cdDone = true; log('WORKER ERROR: ' + err.message, 'err'); runBtn.disabled = false }
+      worker.postMessage({ mode: 'cd', network, url, threads, rangeBlocks, batchSize, accounts, mnemonic, accountIndex })
+    }
+
+    runBtn.addEventListener('click', run)
+    const q = new URLSearchParams(location.search)
+    if (q.get('url')) document.getElementById('url').value = decodeURIComponent(q.get('url'))
+    if (q.get('range')) document.getElementById('range').value = q.get('range')
+    if (q.get('batchSize')) document.getElementById('batchSize').value = q.get('batchSize')
+    if (q.get('accounts')) document.getElementById('accounts').value = q.get('accounts')
+    if (q.get('auto') === '1') run()
+  </script>
+</body>
+</html>

@@ -522,6 +522,51 @@ where
         .map_err(Into::into)
     }
 
+    pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error> {
+        let mut client = self.client.clone();
+        let db_cache = MemBlockCache::new();
+
+        let mut db = self.db.write().await;
+        zcash_client_backend::sync::run_next_batch_optimized(
+            &mut client,
+            &self.network.clone(),
+            &db_cache,
+            &mut *db,
+            batch_size.unwrap_or(BATCH_SIZE),
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Benchmark helper: download a contiguous block range over gRPC-web and
+    /// discard it (no DB write, no scan). Returns the number of blocks fetched.
+    /// Used to measure raw download throughput and concurrency scaling.
+    pub async fn bench_download_range(&self, start_height: u32, count: u32) -> Result<u32, Error> {
+        use zcash_client_backend::proto::compact_formats::CompactBlock;
+        use zcash_client_backend::proto::service;
+
+        let mut client = self.client.clone();
+        let mut start_id = service::BlockId::default();
+        start_id.height = start_height as u64;
+        let mut end_id = service::BlockId::default();
+        end_id.height = (start_height + count - 1) as u64;
+
+        let blocks: Vec<CompactBlock> = client
+            .get_block_range(service::BlockRange {
+                start: Some(start_id),
+                end: Some(end_id),
+                pool_types: vec![],
+            })
+            .await
+            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+            .into_inner()
+            .try_collect()
+            .await
+            .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+
+        Ok(blocks.len() as u32)
+    }
+
     /// Execute a full journal-aware sync cycle:
     /// 1) Prepare (download from network, return journal data)
     /// 2) JS persists the journal data
@@ -536,20 +581,34 @@ where
         start_height: zcash_protocol::consensus::BlockHeight,
         chain_state: &zcash_client_backend::data_api::chain::ChainState,
         limit: usize,
+        optimized: bool,
     ) -> Result<bool, Error>
     where
         CaT::Error: std::fmt::Display + Send,
     {
         use zcash_client_backend::data_api::chain::error::Error as ChainError;
 
-        match zcash_client_backend::data_api::chain::scan_cached_blocks(
-            network,
-            db_cache,
-            db,
-            start_height,
-            chain_state,
-            limit,
-        ) {
+        let scan_result = if optimized {
+            zcash_client_backend::data_api::chain::scan_cached_blocks_optimized(
+                network,
+                db_cache,
+                db,
+                start_height,
+                chain_state,
+                limit,
+            )
+        } else {
+            zcash_client_backend::data_api::chain::scan_cached_blocks(
+                network,
+                db_cache,
+                db,
+                start_height,
+                chain_state,
+                limit,
+            )
+        };
+
+        match scan_result {
             Ok(_) => Ok(false),
             Err(ChainError::Scan(ref scan_err)) if scan_err.is_continuity_error() => {
                 let rewind_height = scan_err.at_height().saturating_sub(10);
@@ -566,9 +625,85 @@ where
         }
     }
 
+    /// Prepare one journal batch. When `refresh` is false the caller must have
+    /// run [`Self::sync_session_setup`] once for this catch-up session; the
+    /// per-batch subtree-root / chain-tip / transparent-UTXO round-trips are then
+    /// skipped, which is the dominant fixed per-batch cost.
     pub async fn prepare_sync_batch(
         &self,
         batch_size: Option<u32>,
+        refresh: bool,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.prepare_sync_batch_impl(batch_size, false, refresh, None)
+            .await
+    }
+
+    /// Run the session-level setup (subtree roots, chain tip, transparent UTXOs)
+    /// once before a multi-batch catch-up. Subsequent batches can then be called
+    /// with `refresh = false` to skip these fixed per-batch network round-trips.
+    pub async fn sync_session_setup(&self) -> Result<(), Error> {
+        use zcash_client_backend::proto::service;
+
+        let mut client = self.client.clone();
+        let mut db = self.db.write().await;
+
+        Self::do_update_subtree_roots(&mut client, &mut *db).await?;
+
+        let tip_height: zcash_protocol::consensus::BlockHeight = client
+            .get_latest_block(service::ChainSpec::default())
+            .await
+            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+            .get_ref()
+            .height
+            .try_into()
+            .map_err(|_| Error::Generic("Invalid tip height".into()))?;
+        db.update_chain_tip(tip_height)
+            .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
+        self.refresh_transparent_utxos_for_all_accounts(&mut client, &mut *db)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Optimized journal-aware batch: identical to [`prepare_sync_batch`] but uses
+    /// External-only IVK scanning (with targeted Internal fallback) for contiguous
+    /// forward ranges. Non-contiguous ranges fall back to full scanning internally.
+    pub async fn prepare_sync_batch_optimized(
+        &self,
+        batch_size: Option<u32>,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.prepare_sync_batch_impl(batch_size, true, true, None)
+            .await
+    }
+
+    /// Benchmark helper: run one baseline journal batch and return per-stage
+    /// timings (ms) as JSON `{"subtree","setup","download","scan"}`, or None when
+    /// synced. When `refresh` is false the session-level setup is skipped (caller
+    /// must have invoked `sync_session_setup` first).
+    pub async fn bench_prepare_sync_batch_timed(
+        &self,
+        batch_size: Option<u32>,
+        refresh: bool,
+    ) -> Result<Option<String>, Error> {
+        let mut t = [0.0f64; 4];
+        let r = self
+            .prepare_sync_batch_impl(batch_size, false, refresh, Some(&mut t))
+            .await?;
+        Ok(r.map(|_| {
+            format!(
+                "{{\"subtree\":{:.0},\"setup\":{:.0},\"download\":{:.0},\"scan\":{:.0}}}",
+                t[0], t[1], t[2], t[3]
+            )
+        }))
+    }
+
+    async fn prepare_sync_batch_impl(
+        &self,
+        batch_size: Option<u32>,
+        optimized: bool,
+        refresh: bool,
+        mut timings: Option<&mut [f64; 4]>,
     ) -> Result<Option<Vec<u8>>, Error> {
         use prost::Message;
         use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
@@ -581,24 +716,36 @@ where
         // We need a write lock for update_chain_tip, suggest_scan_ranges, etc.
         let mut db = self.db.write().await;
 
-        // 1. Update subtree roots
-        Self::do_update_subtree_roots(&mut client, &mut *db).await?;
+        let t_stage0 = js_sys::Date::now();
 
-        // 2. Update chain tip
-        let tip_height: zcash_protocol::consensus::BlockHeight = client
-            .get_latest_block(service::ChainSpec::default())
-            .await
-            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
-            .get_ref()
-            .height
-            .try_into()
-            .map_err(|_| Error::Generic("Invalid tip height".into()))?;
-        db.update_chain_tip(tip_height)
-            .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+        // Steps 1/2/2.5 are session-level state (subtree roots, chain tip,
+        // transparent UTXOs) that do not change while replaying a bounded scan
+        // window. When `refresh` is false the caller has run them once via
+        // `sync_session_setup`, so we skip the per-batch network round-trips.
+        if refresh {
+            // 1. Update subtree roots
+            Self::do_update_subtree_roots(&mut client, &mut *db).await?;
+        }
 
-        // 2.5. Refresh transparent UTXOs for all accounts
-        self.refresh_transparent_utxos_for_all_accounts(&mut client, &mut *db)
-            .await?;
+        let t_sub = js_sys::Date::now();
+
+        if refresh {
+            // 2. Update chain tip
+            let tip_height: zcash_protocol::consensus::BlockHeight = client
+                .get_latest_block(service::ChainSpec::default())
+                .await
+                .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+                .get_ref()
+                .height
+                .try_into()
+                .map_err(|_| Error::Generic("Invalid tip height".into()))?;
+            db.update_chain_tip(tip_height)
+                .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
+            // 2.5. Refresh transparent UTXOs for all accounts
+            self.refresh_transparent_utxos_for_all_accounts(&mut client, &mut *db)
+                .await?;
+        }
 
         // 3. Handle verify-priority ranges inline (not journaled, they're small)
         {
@@ -623,6 +770,7 @@ where
                             scan_range.block_range().start,
                             &chain_state,
                             scan_range.len(),
+                            optimized,
                         )?;
                         db_cache
                             .delete(scan_range.clone())
@@ -636,6 +784,8 @@ where
                 }
             }
         }
+
+        let t_stage_setup = js_sys::Date::now();
 
         // 4. Get next scan range
         let scan_ranges = db
@@ -716,6 +866,8 @@ where
         journal_data.extend_from_slice(&tree_state_bytes);
         journal_data.extend_from_slice(&blocks_bytes);
 
+        let t_stage_dl = js_sys::Date::now();
+
         // 8. Now scan the blocks we just downloaded (with reorg handling)
         let db_cache = MemBlockCache::new();
         db_cache
@@ -732,9 +884,18 @@ where
             scan_range.block_range().start,
             &chain_state,
             scan_range.len(),
+            optimized,
         )?;
         if rewound {
             return Ok(None);
+        }
+
+        let t_stage_scan = js_sys::Date::now();
+        if let Some(t) = timings.as_deref_mut() {
+            t[0] = t_sub - t_stage0; // subtree roots
+            t[1] = t_stage_setup - t_sub; // chain tip + UTXO refresh + verify
+            t[2] = t_stage_dl - t_stage_setup; // block + tree-state download
+            t[3] = t_stage_scan - t_stage_dl; // scan + put_blocks
         }
 
         Ok(Some(journal_data))
@@ -801,6 +962,7 @@ where
             from_height,
             &chain_state,
             block_count,
+            false,
         )?;
         if rewound {
             return Ok(true);

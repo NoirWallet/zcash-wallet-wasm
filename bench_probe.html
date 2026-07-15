@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Download Concurrency Probe</title>
+  <style>
+    body { font-family: ui-monospace, monospace; background: #12121c; color: #e6e6e6; padding: 24px; }
+    h1 { color: #00f7a5; font-size: 18px; }
+    .row { margin: 8px 0; }
+    label { display: inline-block; min-width: 160px; color: #9aa; }
+    input { background: #202029; color: #e6e6e6; border: 1px solid #333; padding: 4px 8px; width: 320px; }
+    button { background: #00f7a5; color: #062; border: 0; padding: 8px 16px; font-weight: 700; cursor: pointer; border-radius: 6px; }
+    button:disabled { opacity: 0.5; }
+    pre { background: #0c0c14; border: 1px solid #222; padding: 16px; white-space: pre-wrap; line-height: 1.5; max-height: 320px; overflow: auto; }
+    .ok { color: #00f7a5; } .warn { color: #ffc201; } .err { color: #ff4444; }
+    table { border-collapse: collapse; margin-top: 12px; }
+    td, th { border: 1px solid #333; padding: 6px 16px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>DeltaRPC Download Concurrency Probe (gRPC-web, download-only)</h1>
+  <div class="row"><label>Network</label><input id="network" value="main" /></div>
+  <div class="row"><label>Lightwalletd URL</label><input id="url" value="https://zcash-wallet-grpc-self.deltarpc.com" /></div>
+  <div class="row"><label>Blocks per stream</label><input id="blocksPer" value="1000" /></div>
+  <div class="row"><label>Concurrencies (K)</label><input id="concurrencies" value="1,2,4,8" /></div>
+  <div class="row"><label>Trials per K</label><input id="trials" value="2" /></div>
+  <div class="row"><button id="run">Run probe</button></div>
+  <div id="report"></div>
+  <pre id="out">Ready.</pre>
+
+  <script>
+    const out = document.getElementById('out')
+    const reportEl = document.getElementById('report')
+    const runBtn = document.getElementById('run')
+    const log = (msg, cls) => { out.innerHTML += '\n' + (cls ? `<span class="${cls}">${msg}</span>` : msg); out.scrollTop = out.scrollHeight }
+    const rows = []
+    function render(baseBps, tip) {
+      let html = `<table><tr><th>K</th><th>Aggregate bps</th><th>Scaling vs K=1</th><th>Per-stream bps</th></tr>`
+      for (const r of rows) {
+        const scale = baseBps ? r.bps / baseBps : 1
+        const cls = scale > 1.5 ? 'ok' : (scale < 1.15 ? 'err' : 'warn')
+        html += `\n<tr><td>${r.K}</td><td>${r.bps.toLocaleString()}</td><td class="${cls}">${scale.toFixed(2)}×</td><td>${Math.round(r.bps / r.K).toLocaleString()}</td></tr>`
+      }
+      html += `</table>`
+      reportEl.innerHTML = (tip ? `<div class="row">tip ${tip}</div>` : '') + html
+    }
+
+    function run() {
+      runBtn.disabled = true
+      out.innerHTML = ''
+      reportEl.innerHTML = ''
+      rows.length = 0
+      window.__probeDone = false
+      window.__probeReport = null
+      window.__probeError = null
+      window.__probeRows = rows
+
+      const network = document.getElementById('network').value.trim()
+      const url = document.getElementById('url').value.trim()
+      const blocksPer = parseInt(document.getElementById('blocksPer').value, 10)
+      const concurrencies = document.getElementById('concurrencies').value.split(',').map((x) => parseInt(x.trim(), 10)).filter(Boolean)
+      const trials = parseInt(document.getElementById('trials').value, 10) || 2
+      const threads = navigator.hardwareConcurrency || 4
+
+      log(`URL: ${url}  blocksPer: ${blocksPer}  K: ${concurrencies.join(',')}  trials: ${trials}`)
+      const worker = new Worker('./bench_worker.js', { type: 'module' })
+      worker.onmessage = (e) => {
+        const d = e.data
+        if (d.type === 'console') { if (d.level === 'error') log('  wasm: ' + d.msg, 'err') }
+        else if (d.type === 'log') log(d.msg, 'warn')
+        else if (d.type === 'probeRow') { rows.push(d.row); render(d.base) }
+        else if (d.type === 'probeReport') { window.__probeReport = d; window.__probeDone = true; render(d.baseBps, d.tip); log('\nProbe complete.', 'ok'); runBtn.disabled = false }
+        else if (d.type === 'error') { window.__probeError = d.msg; window.__probeDone = true; log('ERROR: ' + d.msg, 'err'); if (d.stack) log(d.stack, 'err'); runBtn.disabled = false }
+      }
+      worker.onerror = (err) => { window.__probeError = err.message; window.__probeDone = true; log('WORKER ERROR: ' + err.message, 'err'); runBtn.disabled = false }
+      worker.postMessage({ mode: 'probe', network, url, threads, blocksPer, concurrencies, trials })
+    }
+
+    runBtn.addEventListener('click', run)
+    const q = new URLSearchParams(location.search)
+    if (q.get('url')) document.getElementById('url').value = decodeURIComponent(q.get('url'))
+    if (q.get('blocksPer')) document.getElementById('blocksPer').value = q.get('blocksPer')
+    if (q.get('concurrencies')) document.getElementById('concurrencies').value = q.get('concurrencies')
+    if (q.get('trials')) document.getElementById('trials').value = q.get('trials')
+    if (q.get('auto') === '1') run()
+  </script>
+</body>
+</html>

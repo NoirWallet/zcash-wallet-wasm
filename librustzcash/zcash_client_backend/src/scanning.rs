@@ -357,6 +357,14 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
     pub fn from_account_ufvks(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
     ) -> Self {
+        Self::from_account_ufvks_with_scopes(ufvks, &[Scope::External, Scope::Internal])
+    }
+
+    /// Constructs a [`ScanningKeys`] from UFVKs, deriving keys only for the specified scopes.
+    pub(crate) fn from_account_ufvks_with_scopes(
+        ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
+        scopes: &[Scope],
+    ) -> Self {
         #![allow(clippy::type_complexity)]
 
         let mut sapling: HashMap<
@@ -380,7 +388,7 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
 
         for (account_id, ufvk) in ufvks {
             if let Some(dfvk) = ufvk.sapling() {
-                for scope in [Scope::External, Scope::Internal] {
+                for &scope in scopes {
                     sapling.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
@@ -395,7 +403,7 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
 
             #[cfg(feature = "orchard")]
             if let Some(fvk) = ufvk.orchard() {
-                for scope in [Scope::External, Scope::Internal] {
+                for &scope in scopes {
                     orchard.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
@@ -777,6 +785,7 @@ where
         params,
         block,
         scanning_keys,
+        &ScanningKeys::empty(),
         nullifiers,
         prior_block_metadata,
         None,

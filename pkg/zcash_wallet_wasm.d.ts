@@ -191,6 +191,18 @@ export class WalletSummary {
 export class WebWallet {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Benchmark helper: download a block range over gRPC-web without scanning.
+     * Returns the number of blocks fetched. Used to probe download throughput.
+     */
+    bench_download_range(start_height: number, count: number): Promise<number>;
+    /**
+     * Benchmark helper: one baseline journal batch with per-stage timings (ms)
+     * as JSON `{"subtree","setup","download","scan"}`, or undefined when synced.
+     * When `refresh` is false, session setup is skipped (call
+     * `sync_session_setup` once first).
+     */
+    bench_prepare_sync_batch_timed(batch_size: number | null | undefined, refresh: boolean): Promise<string | undefined>;
     create_account(account_name: string, seed_phrase: string, account_hd_index: number, birthday_height?: number | null, passphrase?: string | null): Promise<number>;
     /**
      * Import a watch-only spending account from an encoded UFVK (hardware wallet flow).
@@ -418,8 +430,15 @@ export class WebWallet {
     /**
      * Journal-aware sync: download + scan one batch, return journal data for persistence.
      * Returns null if fully synced, or Uint8Array with journal entry data.
+     * When `refresh` is false, session setup is skipped (call `sync_session_setup`
+     * once at the start of the catch-up session first).
      */
-    prepare_sync_batch(batch_size?: number | null): Promise<Uint8Array | undefined>;
+    prepare_sync_batch(batch_size: number | null | undefined, refresh: boolean): Promise<Uint8Array | undefined>;
+    /**
+     * Optimized journal-aware sync: same as [`prepare_sync_batch`] but uses
+     * External-only IVK scanning for contiguous forward ranges.
+     */
+    prepare_sync_batch_optimized(batch_size?: number | null): Promise<Uint8Array | undefined>;
     /**
      * Replay multiple journal entries in sequence (for recovery).
      */
@@ -436,6 +455,16 @@ export class WebWallet {
      * Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
      */
     sync_next_batch(batch_size?: number | null): Promise<boolean>;
+    /**
+     * Runs a single batch using the optimized scanning strategy.
+     * Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
+     */
+    sync_next_batch_optimized(batch_size?: number | null): Promise<boolean>;
+    /**
+     * Run session-level setup (subtree roots, chain tip, transparent UTXOs)
+     * once before a multi-batch catch-up so subsequent batches can skip it.
+     */
+    sync_session_setup(): Promise<void>;
 }
 
 /**
@@ -724,6 +753,7 @@ export interface InitOutput {
     readonly webwallet_create_account: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
     readonly webwallet_sync: (a: number) => number;
     readonly webwallet_sync_next_batch: (a: number, b: number) => number;
+    readonly webwallet_sync_next_batch_optimized: (a: number, b: number) => number;
     readonly webwallet_get_wallet_summary: (a: number) => number;
     readonly webwallet_get_account_birthday: (a: number, b: number) => number;
     readonly webwallet_get_block_time: (a: number, b: number) => number;
@@ -731,7 +761,11 @@ export interface InitOutput {
     readonly webwallet_get_ironwood_activation_height: (a: number) => number;
     readonly webwallet_get_block_by_time: (a: number, b: number) => number;
     readonly webwallet_get_transaction_history: (a: number, b: number) => number;
-    readonly webwallet_prepare_sync_batch: (a: number, b: number) => number;
+    readonly webwallet_prepare_sync_batch: (a: number, b: number, c: number) => number;
+    readonly webwallet_bench_download_range: (a: number, b: number, c: number) => number;
+    readonly webwallet_sync_session_setup: (a: number) => number;
+    readonly webwallet_bench_prepare_sync_batch_timed: (a: number, b: number, c: number) => number;
+    readonly webwallet_prepare_sync_batch_optimized: (a: number, b: number) => number;
     readonly webwallet_scan_journal_entry: (a: number, b: number, c: number) => number;
     readonly webwallet_replay_journal_entries: (a: number, b: number, c: number) => number;
     readonly webwallet_db_to_bytes: (a: number) => number;
@@ -801,11 +835,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_7844: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_7858: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3254: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_7850: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_3189: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_7888: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_7916: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3298: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_7884: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_3233: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

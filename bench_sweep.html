@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Batch-size Sweep + Stage Breakdown</title>
+  <style>
+    body { font-family: ui-monospace, monospace; background: #12121c; color: #e6e6e6; padding: 24px; }
+    h1 { color: #00f7a5; font-size: 18px; }
+    .row { margin: 8px 0; }
+    label { display: inline-block; min-width: 160px; color: #9aa; }
+    input { background: #202029; color: #e6e6e6; border: 1px solid #333; padding: 4px 8px; width: 320px; }
+    button { background: #00f7a5; color: #062; border: 0; padding: 8px 16px; font-weight: 700; cursor: pointer; border-radius: 6px; }
+    button:disabled { opacity: 0.5; }
+    pre { background: #0c0c14; border: 1px solid #222; padding: 16px; white-space: pre-wrap; line-height: 1.5; max-height: 320px; overflow: auto; }
+    .ok { color: #00f7a5; } .warn { color: #ffc201; } .err { color: #ff4444; }
+    table { border-collapse: collapse; margin-top: 12px; }
+    td, th { border: 1px solid #333; padding: 6px 14px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>Journal Sync — Batch-size Sweep + Stage Breakdown</h1>
+  <div class="row"><label>Network</label><input id="network" value="main" /></div>
+  <div class="row"><label>Lightwalletd URL</label><input id="url" value="https://zcash-wallet-grpc-self.deltarpc.com" /></div>
+  <div class="row"><label>Range (blocks)</label><input id="range" value="34560" /></div>
+  <div class="row"><label>Batch sizes</label><input id="batchSizes" value="1000,2000,5000,10000" /></div>
+  <div class="row"><label>Accounts</label><input id="accounts" value="1" /></div>
+  <div class="row"><button id="run">Run sweep</button></div>
+  <div id="report"></div>
+  <pre id="out">Ready.</pre>
+
+  <script>
+    const out = document.getElementById('out')
+    const reportEl = document.getElementById('report')
+    const runBtn = document.getElementById('run')
+    const log = (msg, cls) => { out.innerHTML += '\n' + (cls ? `<span class="${cls}">${msg}</span>` : msg); out.scrollTop = out.scrollHeight }
+    const rows = []
+    function render(tip) {
+      let html = `<table><tr><th>Batch</th><th>#batches</th><th>Total (s)</th><th>bps</th><th>avg setup (ms)</th><th>avg dl (ms)</th><th>avg scan (ms)</th><th>setup share</th></tr>`
+      for (const r of rows) {
+        const perBatch = r.avgSetup + r.avgDownload + r.avgScan
+        const share = perBatch ? (r.avgSetup / perBatch * 100) : 0
+        const cls = share > 50 ? 'err' : (share > 25 ? 'warn' : 'ok')
+        html += `\n<tr><td>${r.batchSize}</td><td>${r.batches}</td><td>${r.totalS}</td><td>${r.bps}</td><td>${r.avgSetup}</td><td>${r.avgDownload}</td><td>${r.avgScan}</td><td class="${cls}">${share.toFixed(0)}%</td></tr>`
+      }
+      html += `</table>`
+      reportEl.innerHTML = (tip ? `<div class="row">tip ${tip}</div>` : '') + html
+    }
+
+    function run() {
+      runBtn.disabled = true
+      out.innerHTML = ''; reportEl.innerHTML = ''; rows.length = 0
+      window.__sweepDone = false; window.__sweepReport = null; window.__sweepError = null; window.__sweepRows = rows
+
+      const network = document.getElementById('network').value.trim()
+      const url = document.getElementById('url').value.trim()
+      const rangeBlocks = parseInt(document.getElementById('range').value, 10)
+      const batchSizes = document.getElementById('batchSizes').value.split(',').map((x) => parseInt(x.trim(), 10)).filter(Boolean)
+      const accounts = parseInt(document.getElementById('accounts').value, 10) || 1
+      const threads = navigator.hardwareConcurrency || 4
+
+      log(`URL: ${url}  range: ${rangeBlocks}  batchSizes: ${batchSizes.join(',')}  accounts: ${accounts}  threads: ${threads}`)
+      const worker = new Worker('./bench_worker.js', { type: 'module' })
+      worker.onmessage = (e) => {
+        const d = e.data
+        if (d.type === 'console') { if (d.level === 'error') log('  wasm: ' + d.msg, 'err') }
+        else if (d.type === 'log') log(d.msg, 'warn')
+        else if (d.type === 'sweepRow') { rows.push(d.row); render(); log(`\nbs=${d.row.batchSize}: total ${d.row.totalS}s  ${d.row.bps} bps  | setup ${d.row.avgSetup}ms dl ${d.row.avgDownload}ms scan ${d.row.avgScan}ms`, 'ok') }
+        else if (d.type === 'sweepReport') { window.__sweepReport = d; window.__sweepDone = true; render(d.tip); log('\nSweep complete.', 'ok'); runBtn.disabled = false }
+        else if (d.type === 'error') { window.__sweepError = d.msg; window.__sweepDone = true; log('ERROR: ' + d.msg, 'err'); if (d.stack) log(d.stack, 'err'); runBtn.disabled = false }
+      }
+      worker.onerror = (err) => { window.__sweepError = err.message; window.__sweepDone = true; log('WORKER ERROR: ' + err.message, 'err'); runBtn.disabled = false }
+      worker.postMessage({ mode: 'sweep', network, url, threads, rangeBlocks, batchSizes, accounts })
+    }
+
+    runBtn.addEventListener('click', run)
+    const q = new URLSearchParams(location.search)
+    if (q.get('url')) document.getElementById('url').value = decodeURIComponent(q.get('url'))
+    if (q.get('range')) document.getElementById('range').value = q.get('range')
+    if (q.get('batchSizes')) document.getElementById('batchSizes').value = q.get('batchSizes')
+    if (q.get('accounts')) document.getElementById('accounts').value = q.get('accounts')
+    if (q.get('auto') === '1') run()
+  </script>
+</body>
+</html>

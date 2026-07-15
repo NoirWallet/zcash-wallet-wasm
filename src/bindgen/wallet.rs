@@ -118,6 +118,24 @@ impl WebWallet {
         Ok(processed_batch)
     }
 
+    /// Runs a single batch using the optimized scanning strategy.
+    /// Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
+    pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error> {
+        let start_time = js_sys::Date::now();
+
+        let processed_batch = self.inner.sync_next_batch_optimized(batch_size).await?;
+
+        let end_time = js_sys::Date::now();
+        let elapsed_seconds = (end_time - start_time) / 1000.0;
+        tracing::info!(
+            "⏱️ Optimized sync next batch completed in {:.2} seconds, processed_batch: {}",
+            elapsed_seconds,
+            processed_batch
+        );
+
+        Ok(processed_batch)
+    }
+
     pub async fn get_wallet_summary(&self) -> Result<Option<WalletSummary>, Error> {
         self.inner
             .get_wallet_summary()
@@ -230,13 +248,16 @@ impl WebWallet {
 
     /// Journal-aware sync: download + scan one batch, return journal data for persistence.
     /// Returns null if fully synced, or Uint8Array with journal entry data.
+    /// When `refresh` is false, session setup is skipped (call `sync_session_setup`
+    /// once at the start of the catch-up session first).
     pub async fn prepare_sync_batch(
         &self,
         batch_size: Option<u32>,
+        refresh: bool,
     ) -> Result<Option<Box<[u8]>>, Error> {
         let start_time = js_sys::Date::now();
 
-        let result = self.inner.prepare_sync_batch(batch_size).await?;
+        let result = self.inner.prepare_sync_batch(batch_size, refresh).await?;
 
         let elapsed_seconds = (js_sys::Date::now() - start_time) / 1000.0;
         match &result {
@@ -250,6 +271,62 @@ impl WebWallet {
             None => {
                 tracing::info!(
                     "⏱️ prepare_sync_batch: fully synced ({:.2}s)",
+                    elapsed_seconds
+                );
+            }
+        }
+
+        Ok(result.map(|v| v.into_boxed_slice()))
+    }
+
+    /// Benchmark helper: download a block range over gRPC-web without scanning.
+    /// Returns the number of blocks fetched. Used to probe download throughput.
+    pub async fn bench_download_range(&self, start_height: u32, count: u32) -> Result<u32, Error> {
+        self.inner.bench_download_range(start_height, count).await
+    }
+
+    /// Run session-level setup (subtree roots, chain tip, transparent UTXOs)
+    /// once before a multi-batch catch-up so subsequent batches can skip it.
+    pub async fn sync_session_setup(&self) -> Result<(), Error> {
+        self.inner.sync_session_setup().await
+    }
+
+    /// Benchmark helper: one baseline journal batch with per-stage timings (ms)
+    /// as JSON `{"subtree","setup","download","scan"}`, or undefined when synced.
+    /// When `refresh` is false, session setup is skipped (call
+    /// `sync_session_setup` once first).
+    pub async fn bench_prepare_sync_batch_timed(
+        &self,
+        batch_size: Option<u32>,
+        refresh: bool,
+    ) -> Result<Option<String>, Error> {
+        self.inner
+            .bench_prepare_sync_batch_timed(batch_size, refresh)
+            .await
+    }
+
+    /// Optimized journal-aware sync: same as [`prepare_sync_batch`] but uses
+    /// External-only IVK scanning for contiguous forward ranges.
+    pub async fn prepare_sync_batch_optimized(
+        &self,
+        batch_size: Option<u32>,
+    ) -> Result<Option<Box<[u8]>>, Error> {
+        let start_time = js_sys::Date::now();
+
+        let result = self.inner.prepare_sync_batch_optimized(batch_size).await?;
+
+        let elapsed_seconds = (js_sys::Date::now() - start_time) / 1000.0;
+        match &result {
+            Some(data) => {
+                tracing::info!(
+                    "⏱️ prepare_sync_batch_optimized completed in {:.2}s, journal entry: {} bytes",
+                    elapsed_seconds,
+                    data.len()
+                );
+            }
+            None => {
+                tracing::info!(
+                    "⏱️ prepare_sync_batch_optimized: fully synced ({:.2}s)",
                     elapsed_seconds
                 );
             }

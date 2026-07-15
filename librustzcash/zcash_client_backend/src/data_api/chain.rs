@@ -157,6 +157,7 @@ use incrementalmerkletree::frontier::Frontier;
 use subtle::ConditionallySelectable;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{self, BlockHeight};
+use zip32::Scope;
 
 use crate::{
     data_api::WalletWrite,
@@ -668,6 +669,111 @@ where
                 params,
                 block,
                 &scanning_keys,
+                &ScanningKeys::empty(),
+                &nullifiers,
+                prior_block_metadata.as_ref(),
+                Some(&mut runners),
+            )
+            .map_err(Error::Scan)?;
+
+            for wtx in &scanned_block.transactions {
+                scan_summary.spent_sapling_note_count += wtx.sapling_spends().len();
+                scan_summary.received_sapling_note_count += wtx.sapling_outputs().len();
+                #[cfg(feature = "orchard")]
+                {
+                    scan_summary.spent_orchard_note_count += wtx.orchard_spends().len();
+                    scan_summary.received_orchard_note_count += wtx.orchard_outputs().len();
+                }
+            }
+
+            nullifiers.update_with(&scanned_block);
+            prior_block_metadata = Some(scanned_block.to_block_metadata());
+            scanned_blocks.push(scanned_block);
+
+            Ok(())
+        },
+    )?;
+
+    data_db
+        .put_blocks(from_state, scanned_blocks)
+        .map_err(Error::Wallet)?;
+    Ok(scan_summary)
+}
+
+/// Optimized variant of [`scan_cached_blocks`] that uses External-only IVKs for
+/// contiguous scan ranges and targeted Internal IVK fallback for relevant transactions.
+///
+/// Non-contiguous scan ranges keep using both External and Internal IVKs, matching the
+/// behavior of [`scan_cached_blocks`] for correctness during verification, backfills, and reorgs.
+#[tracing::instrument(skip(params, block_source, data_db, from_state))]
+#[allow(clippy::type_complexity)]
+pub fn scan_cached_blocks_optimized<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &mut DbT,
+    from_height: BlockHeight,
+    from_state: &ChainState,
+    limit: usize,
+) -> Result<ScanSummary, Error<DbT::Error, BlockSourceT::Error>>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletWrite,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    assert_eq!(from_height, from_state.block_height + 1);
+
+    let account_ufvks = data_db
+        .get_unified_full_viewing_keys()
+        .map_err(Error::Wallet)?;
+
+    let fully_scanned = data_db.block_fully_scanned().map_err(Error::Wallet)?;
+    let is_contiguous = fully_scanned
+        .as_ref()
+        .map_or(false, |meta| from_height == meta.block_height() + 1);
+
+    let scanning_keys = if is_contiguous {
+        ScanningKeys::from_account_ufvks_with_scopes(
+            account_ufvks.iter().map(|(id, ufvk)| (*id, ufvk.clone())),
+            &[Scope::External],
+        )
+    } else {
+        ScanningKeys::from_account_ufvks(account_ufvks.clone())
+    };
+    let internal_keys = if is_contiguous {
+        ScanningKeys::from_account_ufvks_with_scopes(account_ufvks, &[Scope::Internal])
+    } else {
+        ScanningKeys::empty()
+    };
+    let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
+
+    block_source.with_blocks::<_, DbT::Error>(Some(from_height), Some(limit), |block| {
+        runners.add_block(params, block).map_err(|e| e.into())
+    })?;
+    runners.flush();
+
+    let mut prior_block_metadata = if from_height > BlockHeight::from(0) {
+        data_db
+            .block_metadata(from_height - 1)
+            .map_err(Error::Wallet)?
+    } else {
+        None
+    };
+
+    let mut nullifiers = Nullifiers::unspent(data_db).map_err(Error::Wallet)?;
+
+    let mut scanned_blocks = vec![];
+    let mut scan_summary = ScanSummary::for_range(from_height..from_height);
+    block_source.with_blocks::<_, DbT::Error>(
+        Some(from_height),
+        Some(limit),
+        |block: CompactBlock| {
+            scan_summary.scanned_range.end = block.height() + 1;
+            let scanned_block = scan_block_with_runners::<_, _, _, (), (), ()>(
+                params,
+                block,
+                &scanning_keys,
+                &internal_keys,
                 &nullifiers,
                 prior_block_metadata.as_ref(),
                 Some(&mut runners),
