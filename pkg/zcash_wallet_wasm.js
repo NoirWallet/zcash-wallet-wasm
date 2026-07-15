@@ -978,6 +978,30 @@ export class WebWallet {
         wasm.__wbg_webwallet_free(ptr, 0);
     }
     /**
+     * Benchmark helper: download a block range over gRPC-web without scanning.
+     * Returns the number of blocks fetched. Used to probe download throughput.
+     * @param {number} start_height
+     * @param {number} count
+     * @returns {Promise<number>}
+     */
+    bench_download_range(start_height, count) {
+        const ret = wasm.webwallet_bench_download_range(this.__wbg_ptr, start_height, count);
+        return takeObject(ret);
+    }
+    /**
+     * Benchmark helper: one baseline journal batch with per-stage timings (ms)
+     * as JSON `{"subtree","setup","download","scan"}`, or undefined when synced.
+     * When `refresh` is false, session setup is skipped (call
+     * `sync_session_setup` once first).
+     * @param {number | null | undefined} batch_size
+     * @param {boolean} refresh
+     * @returns {Promise<string | undefined>}
+     */
+    bench_prepare_sync_batch_timed(batch_size, refresh) {
+        const ret = wasm.webwallet_bench_prepare_sync_batch_timed(this.__wbg_ptr, isLikeNone(batch_size) ? Number.MAX_SAFE_INTEGER : (batch_size) >>> 0, refresh);
+        return takeObject(ret);
+    }
+    /**
      * @param {string} account_name
      * @param {string} seed_phrase
      * @param {number} account_hd_index
@@ -1472,11 +1496,24 @@ export class WebWallet {
     /**
      * Journal-aware sync: download + scan one batch, return journal data for persistence.
      * Returns null if fully synced, or Uint8Array with journal entry data.
+     * When `refresh` is false, session setup is skipped (call `sync_session_setup`
+     * once at the start of the catch-up session first).
+     * @param {number | null | undefined} batch_size
+     * @param {boolean} refresh
+     * @returns {Promise<Uint8Array | undefined>}
+     */
+    prepare_sync_batch(batch_size, refresh) {
+        const ret = wasm.webwallet_prepare_sync_batch(this.__wbg_ptr, isLikeNone(batch_size) ? Number.MAX_SAFE_INTEGER : (batch_size) >>> 0, refresh);
+        return takeObject(ret);
+    }
+    /**
+     * Optimized journal-aware sync: same as [`prepare_sync_batch`] but uses
+     * External-only IVK scanning for contiguous forward ranges.
      * @param {number | null} [batch_size]
      * @returns {Promise<Uint8Array | undefined>}
      */
-    prepare_sync_batch(batch_size) {
-        const ret = wasm.webwallet_prepare_sync_batch(this.__wbg_ptr, isLikeNone(batch_size) ? Number.MAX_SAFE_INTEGER : (batch_size) >>> 0);
+    prepare_sync_batch_optimized(batch_size) {
+        const ret = wasm.webwallet_prepare_sync_batch_optimized(this.__wbg_ptr, isLikeNone(batch_size) ? Number.MAX_SAFE_INTEGER : (batch_size) >>> 0);
         return takeObject(ret);
     }
     /**
@@ -1527,6 +1564,25 @@ export class WebWallet {
      */
     sync_next_batch(batch_size) {
         const ret = wasm.webwallet_sync_next_batch(this.__wbg_ptr, isLikeNone(batch_size) ? Number.MAX_SAFE_INTEGER : (batch_size) >>> 0);
+        return takeObject(ret);
+    }
+    /**
+     * Runs a single batch using the optimized scanning strategy.
+     * Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
+     * @param {number | null} [batch_size]
+     * @returns {Promise<boolean>}
+     */
+    sync_next_batch_optimized(batch_size) {
+        const ret = wasm.webwallet_sync_next_batch_optimized(this.__wbg_ptr, isLikeNone(batch_size) ? Number.MAX_SAFE_INTEGER : (batch_size) >>> 0);
+        return takeObject(ret);
+    }
+    /**
+     * Run session-level setup (subtree roots, chain tip, transparent UTXOs)
+     * once before a multi-batch catch-up so subsequent batches can skip it.
+     * @returns {Promise<void>}
+     */
+    sync_session_setup() {
+        const ret = wasm.webwallet_sync_session_setup(this.__wbg_ptr);
         return takeObject(ret);
     }
 }
@@ -2374,7 +2430,7 @@ function __wbg_get_imports(memory) {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_7568(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_7625(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -2412,7 +2468,7 @@ function __wbg_get_imports(memory) {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_7568(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_7625(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -2663,23 +2719,23 @@ function __wbg_get_imports(memory) {
             console.warn(getObject(arg0), getObject(arg1), getObject(arg2), getObject(arg3));
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1098, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3124);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1121, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3173);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2628, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7543);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2651, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7594);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2631, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7554);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2654, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7603);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1069, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3059);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1092, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3108);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000005: function(arg0) {
@@ -2748,22 +2804,22 @@ function __wbg_get_imports(memory) {
     };
 }
 
-function __wasm_bindgen_func_elem_3059(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_3059(arg0, arg1);
+function __wasm_bindgen_func_elem_3108(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_3108(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_3124(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_3124(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_3173(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_3173(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7543(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_7543(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_7594(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_7594(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7554(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_7603(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_7554(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_7603(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -2774,8 +2830,8 @@ function __wasm_bindgen_func_elem_7554(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_7568(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_7568(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_7625(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_7625(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 

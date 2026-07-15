@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::hash::Hash;
 
-use incrementalmerkletree::Retention;
+use incrementalmerkletree::{Marking, Retention};
 use sapling::note_encryption::{CompactOutputDescription, SaplingDomain};
 use subtle::ConditionallySelectable;
 
@@ -18,7 +18,7 @@ use super::{Nullifiers, PositionTracker, ScanError, ScanningKeys, find_received,
 use crate::{
     data_api::{BlockMetadata, ScannedBlock, ScannedBundles},
     proto::compact_formats::{ChainMetadata, CompactBlock, CompactTx},
-    scan::{Batch, BatchRunner, CompactDecryptor, Tasks},
+    scan::{Batch, BatchRunner, CompactDecryptor, DecryptedOutput, Tasks},
     wallet::{WalletSpend, WalletTx},
 };
 
@@ -172,11 +172,20 @@ where
     }
 }
 
+fn mark_retention(retention: &mut Retention<BlockHeight>) {
+    match retention {
+        Retention::Checkpoint { marking, .. } => *marking = Marking::Marked,
+        Retention::Ephemeral | Retention::Reference => *retention = Retention::Marked,
+        Retention::Marked => {}
+    }
+}
+
 #[tracing::instrument(skip_all, fields(height = block.height))]
 pub(crate) fn scan_block_with_runners<P, AccountId, IvkTag, TS, TO>(
     params: &P,
     block: CompactBlock,
     scanning_keys: &ScanningKeys<AccountId, IvkTag>,
+    internal_keys: &ScanningKeys<AccountId, IvkTag>,
     nullifiers: &Nullifiers<AccountId>,
     prior_block_metadata: Option<&BlockMetadata>,
     mut batch_runners: Option<&mut BatchRunners<IvkTag, TS, TO>>,
@@ -279,30 +288,33 @@ where
             spent_from_accounts.chain(orchard_spends.iter().map(|spend| spend.account_id()));
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
-        let (sapling_outputs, mut sapling_nc) = find_received(
+        let decoded_sapling = tx
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(i, output)| {
+                Ok((
+                    SaplingDomain::new(zip212_enforcement),
+                    CompactOutputDescription::try_from(output).map_err(|_| {
+                        ScanError::EncodingInvalid {
+                            at_height: cur_height,
+                            txid,
+                            pool_type: ShieldedProtocol::Sapling,
+                            index: i,
+                        }
+                    })?,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let (mut sapling_outputs, mut sapling_nc) = find_received(
             cur_height,
             pos_tracker.compact_tx_contains_last_sapling_outputs_in_block(&tx),
             txid,
             |output_idx| pos_tracker.sapling_note_position(output_idx),
             &scanning_keys.sapling,
             &spent_from_accounts,
-            &tx.outputs
-                .iter()
-                .enumerate()
-                .map(|(i, output)| {
-                    Ok((
-                        SaplingDomain::new(zip212_enforcement),
-                        CompactOutputDescription::try_from(output).map_err(|_| {
-                            ScanError::EncodingInvalid {
-                                at_height: cur_height,
-                                txid,
-                                pool_type: ShieldedProtocol::Sapling,
-                                index: i,
-                            }
-                        })?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            &decoded_sapling,
             batch_runners
                 .as_mut()
                 .map(|runners| |txid| runners.sapling.collect_results(cur_hash, txid)),
@@ -315,31 +327,33 @@ where
             |output| sapling::Node::from_cmu(&output.cmu),
         );
         sapling_note_commitments.append(&mut sapling_nc);
-        let has_sapling = !(sapling_spends.is_empty() && sapling_outputs.is_empty());
 
         #[cfg(feature = "orchard")]
-        let (orchard_outputs, mut orchard_nc) = find_received(
+        let decoded_orchard = tx
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(i, action)| {
+                let action =
+                    CompactAction::try_from(action).map_err(|_| ScanError::EncodingInvalid {
+                        at_height: cur_height,
+                        txid,
+                        pool_type: ShieldedProtocol::Orchard,
+                        index: i,
+                    })?;
+                Ok((OrchardDomain::for_compact_action(&action), action))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        #[cfg(feature = "orchard")]
+        let (mut orchard_outputs, mut orchard_nc) = find_received(
             cur_height,
             pos_tracker.compact_tx_contains_last_orchard_actions_in_block(&tx),
             txid,
             |output_idx| pos_tracker.orchard_note_position(output_idx),
             &scanning_keys.orchard,
             &spent_from_accounts,
-            &tx.actions
-                .iter()
-                .enumerate()
-                .map(|(i, action)| {
-                    let action = CompactAction::try_from(action).map_err(|_| {
-                        ScanError::EncodingInvalid {
-                            at_height: cur_height,
-                            txid,
-                            pool_type: ShieldedProtocol::Orchard,
-                            index: i,
-                        }
-                    })?;
-                    Ok((OrchardDomain::for_compact_action(&action), action))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            &decoded_orchard,
             batch_runners
                 .as_mut()
                 .map(|runners| |txid| runners.orchard.collect_results(cur_hash, txid)),
@@ -353,7 +367,107 @@ where
         );
         #[cfg(feature = "orchard")]
         orchard_note_commitments.append(&mut orchard_nc);
+        let has_internal_keys = !internal_keys.sapling.is_empty();
+        #[cfg(feature = "orchard")]
+        let has_internal_keys = has_internal_keys || !internal_keys.orchard.is_empty();
 
+        let has_shielded_outputs = !decoded_sapling.is_empty();
+        #[cfg(feature = "orchard")]
+        let has_shielded_outputs = has_shielded_outputs || !decoded_orchard.is_empty();
+
+        let trigger_nullifier = !sapling_spends.is_empty();
+        #[cfg(feature = "orchard")]
+        let trigger_nullifier = trigger_nullifier || !orchard_spends.is_empty();
+
+        let trigger_external = !sapling_outputs.is_empty();
+        #[cfg(feature = "orchard")]
+        let trigger_external = trigger_external || !orchard_outputs.is_empty();
+
+        let has_no_shielded_spends = tx.spends.is_empty();
+        #[cfg(feature = "orchard")]
+        let has_no_shielded_spends = has_no_shielded_spends && orchard_spends.is_empty();
+
+        // Shielding pattern: transparent inputs + shielded outputs + no shielded spends.
+        let trigger_shielding =
+            !tx.vin.is_empty() && has_shielded_outputs && has_no_shielded_spends;
+
+        if has_internal_keys
+            && has_shielded_outputs
+            && (trigger_nullifier || trigger_external || trigger_shielding)
+        {
+            if !decoded_sapling.is_empty() {
+                let (mut internal_sapling_outputs, _) = find_received(
+                    cur_height,
+                    false,
+                    txid,
+                    |output_idx| pos_tracker.sapling_note_position(output_idx),
+                    &internal_keys.sapling,
+                    &spent_from_accounts,
+                    &decoded_sapling,
+                    None::<
+                        fn(
+                            zcash_primitives::transaction::TxId,
+                        )
+                            -> HashMap<usize, DecryptedOutput<IvkTag, SaplingDomain, ()>>,
+                    >,
+                    |ivks, outputs| {
+                        batch::try_compact_note_decryption(ivks, outputs)
+                            .into_iter()
+                            .map(|opt| opt.map(|((note, recipient), i)| ((note, recipient, ()), i)))
+                            .collect()
+                    },
+                    |output| sapling::Node::from_cmu(&output.cmu),
+                );
+
+                let nc_offset = sapling_note_commitments.len() - decoded_sapling.len();
+                for output in &internal_sapling_outputs {
+                    let idx = nc_offset + output.index();
+                    if let Some((_, retention)) = sapling_note_commitments.get_mut(idx) {
+                        mark_retention(retention);
+                    }
+                }
+
+                sapling_outputs.append(&mut internal_sapling_outputs);
+            }
+
+            #[cfg(feature = "orchard")]
+            if !decoded_orchard.is_empty() {
+                let (mut internal_orchard_outputs, _) = find_received(
+                    cur_height,
+                    false,
+                    txid,
+                    |output_idx| pos_tracker.orchard_note_position(output_idx),
+                    &internal_keys.orchard,
+                    &spent_from_accounts,
+                    &decoded_orchard,
+                    None::<
+                        fn(
+                            zcash_primitives::transaction::TxId,
+                        )
+                            -> HashMap<usize, DecryptedOutput<IvkTag, OrchardDomain, ()>>,
+                    >,
+                    |ivks, outputs| {
+                        batch::try_compact_note_decryption(ivks, outputs)
+                            .into_iter()
+                            .map(|opt| opt.map(|((note, recipient), i)| ((note, recipient, ()), i)))
+                            .collect()
+                    },
+                    |output| MerkleHashOrchard::from_cmx(&output.cmx()),
+                );
+
+                let nc_offset = orchard_note_commitments.len() - decoded_orchard.len();
+                for output in &internal_orchard_outputs {
+                    let idx = nc_offset + output.index();
+                    if let Some((_, retention)) = orchard_note_commitments.get_mut(idx) {
+                        mark_retention(retention);
+                    }
+                }
+
+                orchard_outputs.append(&mut internal_orchard_outputs);
+            }
+        }
+
+        let has_sapling = !(sapling_spends.is_empty() && sapling_outputs.is_empty());
         #[cfg(feature = "orchard")]
         let has_orchard = !(orchard_spends.is_empty() && orchard_outputs.is_empty());
         #[cfg(not(feature = "orchard"))]
@@ -634,6 +748,7 @@ mod tests {
                 &network,
                 cb,
                 &scanning_keys,
+                &ScanningKeys::empty(),
                 &Nullifiers::empty(),
                 Some(&BlockMetadata::from_parts(
                     BlockHeight::from(0),
@@ -717,6 +832,7 @@ mod tests {
                 &network,
                 cb,
                 &scanning_keys,
+                &ScanningKeys::empty(),
                 &Nullifiers::empty(),
                 None,
                 batch_runners.as_mut(),
