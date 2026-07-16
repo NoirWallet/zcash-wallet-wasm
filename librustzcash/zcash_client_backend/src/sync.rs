@@ -34,7 +34,7 @@ use {
     },
     tracing::{debug, info},
     zcash_primitives::merkle_tree::HashSer,
-    zcash_protocol::consensus::{BlockHeight, Parameters},
+    zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters},
 };
 
 #[cfg(all(feature = "sync", feature = "orchard"))]
@@ -77,11 +77,21 @@ where
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
+    let mut tip_height = update_chain_tip(client, db_data).await?;
+    let mut ironwood_active = params.is_nu_active(NetworkUpgrade::Nu6_3, tip_height);
+
     // 1) Download note commitment tree data from lightwalletd
     // 2) Pass the commitment tree data to the database.
-    update_subtree_roots(client, db_data).await?;
+    update_subtree_roots(client, params, tip_height, db_data).await?;
 
-    while running(client, params, db_cache, db_data, batch_size).await? {}
+    while running(client, params, db_cache, db_data, batch_size).await? {
+        tip_height = update_chain_tip(client, db_data).await?;
+        let next_ironwood_active = params.is_nu_active(NetworkUpgrade::Nu6_3, tip_height);
+        if next_ironwood_active && !ironwood_active {
+            update_subtree_roots(client, params, tip_height, db_data).await?;
+        }
+        ironwood_active = next_ironwood_active;
+    }
 
     Ok(())
 }
@@ -115,7 +125,8 @@ where
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
-    update_subtree_roots(client, db_data).await?;
+    let tip_height = update_chain_tip(client, db_data).await?;
+    update_subtree_roots(client, params, tip_height, db_data).await?;
     running_single_batch(client, params, db_cache, db_data, batch_size).await
 }
 
@@ -148,7 +159,8 @@ where
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
-    update_subtree_roots(client, db_data).await?;
+    let tip_height = update_chain_tip(client, db_data).await?;
+    update_subtree_roots(client, params, tip_height, db_data).await?;
     running_single_batch_optimized(client, params, db_cache, db_data, batch_size).await
 }
 
@@ -171,8 +183,6 @@ where
     DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
 {
-    update_chain_tip(client, db_data).await?;
-
     #[cfg(feature = "transparent-inputs")]
     for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
         let start_height = db_data
@@ -268,8 +278,6 @@ where
     DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
 {
-    update_chain_tip(client, db_data).await?;
-
     #[cfg(feature = "transparent-inputs")]
     for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
         let start_height = db_data
@@ -367,8 +375,6 @@ where
 {
     // 3) Download chain tip metadata from lightwalletd
     // 4) Notify the wallet of the updated chain tip.
-    update_chain_tip(client, db_data).await?;
-
     // Refresh UTXOs for the accounts in the wallet. We do this before we perform
     // any shielded scanning, to ensure that we discover any UTXOs between the old
     // fully-scanned height and the current chain tip.
@@ -515,11 +521,14 @@ where
 }
 
 #[cfg(feature = "sync")]
-async fn update_subtree_roots<ChT, DbT, CaErr, DbErr>(
+async fn update_subtree_roots<P, ChT, DbT, CaErr, DbErr>(
     client: &mut CompactTxStreamerClient<ChT>,
+    params: &P,
+    tip_height: BlockHeight,
     db_data: &mut DbT,
 ) -> Result<(), Error<CaErr, DbErr, <DbT as WalletCommitmentTrees>::Error>>
 where
+    P: Parameters,
     ChT: GrpcService<TonicBody>,
     ChT::Error: Into<StdError>,
     ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
@@ -545,13 +554,15 @@ where
             .put_orchard_subtree_roots(0, &orchard_roots)
             .map_err(Error::WalletTrees)?;
 
-        let ironwood_roots: Vec<CommitmentTreeRoot<MerkleHashOrchard>> =
-            download_subtree_roots(client, service::ShieldedProtocol::Ironwood).await?;
+        if params.is_nu_active(NetworkUpgrade::Nu6_3, tip_height) {
+            let ironwood_roots: Vec<CommitmentTreeRoot<MerkleHashOrchard>> =
+                download_subtree_roots(client, service::ShieldedProtocol::Ironwood).await?;
 
-        info!("Ironwood tree has {} subtrees", ironwood_roots.len());
-        db_data
-            .put_ironwood_subtree_roots(0, &ironwood_roots)
-            .map_err(Error::WalletTrees)?;
+            info!("Ironwood tree has {} subtrees", ironwood_roots.len());
+            db_data
+                .put_ironwood_subtree_roots(0, &ironwood_roots)
+                .map_err(Error::WalletTrees)?;
+        }
     }
 
     Ok(())
@@ -561,7 +572,7 @@ where
 async fn update_chain_tip<ChT, DbT, CaErr, TrErr>(
     client: &mut CompactTxStreamerClient<ChT>,
     db_data: &mut DbT,
-) -> Result<(), Error<CaErr, <DbT as WalletRead>::Error, TrErr>>
+) -> Result<BlockHeight, Error<CaErr, <DbT as WalletRead>::Error, TrErr>>
 where
     ChT: GrpcService<TonicBody>,
     ChT::Error: Into<StdError>,
@@ -583,7 +594,7 @@ where
         .update_chain_tip(tip_height)
         .map_err(Error::Wallet)?;
 
-    Ok(())
+    Ok(tip_height)
 }
 
 #[cfg(feature = "sync")]
@@ -979,7 +990,7 @@ mod tests {
         body::Body as TonicBody,
         codegen::{Service, http::Request, http::Response},
     };
-    use zcash_protocol::consensus::Network;
+    use zcash_protocol::consensus::{BlockHeight, Network};
 
     use crate::{
         data_api::testing::MockWalletDb,
@@ -1010,19 +1021,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn subtree_root_sync_requests_all_pools() {
+    fn subtree_root_request_count(tip_height: u32) -> usize {
         let request_count = Arc::new(AtomicUsize::new(0));
         let mut client =
             CompactTxStreamerClient::new(CountingGrpcService(Arc::clone(&request_count)));
-        let mut wallet = MockWalletDb::new(Network::TestNetwork);
+        let network = Network::MainNetwork;
+        let mut wallet = MockWalletDb::new(network);
 
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            update_subtree_roots::<_, _, Infallible, Infallible>(&mut client, &mut wallet)
-                .await
-                .unwrap();
+            update_subtree_roots::<_, _, _, Infallible, Infallible>(
+                &mut client,
+                &network,
+                BlockHeight::from_u32(tip_height),
+                &mut wallet,
+            )
+            .await
+            .unwrap();
         });
 
-        assert_eq!(request_count.load(Ordering::Relaxed), 3);
+        request_count.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn subtree_root_sync_skips_ironwood_before_activation() {
+        assert_eq!(subtree_root_request_count(3_428_142), 2);
+    }
+
+    #[test]
+    fn subtree_root_sync_requests_ironwood_at_activation() {
+        assert_eq!(subtree_root_request_count(3_428_143), 3);
     }
 }

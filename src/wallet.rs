@@ -10,6 +10,7 @@ use sapling::ProofGenerationKey;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
@@ -22,14 +23,15 @@ use tonic::{
     codegen::{Body, Bytes, StdError},
 };
 use zcash_address::ZcashAddress;
+use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
 use zcash_client_backend::data_api::wallet::input_selection::{GreedyInputSelector, SpendPolicy};
 use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
     propose_send_max_transfer, propose_shielding, propose_transfer,
 };
 use zcash_client_backend::data_api::{
-    Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, WalletSummary,
-    Zip32Derivation,
+    Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, TransactionDataRequest,
+    WalletSummary, Zip32Derivation,
 };
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, SplitPolicy, StandardFeeRule};
@@ -46,7 +48,7 @@ use zcash_proofs::prover::LocalTxProver;
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::ShieldedPool;
-use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
+use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkUpgrade, Parameters};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
@@ -501,7 +503,9 @@ where
             BATCH_SIZE,
         )
         .await
-        .map_err(Into::into)
+        .map_err(|error| -> Error { error.into() })?;
+        drop(db);
+        self.enhance_pending_transactions().await
     }
 
     /// Runs a single batch of the sync process without looping.
@@ -511,7 +515,7 @@ where
         let db_cache = MemBlockCache::new();
 
         let mut db = self.db.write().await;
-        run_next_batch(
+        let did_work = run_next_batch(
             &mut client,
             &self.network.clone(),
             &db_cache,
@@ -519,7 +523,10 @@ where
             batch_size.unwrap_or(BATCH_SIZE),
         )
         .await
-        .map_err(Into::into)
+        .map_err(|error| -> Error { error.into() })?;
+        drop(db);
+        self.enhance_pending_transactions().await?;
+        Ok(did_work)
     }
 
     pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error> {
@@ -527,7 +534,7 @@ where
         let db_cache = MemBlockCache::new();
 
         let mut db = self.db.write().await;
-        zcash_client_backend::sync::run_next_batch_optimized(
+        let did_work = zcash_client_backend::sync::run_next_batch_optimized(
             &mut client,
             &self.network.clone(),
             &db_cache,
@@ -535,7 +542,79 @@ where
             batch_size.unwrap_or(BATCH_SIZE),
         )
         .await
-        .map_err(Into::into)
+        .map_err(|error| -> Error { error.into() })?;
+        drop(db);
+        self.enhance_pending_transactions().await?;
+        Ok(did_work)
+    }
+
+    pub(crate) async fn enhance_pending_transactions(&self) -> Result<(), Error> {
+        let txids = {
+            let db = self.db.read().await;
+            db.transaction_data_requests()?
+                .into_iter()
+                .filter_map(|request| match request {
+                    TransactionDataRequest::Enhancement(txid) => Some(txid),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+
+        if txids.is_empty() {
+            return Ok(());
+        }
+
+        let mut client = self.client.clone();
+        for requested_txid in txids {
+            let raw = client
+                .get_transaction(service::TxFilter {
+                    block: None,
+                    index: 0,
+                    hash: requested_txid.as_ref().to_vec(),
+                })
+                .await?
+                .into_inner();
+
+            let mined_height = match raw.height {
+                0 | u64::MAX => None,
+                height => Some(BlockHeight::from_u32(u32::try_from(height).map_err(
+                    |_| {
+                        Error::Generic(format!(
+                            "Invalid mined height {height} for transaction {requested_txid}"
+                        ))
+                    },
+                )?)),
+            };
+            let parse_height = match mined_height {
+                Some(height) => height,
+                None => {
+                    let db = self.db.read().await;
+                    db.chain_height()?
+                        .map(|height| height + 1)
+                        .or_else(|| self.network.activation_height(NetworkUpgrade::Sapling))
+                        .ok_or_else(|| {
+                            Error::Generic(format!(
+                                "Unable to determine consensus branch for transaction {requested_txid}"
+                            ))
+                        })?
+                }
+            };
+            let tx = zcash_primitives::transaction::Transaction::read(
+                raw.data.as_slice(),
+                BranchId::for_height(&self.network, parse_height),
+            )?;
+            if tx.txid() != requested_txid {
+                return Err(Error::Generic(format!(
+                    "Transaction data mismatch: requested {requested_txid}, received {}",
+                    tx.txid()
+                )));
+            }
+
+            let mut db = self.db.write().await;
+            decrypt_and_store_transaction(&self.network, &mut *db, &tx, mined_height)?;
+        }
+
+        Ok(())
     }
 
     /// Benchmark helper: download a contiguous block range over gRPC-web and
@@ -647,8 +726,6 @@ where
         let mut client = self.client.clone();
         let mut db = self.db.write().await;
 
-        Self::do_update_subtree_roots(&mut client, &mut *db).await?;
-
         let tip_height: zcash_protocol::consensus::BlockHeight = client
             .get_latest_block(service::ChainSpec::default())
             .await
@@ -659,6 +736,9 @@ where
             .map_err(|_| Error::Generic("Invalid tip height".into()))?;
         db.update_chain_tip(tip_height)
             .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
+        self.do_update_subtree_roots(&mut client, &mut *db, tip_height)
+            .await?;
 
         self.refresh_transparent_utxos_for_all_accounts(&mut client, &mut *db)
             .await?;
@@ -718,27 +798,36 @@ where
 
         let t_stage0 = js_sys::Date::now();
 
+        let tip_height = if refresh {
+            Some(
+                client
+                    .get_latest_block(service::ChainSpec::default())
+                    .await
+                    .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+                    .get_ref()
+                    .height
+                    .try_into()
+                    .map_err(|_| Error::Generic("Invalid tip height".into()))?,
+            )
+        } else {
+            None
+        };
+        let t_after_tip = js_sys::Date::now();
+
         // Steps 1/2/2.5 are session-level state (subtree roots, chain tip,
         // transparent UTXOs) that do not change while replaying a bounded scan
         // window. When `refresh` is false the caller has run them once via
         // `sync_session_setup`, so we skip the per-batch network round-trips.
-        if refresh {
+        if let Some(tip_height) = tip_height {
             // 1. Update subtree roots
-            Self::do_update_subtree_roots(&mut client, &mut *db).await?;
+            self.do_update_subtree_roots(&mut client, &mut *db, tip_height)
+                .await?;
         }
 
         let t_sub = js_sys::Date::now();
 
-        if refresh {
+        if let Some(tip_height) = tip_height {
             // 2. Update chain tip
-            let tip_height: zcash_protocol::consensus::BlockHeight = client
-                .get_latest_block(service::ChainSpec::default())
-                .await
-                .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
-                .get_ref()
-                .height
-                .try_into()
-                .map_err(|_| Error::Generic("Invalid tip height".into()))?;
             db.update_chain_tip(tip_height)
                 .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
 
@@ -814,7 +903,11 @@ where
 
         let scan_range = match first_batch {
             Some(r) => r,
-            None => return Ok(None),
+            None => {
+                drop(db);
+                self.enhance_pending_transactions().await?;
+                return Ok(None);
+            }
         };
 
         // 5. Download compact blocks for the range
@@ -887,17 +980,21 @@ where
             optimized,
         )?;
         if rewound {
+            drop(db);
+            self.enhance_pending_transactions().await?;
             return Ok(None);
         }
 
         let t_stage_scan = js_sys::Date::now();
         if let Some(t) = timings.as_deref_mut() {
-            t[0] = t_sub - t_stage0; // subtree roots
-            t[1] = t_stage_setup - t_sub; // chain tip + UTXO refresh + verify
+            t[0] = t_sub - t_after_tip; // subtree roots
+            t[1] = (t_after_tip - t_stage0) + (t_stage_setup - t_sub); // chain tip + UTXO refresh + verify
             t[2] = t_stage_dl - t_stage_setup; // block + tree-state download
             t[3] = t_stage_scan - t_stage_dl; // scan + put_blocks
         }
 
+        drop(db);
+        self.enhance_pending_transactions().await?;
         Ok(Some(journal_data))
     }
 
@@ -974,6 +1071,8 @@ where
             .map_err(|e| Error::Generic(format!("{e}")))?;
         let has_more = remaining.iter().any(|r| !r.is_empty());
 
+        drop(db);
+        self.enhance_pending_transactions().await?;
         Ok(has_more)
     }
 
@@ -1040,8 +1139,10 @@ where
 
     // Internal helper: update subtree roots from lightwalletd
     async fn do_update_subtree_roots(
+        &self,
         client: &mut CompactTxStreamerClient<T>,
         db: &mut W,
+        tip_height: BlockHeight,
     ) -> Result<(), Error> {
         use zcash_client_backend::data_api::chain::CommitmentTreeRoot;
         use zcash_client_backend::proto::service;
@@ -1091,37 +1192,27 @@ where
         db.put_orchard_subtree_roots(0, &orchard_roots)
             .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
 
-        let mut request = service::GetSubtreeRootsArg::default();
-        request.set_shielded_protocol(service::ShieldedProtocol::Ironwood);
-        let ironwood_roots: Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>> =
-            match client.get_subtree_roots(request).await {
-                Ok(response) => response
-                    .into_inner()
-                    .and_then(|root| async move {
-                        let root_hash =
-                            orchard::tree::MerkleHashOrchard::read(&root.root_hash[..])?;
-                        Ok(CommitmentTreeRoot::from_parts(
-                            BlockHeight::from_u32(root.completing_block_height as u32),
-                            root_hash,
-                        ))
-                    })
-                    .try_collect()
-                    .await
-                    .map_err(|e| Error::Generic(format!("Stream error: {e}")))?,
-                Err(status)
-                    if matches!(
-                        status.code(),
-                        tonic::Code::InvalidArgument | tonic::Code::Unimplemented
-                    ) =>
-                {
-                    // Mainnet-compatible fallback for lightwalletd instances that have not yet
-                    // deployed the Ironwood subtree-roots request.
-                    Vec::new()
-                }
-                Err(status) => return Err(Error::Generic(format!("gRPC error: {status}"))),
-            };
-        db.put_ironwood_subtree_roots(0, &ironwood_roots)
-            .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+        if self.network.is_nu_active(NetworkUpgrade::Nu6_3, tip_height) {
+            let mut request = service::GetSubtreeRootsArg::default();
+            request.set_shielded_protocol(service::ShieldedProtocol::Ironwood);
+            let ironwood_roots: Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>> = client
+                .get_subtree_roots(request)
+                .await
+                .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+                .into_inner()
+                .and_then(|root| async move {
+                    let root_hash = orchard::tree::MerkleHashOrchard::read(&root.root_hash[..])?;
+                    Ok(CommitmentTreeRoot::from_parts(
+                        BlockHeight::from_u32(root.completing_block_height as u32),
+                        root_hash,
+                    ))
+                })
+                .try_collect()
+                .await
+                .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+            db.put_ironwood_subtree_roots(0, &ironwood_roots)
+                .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+        }
 
         Ok(())
     }

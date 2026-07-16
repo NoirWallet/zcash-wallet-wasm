@@ -263,21 +263,18 @@ impl ReceivedNoteTable {
     }
 
     pub fn insert_received_note(&mut self, note: ReceivedNote) {
-        // ensure note_id is unique.
-        // follow upsert rules to update the note if it already exists
-        let is_absent = self
-            .0
-            .iter_mut()
-            .find(|n| n.note_id == note.note_id)
-            .map(|n| {
-                n.nf = note.nf.or(n.nf);
-                n.is_change = note.is_change || n.is_change;
-                n.commitment_tree_position =
-                    note.commitment_tree_position.or(n.commitment_tree_position);
-            })
-            .is_none();
-
-        if is_absent {
+        if let Some(existing) = self.0.iter_mut().find(|n| n.note_id == note.note_id) {
+            existing.nf = note.nf.or(existing.nf);
+            existing.is_change = note.is_change || existing.is_change;
+            existing.commitment_tree_position = note
+                .commitment_tree_position
+                .or(existing.commitment_tree_position);
+            existing.recipient_key_scope =
+                note.recipient_key_scope.or(existing.recipient_key_scope);
+            if !matches!(note.memo, Memo::Empty) {
+                existing.memo = note.memo;
+            }
+        } else {
             self.0.push(note);
         }
     }

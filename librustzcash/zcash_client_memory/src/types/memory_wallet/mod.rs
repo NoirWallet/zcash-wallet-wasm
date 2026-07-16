@@ -1470,6 +1470,17 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 .find_map(|n| match &n.memo {
                     zcash_protocol::memo::Memo::Text(t) => Some(t.to_string()),
                     _ => None,
+                })
+                .or_else(|| {
+                    self.sent_notes
+                        .iter()
+                        .filter(|(note_id, note)| {
+                            note_id.txid() == txid && note.from_account_id == account_id
+                        })
+                        .find_map(|(_, note)| match &note.memo {
+                            zcash_protocol::memo::Memo::Text(t) => Some(t.to_string()),
+                            _ => None,
+                        })
                 });
 
             entries.push(TransactionHistoryEntry {
@@ -1526,4 +1537,61 @@ pub struct TransactionHistoryEntry {
     pub status: String,
     pub timestamp: Option<u64>,
     pub memo: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_address::ZcashAddress;
+    use zcash_client_backend::wallet::{Recipient, WalletTx};
+    use zcash_protocol::{PoolType, memo::Memo, value::Zatoshis};
+
+    #[test]
+    fn transaction_history_uses_outgoing_memo() {
+        let account_id = AccountId::from(0);
+        let txid = TxId::from_bytes([9; 32]);
+        let mut wallet = MemoryWalletDb::new(consensus::Network::TestNetwork, 100);
+        wallet.tx_table.put_tx_meta(
+            WalletTx::new(
+                txid,
+                TxIndex::from(0u16),
+                vec![],
+                vec![],
+                vec![],
+                #[cfg(feature = "orchard")]
+                vec![],
+                #[cfg(feature = "orchard")]
+                vec![],
+                #[cfg(feature = "orchard")]
+                vec![],
+                #[cfg(feature = "orchard")]
+                vec![],
+            ),
+            BlockHeight::from(1_000_000),
+        );
+        wallet.sent_notes.0.insert(
+            SentNoteId::Shielded(NoteId::new(txid, ShieldedPool::Sapling, 0)),
+            SentNote {
+                from_account_id: account_id,
+                to: Recipient::External {
+                    recipient_address: ZcashAddress::try_from_encoded("uregtest1a7mkafdn9c87xywjnyup65uker8tx3y72r9f6elcfm6uh263c9s6smcw6xm5m8k8eythcreuyqktp9z7mtpcd6jsm5xw7skgdcfjx84z").unwrap(),
+                    output_pool: PoolType::Shielded(ShieldedPool::Sapling),
+                },
+                value: Zatoshis::from_u64(260_000).unwrap(),
+                memo: "ZNS:CLAIM:test".parse::<Memo>().unwrap(),
+            },
+        );
+
+        let history = wallet.get_transaction_history(account_id);
+        let requests = wallet.transaction_data_requests().unwrap();
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].kind, "send");
+        assert_eq!(history[0].memo.as_deref(), Some("ZNS:CLAIM:test"));
+        assert!(
+            requests.contains(
+                &zcash_client_backend::data_api::TransactionDataRequest::Enhancement(txid)
+            )
+        );
+    }
 }

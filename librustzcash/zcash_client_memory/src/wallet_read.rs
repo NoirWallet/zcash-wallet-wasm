@@ -852,11 +852,23 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
         tracing::debug!("transaction_data_requests");
-        Ok(self
+        let mut requests = self
             .transaction_data_request_queue
             .iter()
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+
+        for (txid, entry) in self.tx_table.iter() {
+            if entry.raw().is_none()
+                && !requests.iter().any(
+                    |request| matches!(request, TransactionDataRequest::Enhancement(id) if id == txid),
+                )
+            {
+                requests.push(TransactionDataRequest::Enhancement(*txid));
+            }
+        }
+
+        Ok(requests)
     }
 
     fn list_addresses(&self, account: Self::AccountId) -> Result<Vec<AddressInfo>, Self::Error> {

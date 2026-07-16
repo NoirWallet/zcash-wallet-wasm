@@ -23,7 +23,7 @@ use zcash_client_backend::{
         scanning::{ScanPriority, ScanRange},
     },
     keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
-    wallet::{NoteId, Recipient, WalletTransparentOutput},
+    wallet::{Note, NoteId, Recipient, WalletTransparentOutput},
 };
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
@@ -326,6 +326,14 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
 
             for transaction in block.transactions().iter() {
                 let txid = transaction.txid();
+
+                if self
+                    .tx_table
+                    .get_transaction(&txid)
+                    .is_none_or(|entry| entry.raw().is_none())
+                {
+                    self.transaction_data_request_queue.queue_enhancement(&txid);
+                }
 
                 // Mark the Sapling nullifiers of the spent notes as spent in the `sapling_spends` map.
                 for spend in transaction.sapling_spends() {
@@ -738,7 +746,14 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         d_tx: DecryptedTransaction<Transaction, Self::AccountId>,
     ) -> Result<(), Self::Error> {
         tracing::debug!("store_decrypted_tx");
-        self.tx_table.put_tx_data(d_tx.tx(), None, None);
+        let fee = d_tx.tx().fee_paid(|outpoint| {
+            Ok::<_, Error>(
+                self.transparent_received_outputs
+                    .get(outpoint)
+                    .map(|output| output.txout.value()),
+            )
+        })?;
+        self.tx_table.put_tx_data(d_tx.tx(), fee, None);
         if let Some(height) = d_tx.mined_height() {
             self.set_transaction_status(d_tx.tx().txid(), TransactionStatus::Mined(height))?
         }
@@ -826,7 +841,22 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
                     );
                 }
                 TransferType::Incoming => {
-                    todo!("store decrypted tx sapling incoming")
+                    self.received_notes.insert_received_note(ReceivedNote {
+                        note_id: NoteId::new(
+                            d_tx.tx().txid(),
+                            ShieldedPool::Sapling,
+                            output.index().try_into()?,
+                        ),
+                        txid: d_tx.tx().txid(),
+                        output_index: output.index().try_into()?,
+                        account_id: *output.account(),
+                        note: Note::Sapling(output.note().clone()),
+                        nf: None,
+                        is_change: false,
+                        memo: zcash_protocol::memo::Memo::try_from(output.memo())?,
+                        commitment_tree_position: None,
+                        recipient_key_scope: Some(zip32::Scope::External),
+                    });
                 }
             }
         }
@@ -902,7 +932,25 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
                     );
                 }
                 TransferType::Incoming => {
-                    todo!("store decrypted tx orchard incoming")
+                    self.received_notes.insert_received_note(ReceivedNote {
+                        note_id: NoteId::new(
+                            d_tx.tx().txid(),
+                            output.value_pool(),
+                            output.index().try_into()?,
+                        ),
+                        txid: d_tx.tx().txid(),
+                        output_index: output.index().try_into()?,
+                        account_id: *output.account(),
+                        note: Note::Orchard {
+                            note: output.note().0,
+                            pool: output.note().1,
+                        },
+                        nf: None,
+                        is_change: false,
+                        memo: zcash_protocol::memo::Memo::try_from(output.memo())?,
+                        commitment_tree_position: None,
+                        recipient_key_scope: Some(zip32::Scope::External),
+                    });
                 }
             }
         }
@@ -1068,6 +1116,8 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
                     .queue_status_retrieval(&d_tx.tx().txid());
             }
         }
+        self.transaction_data_request_queue
+            .remove_enhancement(&d_tx.tx().txid());
         Ok(())
     }
 
@@ -1462,7 +1512,6 @@ fn range_from(i: u32, n: u32) -> Range<u32> {
     first..last
 }
 
-use zcash_client_backend::wallet::Note;
 use zcash_keys::address::Receiver;
 use zcash_keys::encoding::AddressCodec;
 #[cfg(feature = "orchard")]
