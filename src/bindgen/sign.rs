@@ -22,6 +22,9 @@ pub(crate) async fn pczt_sign_inner(
         Orchard {
             index: usize,
         },
+        Ironwood {
+            index: usize,
+        },
         Sapling {
             index: usize,
         },
@@ -32,7 +35,7 @@ pub(crate) async fn pczt_sign_inner(
         },
     }
     let mut keys = BTreeMap::<zip32::AccountId, Vec<KeyRef>>::new();
-    let pczt = Verifier::new(pczt)
+    let verifier = Verifier::new(pczt)
         .with_orchard::<Infallible, _>(|bundle| {
             for (index, action) in bundle.actions().iter().enumerate() {
                 if let Some(account_index) =
@@ -54,7 +57,31 @@ pub(crate) async fn pczt_sign_inner(
             }
             Ok(())
         })
-        .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {e:?}")))?
+        .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {e:?}")))?;
+    let verifier = verifier
+        .with_ironwood::<Infallible, _>(|bundle| {
+            for (index, action) in bundle.actions().iter().enumerate() {
+                if let Some(account_index) =
+                    action
+                        .spend()
+                        .zip32_derivation()
+                        .as_ref()
+                        .and_then(|derivation| {
+                            derivation.extract_account_index(
+                                &seed_fp,
+                                zip32::ChildIndex::hardened(network.network_type().coin_type()),
+                            )
+                        })
+                {
+                    keys.entry(account_index)
+                        .or_default()
+                        .push(KeyRef::Ironwood { index });
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| Error::PcztSign(format!("Invalid PCZT: {e:?}")))?;
+    let pczt = verifier
         .with_sapling::<Infallible, _>(|bundle| {
             for (index, spend) in bundle.spends().iter().enumerate() {
                 if let Some(account_index) =
@@ -188,6 +215,16 @@ pub(crate) async fn pczt_sign_inner(
                         )
                         .map_err(|e| {
                             Error::PcztSign(format!("Failed to sign Orchard spend {index}: {e:?}"))
+                        })?;
+                }
+                KeyRef::Ironwood { index } => {
+                    signer
+                        .sign_ironwood(
+                            index,
+                            &orchard::keys::SpendAuthorizingKey::from(usk.orchard()),
+                        )
+                        .map_err(|e| {
+                            Error::PcztSign(format!("Failed to sign Ironwood spend {index}: {e:?}"))
                         })?;
                 }
                 KeyRef::Sapling { index } => {
@@ -376,4 +413,122 @@ pub fn sign_message_with_transparent(
     };
 
     Ok(serde_wasm_bindgen::to_value(&result)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pczt_sign_inner;
+    use crate::Network;
+    use pczt::roles::{creator::Creator, io_finalizer::IoFinalizer, updater::Updater};
+    use rand_core::OsRng;
+    use zcash_keys::keys::UnifiedSpendingKey;
+    use zcash_primitives::transaction::{
+        builder::{BuildConfig, Builder, PcztResult},
+        fees::zip317,
+    };
+    use zcash_protocol::{
+        consensus::{NetworkConstants, NetworkUpgrade, Parameters},
+        memo::MemoBytes,
+        value::Zatoshis,
+    };
+
+    #[tokio::test]
+    async fn signs_ironwood_spends() {
+        let network = Network::TestNetwork;
+        let seed = [7; 32];
+        let account_id = zip32::AccountId::ZERO;
+        let usk = UnifiedSpendingKey::from_seed(&network, &seed, account_id).unwrap();
+        let seed_fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&seed).unwrap();
+        let orchard_fvk = orchard::keys::FullViewingKey::from(usk.orchard());
+        let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
+
+        let rho = orchard::note::Rho::from_bytes(&[1; 32]).unwrap();
+        let rseed = (0u8..=255)
+            .find_map(|byte| orchard::note::RandomSeed::from_bytes([byte; 32], &rho).into_option())
+            .expect("at least one test rseed is valid");
+        let note = orchard::Note::from_parts(
+            recipient,
+            orchard::value::NoteValue::from_raw(1_000_000),
+            rho,
+            rseed,
+            orchard::note::NoteVersion::V3,
+        )
+        .unwrap();
+        let zero = orchard::tree::MerkleHashOrchard::from_bytes(&[0; 32]).unwrap();
+        let merkle_path = orchard::tree::MerklePath::from_parts(0, [zero; 32]);
+        let anchor = merkle_path.root(note.commitment().into());
+        let target_height = network.activation_height(NetworkUpgrade::Nu6_3).unwrap() + 1;
+
+        let mut builder = Builder::new(
+            network,
+            target_height,
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(anchor),
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
+            },
+        );
+        builder
+            .add_ironwood_spend::<zip317::FeeRule>(orchard_fvk.clone(), note, merkle_path)
+            .unwrap();
+        builder
+            .add_ironwood_output::<zip317::FeeRule>(
+                Some(orchard_fvk.to_ovk(orchard::keys::Scope::External)),
+                recipient,
+                Zatoshis::const_from_u64(990_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+        let PcztResult {
+            pczt_parts,
+            ironwood_meta,
+            ..
+        } = builder
+            .build_for_pczt(OsRng, &zip317::FeeRule::standard())
+            .unwrap();
+        let spend_index = ironwood_meta.spend_action_index(0).unwrap();
+        let pczt = IoFinalizer::new(Creator::build_from_parts(pczt_parts).unwrap())
+            .finalize_io()
+            .unwrap();
+        let pczt = Updater::new(pczt)
+            .update_ironwood_with(|mut updater| {
+                updater.update_action_with(spend_index, |mut action| {
+                    action.set_spend_zip32_derivation(
+                        orchard::pczt::Zip32Derivation::parse(
+                            seed_fingerprint.to_bytes(),
+                            vec![
+                                zip32::ChildIndex::hardened(32).index(),
+                                zip32::ChildIndex::hardened(network.network_type().coin_type())
+                                    .index(),
+                                zip32::ChildIndex::hardened(u32::from(account_id)).index(),
+                            ],
+                        )
+                        .unwrap(),
+                    );
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap()
+            .finish();
+
+        assert!(
+            pczt.ironwood().actions()[spend_index]
+                .spend()
+                .spend_auth_sig()
+                .is_none()
+        );
+
+        let signed = pczt_sign_inner(network, pczt, usk, seed_fingerprint)
+            .await
+            .unwrap();
+
+        assert!(
+            signed.ironwood().actions()[spend_index]
+                .spend()
+                .spend_auth_sig()
+                .is_some()
+        );
+    }
 }
