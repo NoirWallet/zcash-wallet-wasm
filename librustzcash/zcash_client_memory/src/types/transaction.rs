@@ -263,6 +263,11 @@ impl TxLocatorMap {
     pub(crate) fn entry(&mut self, k: (BlockHeight, u32)) -> Entry<'_, (BlockHeight, u32), TxId> {
         self.0.entry(k)
     }
+
+    pub(crate) fn truncate_to_height(&mut self, height: BlockHeight) {
+        self.0
+            .retain(|(block_height, _), _| *block_height <= height);
+    }
 }
 
 #[cfg(test)]

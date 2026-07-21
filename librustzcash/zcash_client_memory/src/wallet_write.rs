@@ -1252,9 +1252,10 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
             // Now that they aren't depended on, delete un-mined blocks.
             self.blocks.retain(|height, _| *height <= truncation_height);
 
-            // Delete from the nullifier map any entries with a locator referencing a block
-            // height greater than the truncation height.
-            // Willem: We don't need to do this I think..
+            // These maps can contain entries above the scanned block range to support
+            // non-linear scanning. They must follow the selected chain across a rewind.
+            self.tx_locator.truncate_to_height(truncation_height);
+            self.nullifiers.truncate_to_height(truncation_height);
         }
         Ok(truncation_height)
     }
@@ -1558,4 +1559,121 @@ fn ensure_checkpoints<'a, H, I: Iterator<Item = &'a BlockHeight>, const DEPTH: u
                 .into_iter()
         })
         .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use shardtree::store::{Checkpoint, ShardStore};
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::consensus::{Parameters, TxIndex};
+
+    use super::*;
+
+    fn empty_block(height: BlockHeight) -> MemoryWalletBlock {
+        MemoryWalletBlock {
+            height,
+            hash: BlockHash([0; 32]),
+            block_time: 0,
+            _transactions: HashSet::new(),
+            _memos: HashMap::new(),
+            sapling_commitment_tree_size: Some(0),
+            sapling_output_count: Some(0),
+            #[cfg(feature = "orchard")]
+            orchard_commitment_tree_size: Some(0),
+            #[cfg(feature = "orchard")]
+            orchard_action_count: Some(0),
+            #[cfg(feature = "orchard")]
+            ironwood_commitment_tree_size: Some(0),
+            #[cfg(feature = "orchard")]
+            ironwood_action_count: Some(0),
+        }
+    }
+
+    #[test]
+    fn truncate_removes_nullifier_locators_from_the_rewound_chain() {
+        let mut wallet = MemoryWalletDb::new(consensus::Network::TestNetwork, 100);
+        let retained_height = wallet
+            .params
+            .activation_height(NetworkUpgrade::Sapling)
+            .expect("testnet has a Sapling activation height");
+        let rewound_height = retained_height + 1;
+
+        for height in [retained_height, rewound_height] {
+            wallet
+                .sapling_tree
+                .store_mut()
+                .add_checkpoint(height, Checkpoint::tree_empty())
+                .expect("Sapling checkpoint insertion succeeds");
+            #[cfg(feature = "orchard")]
+            wallet
+                .orchard_tree
+                .store_mut()
+                .add_checkpoint(height, Checkpoint::tree_empty())
+                .expect("Orchard checkpoint insertion succeeds");
+            #[cfg(feature = "orchard")]
+            wallet
+                .ironwood_tree
+                .store_mut()
+                .add_checkpoint(height, Checkpoint::tree_empty())
+                .expect("Ironwood checkpoint insertion succeeds");
+            wallet.blocks.insert(height, empty_block(height));
+        }
+
+        let retained_txid = TxId::from_bytes([1; 32]);
+        let orphaned_txid = TxId::from_bytes([2; 32]);
+        let replacement_txid = TxId::from_bytes([3; 32]);
+        let retained_nullifier = sapling::Nullifier::from_slice(&[1; 32]).unwrap();
+        let orphaned_nullifier = sapling::Nullifier::from_slice(&[2; 32]).unwrap();
+        let replacement_nullifier = sapling::Nullifier::from_slice(&[3; 32]).unwrap();
+
+        wallet
+            .insert_sapling_nullifier_map(
+                retained_height,
+                &[(TxIndex::from(0u16), retained_txid, vec![retained_nullifier])],
+            )
+            .unwrap();
+        wallet
+            .insert_sapling_nullifier_map(
+                rewound_height,
+                &[(TxIndex::from(0u16), orphaned_txid, vec![orphaned_nullifier])],
+            )
+            .unwrap();
+
+        assert_eq!(
+            wallet.truncate_to_height(retained_height).unwrap(),
+            retained_height
+        );
+
+        wallet
+            .insert_sapling_nullifier_map(
+                rewound_height,
+                &[(
+                    TxIndex::from(0u16),
+                    replacement_txid,
+                    vec![replacement_nullifier],
+                )],
+            )
+            .expect("the replacement chain locator does not conflict after rewind");
+
+        assert_eq!(
+            wallet.tx_locator.get(retained_height, 0),
+            Some(&retained_txid)
+        );
+        assert_eq!(
+            wallet.tx_locator.get(rewound_height, 0),
+            Some(&replacement_txid)
+        );
+        assert_eq!(
+            wallet
+                .nullifiers
+                .get(&Nullifier::Sapling(retained_nullifier)),
+            Some(&(retained_height, 0))
+        );
+        assert!(
+            wallet
+                .nullifiers
+                .get(&Nullifier::Sapling(orphaned_nullifier))
+                .is_none()
+        );
+    }
 }

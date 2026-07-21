@@ -17,6 +17,11 @@ impl NullifierMap {
     pub fn get(&self, nullifier: &Nullifier) -> Option<&(BlockHeight, u32)> {
         self.0.get(nullifier)
     }
+
+    pub(crate) fn truncate_to_height(&mut self, height: BlockHeight) {
+        self.0
+            .retain(|_, (block_height, _)| *block_height <= height);
+    }
 }
 
 impl Deref for NullifierMap {
