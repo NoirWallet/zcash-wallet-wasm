@@ -3103,6 +3103,7 @@ dependencies = [
  "orchard",
  "pczt",
  "prost",
+ "rand_core",
  "rayon",
  "sapling-crypto",
  "secp256k1 0.27.0",

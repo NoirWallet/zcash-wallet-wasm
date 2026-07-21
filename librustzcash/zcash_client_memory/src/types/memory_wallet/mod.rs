@@ -155,6 +155,50 @@ impl<P: consensus::Parameters + PartialEq> PartialEq for MemoryWalletDb<P> {
     }
 }
 
+fn classify_transaction_history_entry(
+    received_zatoshis: i64,
+    sent_zatoshis: i64,
+    change_zatoshis: i64,
+    spent_input_zatoshis: i64,
+    transparent_spent_zatoshis: i64,
+    fee_zatoshis: Option<i64>,
+) -> (&'static str, i64) {
+    let shielded_output_zatoshis = received_zatoshis + change_zatoshis;
+
+    if transparent_spent_zatoshis > 0 && shielded_output_zatoshis > 0 {
+        ("shield", shielded_output_zatoshis)
+    } else if received_zatoshis > 0 && sent_zatoshis > 0 {
+        ("shield", received_zatoshis)
+    } else if sent_zatoshis > 0 {
+        ("send", sent_zatoshis - change_zatoshis)
+    } else if spent_input_zatoshis > 0 && received_zatoshis == 0 {
+        let net_send = spent_input_zatoshis - change_zatoshis - fee_zatoshis.unwrap_or(0);
+        ("send", net_send.max(0))
+    } else if change_zatoshis > 0 && received_zatoshis == 0 {
+        ("send", 0)
+    } else {
+        ("receive", received_zatoshis)
+    }
+}
+
+fn transparent_spent_zatoshis_for_account(
+    outputs: &TransparentReceivedOutputs,
+    spends: &TransparentReceivedOutputSpends,
+    txid: TxId,
+    account_id: AccountId,
+) -> i64 {
+    spends
+        .iter()
+        .filter(|(_, spend_txid)| **spend_txid == txid)
+        .filter_map(|(outpoint, _)| {
+            outputs
+                .get(outpoint)
+                .filter(|output| output.account_id == account_id)
+                .map(|output| u64::from(output.txout.value()) as i64)
+        })
+        .sum()
+}
+
 impl<P: consensus::Parameters> MemoryWalletDb<P> {
     pub fn new(params: P, max_checkpoints: usize) -> Self {
         Self {
@@ -1427,6 +1471,13 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 })
                 .sum();
 
+            let transparent_spent_zatoshis = transparent_spent_zatoshis_for_account(
+                &self.transparent_received_outputs,
+                &self.transparent_received_output_spends,
+                *txid,
+                account_id,
+            );
+
             if received_zatoshis == 0
                 && sent_zatoshis == 0
                 && change_zatoshis == 0
@@ -1437,19 +1488,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
             let fee_zatoshis = tx_entry.fee().map(|f| f.into_u64() as i64);
 
-            let (kind, amount_zatoshis) = if sent_zatoshis > 0 && received_zatoshis > 0 {
-                ("shield".to_string(), received_zatoshis)
-            } else if sent_zatoshis > 0 {
-                let net = sent_zatoshis - change_zatoshis;
-                ("send".to_string(), net)
-            } else if spent_input_zatoshis > 0 && received_zatoshis == 0 {
-                let net_send = spent_input_zatoshis - change_zatoshis - fee_zatoshis.unwrap_or(0);
-                ("send".to_string(), net_send.max(0))
-            } else if change_zatoshis > 0 && received_zatoshis == 0 {
-                ("send".to_string(), 0)
-            } else {
-                ("receive".to_string(), received_zatoshis)
-            };
+            let (kind, amount_zatoshis) = classify_transaction_history_entry(
+                received_zatoshis,
+                sent_zatoshis,
+                change_zatoshis,
+                spent_input_zatoshis,
+                transparent_spent_zatoshis,
+                fee_zatoshis,
+            );
 
             let status = match tx_entry.status() {
                 TransactionStatus::Mined(_) => "mined".to_string(),
@@ -1485,7 +1531,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
             entries.push(TransactionHistoryEntry {
                 txid: txid.as_ref().to_vec(),
-                kind,
+                kind: kind.to_string(),
                 amount_zatoshis: amount_zatoshis.unsigned_abs(),
                 fee_zatoshis: fee_zatoshis.map(|f| f.unsigned_abs()),
                 mined_height: mined_height.map(u32::from),
@@ -1542,6 +1588,7 @@ pub struct TransactionHistoryEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::transparent::ReceivedTransparentOutput;
     use zcash_address::ZcashAddress;
     use zcash_client_backend::wallet::{Recipient, WalletTx};
     use zcash_protocol::{PoolType, memo::Memo, value::Zatoshis};
@@ -1592,6 +1639,64 @@ mod tests {
             requests.contains(
                 &zcash_client_backend::data_api::TransactionDataRequest::Enhancement(txid)
             )
+        );
+    }
+
+    #[test]
+    fn transaction_history_classifies_transparent_to_shielded_as_shield() {
+        let account_id = AccountId::from(0);
+        let funding_txid = TxId::from_bytes([7; 32]);
+        let shielding_txid = TxId::from_bytes([8; 32]);
+        let outpoint = OutPoint::new(*funding_txid.as_ref(), 0);
+        let value = Zatoshis::const_from_u64(4_000_000);
+        let address = TransparentAddress::PublicKeyHash([1; 20]);
+        let txout = ::transparent::bundle::TxOut::new(value, address.script().into());
+
+        let mut wallet = MemoryWalletDb::new(consensus::Network::TestNetwork, 100);
+        wallet.transparent_received_outputs.insert(
+            outpoint.clone(),
+            ReceivedTransparentOutput::new(
+                funding_txid,
+                account_id,
+                address,
+                ::transparent::keys::TransparentKeyScope::EXTERNAL,
+                txout,
+                BlockHeight::from(999_999),
+            ),
+        );
+        wallet
+            .transparent_received_output_spends
+            .insert(outpoint, shielding_txid);
+
+        let transparent_spent_zatoshis = transparent_spent_zatoshis_for_account(
+            &wallet.transparent_received_outputs,
+            &wallet.transparent_received_output_spends,
+            shielding_txid,
+            account_id,
+        );
+
+        assert_eq!(transparent_spent_zatoshis, 4_000_000);
+        assert_eq!(
+            classify_transaction_history_entry(
+                3_980_000,
+                0,
+                0,
+                0,
+                transparent_spent_zatoshis,
+                Some(20_000),
+            ),
+            ("shield", 3_980_000)
+        );
+        assert_eq!(
+            classify_transaction_history_entry(
+                0,
+                0,
+                3_980_000,
+                0,
+                transparent_spent_zatoshis,
+                Some(20_000),
+            ),
+            ("shield", 3_980_000)
         );
     }
 }

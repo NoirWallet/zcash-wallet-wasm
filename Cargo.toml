@@ -75,6 +75,10 @@ tonic = { version = "0.14", default-features = false, features = [
 
 prost = "0.14"
 futures-util = "0.3"
+
+[dev-dependencies]
+rand_core = "0.6"
+
 [profile.release]
 opt-level = 3
 lto = "fat"
