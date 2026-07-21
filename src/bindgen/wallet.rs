@@ -841,6 +841,38 @@ impl WebWallet {
             .await
     }
 
+    pub async fn estimate_pczt_max_transfer(
+        &self,
+        account_id: u32,
+        to_address: String,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<JsValue, Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct MaxTransferEstimate {
+            max_amount_zats: String,
+            fee_zats: String,
+        }
+
+        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+        let (max_amount_zats, fee_zats) = self
+            .inner
+            .estimate_pczt_max_transfer(
+                AccountId::from(account_id),
+                to_address,
+                memo,
+                marginal_fee_zats,
+            )
+            .await?;
+
+        serde_wasm_bindgen::to_value(&MaxTransferEstimate {
+            max_amount_zats: max_amount_zats.to_string(),
+            fee_zats: fee_zats.to_string(),
+        })
+        .map_err(Error::from)
+    }
+
     pub async fn estimate_pczt_shield_fee(
         &self,
         account_id: u32,
