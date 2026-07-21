@@ -102,6 +102,29 @@ fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
     Ok(fee.into())
 }
 
+fn proposal_payment_amount_zats<FeeRuleT, NoteRef>(
+    proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
+) -> Result<u64, Error> {
+    let amount = proposal.steps().iter().try_fold(
+        Zatoshis::ZERO,
+        |step_total, step| -> Result<Zatoshis, Error> {
+            step.transaction_request()
+                .payments()
+                .values()
+                .try_fold(step_total, |total, payment| {
+                    let payment_amount = payment.amount().ok_or_else(|| {
+                        Error::Generic("Max-transfer proposal omitted a payment amount".to_string())
+                    })?;
+                    (total + payment_amount)
+                        .ok_or(zcash_protocol::value::BalanceError::Overflow)
+                        .map_err(Error::from)
+                })
+        },
+    )?;
+
+    Ok(amount.into())
+}
+
 /// Global prover instance, initialized once on first use
 /// This avoids repeatedly loading the expensive Sapling parameters
 static PROVER: OnceLock<LocalTxProver> = OnceLock::new();
@@ -2055,6 +2078,39 @@ where
         .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {e:?}")))?;
 
         proposal_fee_required_zats(&proposal)
+    }
+
+    pub async fn estimate_pczt_max_transfer(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<(u64, u64), Error> {
+        let fee_rule = dynamic_zip317_fee_rule(marginal_fee_zats)?;
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let mut db = self.db.write().await;
+        let proposal = propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &[
+                ShieldedPool::Sapling,
+                ShieldedPool::Orchard,
+                ShieldedPool::Ironwood,
+            ],
+            &fee_rule,
+            to_address,
+            memo,
+            MaxSpendMode::MaxSpendable,
+            self.confirmations_policy(),
+        )
+        .map_err(|e| Error::Generic(format!("Error when estimating max transfer: {e:?}")))?;
+
+        Ok((
+            proposal_payment_amount_zats(&proposal)?,
+            proposal_fee_required_zats(&proposal)?,
+        ))
     }
 
     pub async fn pczt_prove(
