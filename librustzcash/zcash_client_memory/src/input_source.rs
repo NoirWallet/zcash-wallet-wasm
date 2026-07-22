@@ -1,7 +1,9 @@
 use std::num::NonZeroU32;
 
 #[cfg(feature = "transparent-inputs")]
-use zcash_client_backend::{data_api::CoinbaseFilter, wallet::WalletTransparentOutput};
+use zcash_client_backend::{
+    data_api::CoinbaseFilter, fees::StandardFeeRule, wallet::WalletTransparentOutput,
+};
 use zcash_client_backend::{
     data_api::{
         AccountMeta, InputSource, NoteFilter, PoolMeta, ReceivedNotes, TargetValue, WalletRead,
@@ -20,6 +22,11 @@ use zcash_protocol::{
 use {
     transparent::{address::TransparentAddress, bundle::OutPoint},
     zcash_client_backend::data_api::TransactionStatus,
+    zcash_primitives::transaction::fees::{
+        FeeRule,
+        transparent::{InputSize, InputView},
+        zip317,
+    },
     zcash_protocol::consensus::BlockHeight,
 };
 
@@ -198,6 +205,96 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             })
             .collect();
         Ok(txos)
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    #[allow(clippy::too_many_arguments)]
+    fn select_spendable_transparent_outputs(
+        &self,
+        account: Self::AccountId,
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+        output_filter: CoinbaseFilter,
+        address_allow_list: Option<&[TransparentAddress]>,
+        target_value: TargetValue,
+        max_inputs: usize,
+        fee_rule: &StandardFeeRule,
+    ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        let target_zat = match target_value {
+            TargetValue::AtLeast(value) => Some(u64::from(value)),
+            TargetValue::AllFunds(_) => None,
+        };
+
+        let mut eligible = self
+            .transparent_received_outputs
+            .iter()
+            .filter(|(_, output)| output.account_id == account)
+            .filter(|(_, output)| {
+                address_allow_list.is_none_or(|addresses| addresses.contains(&output.address))
+            })
+            .map(|(outpoint, output)| (outpoint, output, self.tx_table.get(&output.transaction_id)))
+            .filter(|(outpoint, _, _)| {
+                self.utxo_is_spendable(outpoint, target_height, confirmations_policy)
+                    .unwrap_or(false)
+            })
+            .filter(|(_, _, tx)| match output_filter {
+                CoinbaseFilter::AllTransparentOutputs => true,
+                CoinbaseFilter::CoinbaseOnly => {
+                    tx.is_some_and(|tx| tx.tx_index().unwrap_or(1) == 0)
+                }
+                CoinbaseFilter::NonCoinbaseOnly => {
+                    !tx.is_some_and(|tx| tx.tx_index().unwrap_or(1) == 0)
+                }
+            })
+            .filter(|(_, output, _)| output.txout.value() >= zip317::MARGINAL_FEE)
+            .filter_map(|(outpoint, output, tx)| {
+                output.to_wallet_transparent_output(outpoint, tx.and_then(|tx| tx.mined_height()))
+            })
+            .collect::<Vec<_>>();
+
+        eligible.sort_by(|a, b| {
+            b.value()
+                .cmp(&a.value())
+                .then_with(|| a.outpoint().cmp(b.outpoint()))
+        });
+
+        let mut selected = Vec::new();
+        let mut accumulated_value = 0u64;
+        let mut cumulative_input_size = 0usize;
+
+        for output in eligible {
+            if selected.len() >= max_inputs {
+                break;
+            }
+
+            if let Some(target) = target_zat {
+                let cumulative_fee = fee_rule
+                    .fee_required(
+                        &self.params,
+                        BlockHeight::from(target_height),
+                        [InputSize::Known(cumulative_input_size)],
+                        std::iter::empty::<usize>(),
+                        0,
+                        0,
+                        0,
+                        0,
+                    )
+                    .map_err(|error| Error::Other(format!("fee calculation failed: {error}")))?;
+                if accumulated_value.saturating_sub(u64::from(cumulative_fee)) >= target {
+                    break;
+                }
+            }
+
+            let input_size = match output.serialized_size() {
+                InputSize::Known(size) => size,
+                InputSize::Unknown(_) => zip317::P2PKH_STANDARD_INPUT_SIZE,
+            };
+            cumulative_input_size = cumulative_input_size.saturating_add(input_size);
+            accumulated_value = accumulated_value.saturating_add(u64::from(output.value()));
+            selected.push(output);
+        }
+
+        Ok(selected)
     }
 
     #[cfg(feature = "transparent-inputs")]

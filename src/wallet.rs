@@ -24,7 +24,9 @@ use tonic::{
 };
 use zcash_address::ZcashAddress;
 use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
-use zcash_client_backend::data_api::wallet::input_selection::{GreedyInputSelector, SpendPolicy};
+use zcash_client_backend::data_api::wallet::input_selection::{
+    GreedyInputSelector, SpendPolicy, TransparentSpendPolicy,
+};
 use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
     propose_send_max_transfer, propose_shielding, propose_transfer,
@@ -34,7 +36,9 @@ use zcash_client_backend::data_api::{
     WalletSummary, Zip32Derivation,
 };
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
-use zcash_client_backend::fees::{DustOutputPolicy, SplitPolicy, StandardFeeRule};
+use zcash_client_backend::fees::{
+    DustOutputPolicy, SplitPolicy, StandardFeeRule, TransparentChangePolicy,
+};
 use zcash_client_backend::sync::{run, run_next_batch};
 use zcash_client_backend::wallet::OvkPolicy;
 use zcash_client_backend::zip321::{Payment, TransactionRequest};
@@ -86,6 +90,14 @@ fn validate_expiry_delta_blocks(expiry_delta_blocks: u32) -> Result<u32, Error> 
     } else {
         Ok(expiry_delta_blocks)
     }
+}
+
+fn transparent_transfer_policies() -> (SpendPolicy, TransparentChangePolicy) {
+    (
+        SpendPolicy::shielded_pools(std::iter::empty::<ShieldedPool>())
+            .with_transparent(TransparentSpendPolicy::any_account_addr()),
+        TransparentChangePolicy::TransparentChangeAllowed,
+    )
 }
 
 fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
@@ -1524,7 +1536,45 @@ where
         value: u64,
         memo: Option<Vec<u8>>,
     ) -> Result<Pczt, Error> {
-        // Create the PCZT.
+        self.pczt_create_with_policy(
+            account_id,
+            to_address,
+            value,
+            memo,
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
+        )
+        .await
+    }
+
+    pub async fn pczt_create_transparent(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+    ) -> Result<Pczt, Error> {
+        let (spend_policy, transparent_change_policy) = transparent_transfer_policies();
+        self.pczt_create_with_policy(
+            account_id,
+            to_address,
+            value,
+            memo,
+            spend_policy,
+            transparent_change_policy,
+        )
+        .await
+    }
+
+    async fn pczt_create_with_policy(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        spend_policy: SpendPolicy,
+        transparent_change_policy: TransparentChangePolicy,
+    ) -> Result<Pczt, Error> {
         let change_strategy = MultiOutputChangeStrategy::new(
             StandardFeeRule::Zip317,
             None,
@@ -1535,7 +1585,8 @@ where
                     .ok_or(Error::FailedToCreateTransaction)?,
                 Zatoshis::from_u64(self.min_split_output_value)?,
             ),
-        );
+        )
+        .with_transparent_change_policy(transparent_change_policy);
 
         let input_selector = GreedyInputSelector::new();
         let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
@@ -1550,7 +1601,7 @@ where
         .map_err(|e| Error::Zip321(e.with_index(0)))?;
         let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
-        let proposal = propose_transfer::<_, _, _,_, <W as WalletCommitmentTrees>::Error>(
+        let proposal = propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
             &mut *db,
             &self.network,
             account_id,
@@ -1558,10 +1609,14 @@ where
             &change_strategy,
             request,
             self.confirmations_policy(),
-            &SpendPolicy::default(),
+            &spend_policy,
             None,
         )
-            .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {e:?}")))?;
+        .map_err(|e| {
+            Error::Generic(format!(
+                "Failed to propose transfer. Possibly insufficient permitted funds: {e:?}"
+            ))
+        })?;
         let pczt = create_pczt_from_proposal::<
             _,
             _,
@@ -1720,6 +1775,8 @@ where
             memo,
             marginal_fee_zats,
             None,
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
         )
         .await
     }
@@ -1741,10 +1798,59 @@ where
             memo,
             marginal_fee_zats,
             Some(expiry_delta_blocks),
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
         )
         .await
     }
 
+    pub async fn pczt_create_transparent_dynamic_fee(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<Pczt, Error> {
+        let (spend_policy, transparent_change_policy) = transparent_transfer_policies();
+        self.pczt_create_dynamic_fee_impl(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            None,
+            spend_policy,
+            transparent_change_policy,
+        )
+        .await
+    }
+
+    pub async fn pczt_create_transparent_dynamic_fee_with_expiry_delta(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: u32,
+    ) -> Result<Pczt, Error> {
+        let expiry_delta_blocks = validate_expiry_delta_blocks(expiry_delta_blocks)?;
+        let (spend_policy, transparent_change_policy) = transparent_transfer_policies();
+        self.pczt_create_dynamic_fee_impl(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            Some(expiry_delta_blocks),
+            spend_policy,
+            transparent_change_policy,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn pczt_create_dynamic_fee_impl(
         &self,
         account_id: AccountId,
@@ -1753,6 +1859,8 @@ where
         memo: Option<Vec<u8>>,
         marginal_fee_zats: u64,
         expiry_delta_blocks: Option<u32>,
+        spend_policy: SpendPolicy,
+        transparent_change_policy: TransparentChangePolicy,
     ) -> Result<Pczt, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
@@ -1765,7 +1873,8 @@ where
                         .ok_or(Error::FailedToCreateTransaction)?,
                     Zatoshis::from_u64(self.min_split_output_value)?,
                 ),
-            );
+            )
+            .with_transparent_change_policy(transparent_change_policy);
 
         let input_selector = GreedyInputSelector::new();
         let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
@@ -1788,10 +1897,14 @@ where
             &change_strategy,
             request,
             self.confirmations_policy(),
-            &SpendPolicy::default(),
+            &spend_policy,
             None,
         )
-        .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {e:?}")))?;
+        .map_err(|e| {
+            Error::Generic(format!(
+                "Failed to propose transfer. Possibly insufficient permitted funds: {e:?}"
+            ))
+        })?;
         let pczt = match expiry_delta_blocks {
             Some(expiry_delta_blocks) => create_pczt_from_proposal::<
                 _,
@@ -2038,6 +2151,50 @@ where
         memo: Option<Vec<u8>>,
         marginal_fee_zats: u64,
     ) -> Result<u64, Error> {
+        self.estimate_pczt_transfer_fee_with_policy(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
+        )
+        .await
+    }
+
+    pub async fn estimate_pczt_transparent_transfer_fee(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<u64, Error> {
+        let (spend_policy, transparent_change_policy) = transparent_transfer_policies();
+        self.estimate_pczt_transfer_fee_with_policy(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            spend_policy,
+            transparent_change_policy,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn estimate_pczt_transfer_fee_with_policy(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        spend_policy: SpendPolicy,
+        transparent_change_policy: TransparentChangePolicy,
+    ) -> Result<u64, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
@@ -2049,7 +2206,8 @@ where
                         .ok_or(Error::FailedToCreateTransaction)?,
                     Zatoshis::from_u64(self.min_split_output_value)?,
                 ),
-            );
+            )
+            .with_transparent_change_policy(transparent_change_policy);
 
         let input_selector = GreedyInputSelector::new();
         let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
@@ -2072,7 +2230,7 @@ where
             &change_strategy,
             request,
             self.confirmations_policy(),
-            &SpendPolicy::default(),
+            &spend_policy,
             None,
         )
         .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {e:?}")))?;
@@ -2272,8 +2430,32 @@ pub(crate) fn usk_from_seed_str(
 
 #[cfg(test)]
 mod tests {
-    use super::usk_from_seed_str;
+    use super::{transparent_transfer_policies, usk_from_seed_str};
     use crate::Network;
+    use zcash_client_backend::data_api::wallet::input_selection::{
+        CoinbasePolicy, TransparentSource,
+    };
+    use zcash_client_backend::fees::TransparentChangePolicy;
+    use zcash_protocol::ShieldedPool;
+
+    #[test]
+    fn transparent_transfer_policies_exclude_shielded_funds_and_allow_transparent_change() {
+        let (spend_policy, change_policy) = transparent_transfer_policies();
+
+        assert!(!spend_policy.permits_shielded(ShieldedPool::Sapling));
+        assert!(!spend_policy.permits_shielded(ShieldedPool::Orchard));
+        assert!(!spend_policy.permits_shielded(ShieldedPool::Ironwood));
+        let transparent = spend_policy.transparent().unwrap();
+        assert!(matches!(
+            transparent.source(),
+            TransparentSource::AnyAccountAddr
+        ));
+        assert_eq!(transparent.coinbase(), CoinbasePolicy::NonCoinbase);
+        assert_eq!(
+            change_policy,
+            TransparentChangePolicy::TransparentChangeAllowed
+        );
+    }
 
     #[test]
     fn usk_from_seed_str_uses_bip39_passphrase() {

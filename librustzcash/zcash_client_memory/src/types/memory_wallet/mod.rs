@@ -10,7 +10,7 @@ use std::{
 
 use ::transparent::bundle::OutPoint;
 #[cfg(feature = "transparent-inputs")]
-use ::transparent::keys::NonHardenedChildIndex;
+use ::transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
 use incrementalmerkletree::{Address, Level, Marking, Position, Retention};
 use scanning::ScanQueue;
 use shardtree::{
@@ -357,6 +357,44 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             first_unmined_index
                 .checked_add(account::EPHEMERAL_GAP_LIMIT)
                 .unwrap(),
+        ))
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) fn first_internal_gap_index(&self, account_id: AccountId) -> Result<u32, Error> {
+        let account = self
+            .accounts
+            .get(account_id)
+            .ok_or(Error::AccountUnknown(account_id))?;
+
+        Ok(self
+            .transparent_received_outputs
+            .values()
+            .filter(|output| {
+                output.account_id == account_id
+                    && output.key_scope == TransparentKeyScope::INTERNAL
+                    && self
+                        .tx_table
+                        .get(&output.transaction_id)
+                        .and_then(|tx| tx.mined_height())
+                        .is_some()
+            })
+            .filter_map(|output| account.internal_address_index(&output.address))
+            .max()
+            .map_or(0, |index| {
+                index
+                    .checked_add(1)
+                    .expect("internal address index is non-hardened")
+            }))
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) fn first_internal_unsafe_index(&self, account_id: AccountId) -> Result<u32, Error> {
+        Ok(core::cmp::min(
+            1 << 31,
+            self.first_internal_gap_index(account_id)?
+                .checked_add(account::INTERNAL_GAP_LIMIT)
+                .expect("internal gap limit fits in the non-hardened index range"),
         ))
     }
 

@@ -730,16 +730,14 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
     fn get_transparent_receivers(
         &self,
         account_id: Self::AccountId,
-        _include_change: bool,
+        include_change: bool,
         _include_standalone: bool,
     ) -> Result<HashMap<TransparentAddress, TransparentAddressMetadata>, Self::Error> {
         let account = self
             .get_account(account_id)?
             .ok_or(Error::AccountUnknown(account_id))?;
 
-        // This memory backend currently only tracks external derived transparent receivers.
-
-        let t_addresses = account
+        let mut t_addresses: HashMap<_, _> = account
             .addresses()
             .iter()
             .filter_map(|(diversifier_index, ua)| {
@@ -758,6 +756,12 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 })
             })
             .collect();
+
+        if include_change {
+            t_addresses
+                .extend(account.internal_addresses(self.first_internal_gap_index(account_id)?));
+        }
+
         Ok(t_addresses)
     }
 
@@ -784,6 +788,12 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 Exposure::Unknown,
                 None,
             )));
+        }
+
+        if let Some(metadata) = account
+            .metadata_for_internal_address(address, self.first_internal_gap_index(account_id)?)
+        {
+            return Ok(Some(metadata));
         }
 
         if let Some((_, metadata)) = account

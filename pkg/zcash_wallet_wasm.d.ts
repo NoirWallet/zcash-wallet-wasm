@@ -225,6 +225,7 @@ export class WebWallet {
     estimate_pczt_max_transfer(account_id: number, to_address: string, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<any>;
     estimate_pczt_shield_fee(account_id: number, marginal_fee_zats: bigint): Promise<bigint>;
     estimate_pczt_transfer_fee(account_id: number, to_address: string, value: bigint, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<bigint>;
+    estimate_pczt_transparent_transfer_fee(account_id: number, to_address: string, value: bigint, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint): Promise<bigint>;
     /**
      * Get the birthday height for a specific account
      *
@@ -399,6 +400,8 @@ export class WebWallet {
     oneclick_pczt_shield_dynamic_fee(account_id: number, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, marginal_fee_zats: bigint, expiry_delta_blocks?: number | null): Promise<string>;
     oneclick_pczt_transfer(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null, memo?: Uint8Array | null): Promise<string>;
     oneclick_pczt_transfer_dynamic_fee(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint, expiry_delta_blocks?: number | null): Promise<string>;
+    oneclick_pczt_transparent_transfer(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key?: ProofGenerationKey | null, memo?: Uint8Array | null): Promise<string>;
+    oneclick_pczt_transparent_transfer_dynamic_fee(account_id: number, to_address: string, value: bigint, usk: UnifiedSpendingKey, seed_fp: SeedFingerprint, sapling_proof_gen_key: ProofGenerationKey | null | undefined, memo: Uint8Array | null | undefined, marginal_fee_zats: bigint, expiry_delta_blocks?: number | null): Promise<string>;
     /**
      * Create an unsigned, unproven PCZT for a transfer (hardware wallet flow).
      *
@@ -777,6 +780,7 @@ export interface InitOutput {
     readonly webwallet_get_unified_addresses: (a: number, b: number) => number;
     readonly webwallet_get_next_shielded_address: (a: number, b: number) => number;
     readonly webwallet_oneclick_pczt_transfer: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number) => number;
+    readonly webwallet_oneclick_pczt_transparent_transfer: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number) => number;
     readonly webwallet_oneclick_pczt_shield: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly webwallet_create_account_ufvk: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => number;
     readonly webwallet_pczt_create: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: bigint) => number;
@@ -786,8 +790,10 @@ export interface InitOutput {
     readonly webwallet_estimate_orchard_migration_fee: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint) => number;
     readonly webwallet_pczt_prove_and_send: (a: number, b: number) => number;
     readonly webwallet_oneclick_pczt_transfer_dynamic_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: bigint, l: number) => number;
+    readonly webwallet_oneclick_pczt_transparent_transfer_dynamic_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: bigint, l: number) => number;
     readonly webwallet_oneclick_pczt_shield_dynamic_fee: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number) => number;
     readonly webwallet_estimate_pczt_transfer_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: bigint) => number;
+    readonly webwallet_estimate_pczt_transparent_transfer_fee: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: bigint) => number;
     readonly webwallet_estimate_pczt_max_transfer: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint) => number;
     readonly webwallet_estimate_pczt_shield_fee: (a: number, b: number, c: bigint) => number;
     readonly webwallet_get_latest_block: (a: number) => number;
@@ -837,11 +843,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_7959: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_7973: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3364: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_7965: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_3299: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_8008: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_8022: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3409: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_8014: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_3344: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

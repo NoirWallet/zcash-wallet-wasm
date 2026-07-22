@@ -1402,6 +1402,26 @@ Instead derive the ufvk in the calling code and import it using `import_account_
                             )?
                         }
                     }
+                    #[cfg(feature = "transparent-inputs")]
+                    Recipient::InternalTransparent {
+                        receiving_account,
+                        recipient_address,
+                    } => {
+                        let txo = WalletTransparentOutput::from_parts(
+                            OutPoint::new(
+                                sent_tx.tx().txid().into(),
+                                u32::try_from(output.output_index())
+                                    .expect("transparent output index fits into a u32"),
+                            ),
+                            TxOut::new(output.value(), recipient_address.script().into()),
+                            None,
+                            Some(*receiving_account),
+                            None,
+                            Some(*sent_tx.funding_account()),
+                        )
+                        .expect("transparent internal recipient has a standard address script");
+                        self.put_transparent_output(&txo, receiving_account, true)?;
+                    }
                     _ => {}
                 }
             }
@@ -1463,6 +1483,41 @@ Instead derive the ufvk in the calling code and import it using `import_account_
         } else {
             Err(Self::Error::AccountUnknown(account_id))
         }
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn reserve_next_n_internal_addresses(
+        &mut self,
+        account_id: Self::AccountId,
+        n: usize,
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Self::Error> {
+        use zcash_keys::keys::AddressGenerationError;
+
+        if n == 0 {
+            return Ok(vec![]);
+        }
+
+        let exposed_at_height = self.chain_height()?.ok_or(Error::ChainHeightUnknown)?;
+        let first_gap_index = self.first_internal_gap_index(account_id)?;
+        let first_unsafe = self.first_internal_unsafe_index(account_id)?;
+        let account = self
+            .accounts
+            .get_mut(account_id)
+            .ok_or(Error::AccountUnknown(account_id))?;
+        let first_unreserved = account.next_internal_address_index()?;
+        let allocation = range_from(first_unreserved, u32::try_from(n)?);
+
+        if allocation.len() < n {
+            return Err(AddressGenerationError::DiversifierSpaceExhausted.into());
+        }
+        if allocation.end > first_unsafe {
+            return Err(Error::ReachedGapLimit(
+                account_id,
+                core::cmp::max(first_unreserved, first_unsafe),
+            ));
+        }
+
+        account.reserve_internal_addresses(allocation.start, n, exposed_at_height, first_gap_index)
     }
 
     fn get_address_for_index(

@@ -510,6 +510,9 @@ pub struct Account {
     /// key source metadata
     #[prost(string, optional, tag = "11")]
     pub key_source: ::core::option::Option<::prost::alloc::string::String>,
+    /// map from internal child index to transparent change address
+    #[prost(message, repeated, tag = "12")]
+    pub internal_addresses: ::prost::alloc::vec::Vec<InternalAddressRecord>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AccountBirthday {
@@ -553,6 +556,15 @@ pub struct EphemeralAddressRecord {
     pub index: u32,
     #[prost(message, optional, tag = "2")]
     pub ephemeral_address: ::core::option::Option<EphemeralAddress>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InternalAddressRecord {
+    #[prost(uint32, tag = "1")]
+    pub index: u32,
+    #[prost(string, tag = "2")]
+    pub address: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub exposed_at_height: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ChainState {

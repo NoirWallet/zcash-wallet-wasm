@@ -78,6 +78,7 @@ message Account {
   repeated EphemeralAddressRecord ephemeral_addresses = 9; // map from index to encoded unified address
   string account_name = 10; // human readable name for the account
   optional string key_source = 11; // key source metadata
+  repeated InternalAddressRecord internal_addresses = 12; // map from internal child index to transparent change address
 }
 
 enum AccountKind {
@@ -117,6 +118,12 @@ message EphemeralAddress {
 message EphemeralAddressRecord {
   uint32 index = 1;
   EphemeralAddress ephemeral_address = 2;
+}
+
+message InternalAddressRecord {
+  uint32 index = 1;
+  string address = 2;
+  uint32 exposed_at_height = 3;
 }
 
 message ChainState {
