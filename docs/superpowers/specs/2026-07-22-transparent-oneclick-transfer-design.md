@@ -17,6 +17,30 @@ Both methods parse the destination with `ZcashAddress`, create a PCZT, sign ever
 
 No existing transfer method changes its public signature or funding policy. No unsigned hardware-wallet API is added in this change.
 
+### Fee Estimation
+
+Expose one additional `WebWallet` method:
+
+```text
+estimate_pczt_transparent_transfer_fee(
+    account_id,
+    to_address,
+    value,
+    memo,
+    marginal_fee_zats,
+) -> fee_zats
+```
+
+This is the transparent-source counterpart to `estimate_pczt_transfer_fee`. It uses the same
+transparent-only spend policy and `TransparentChangePolicy::TransparentChangeAllowed` as
+`oneclick_pczt_transparent_transfer_dynamic_fee`, so the estimate and send paths select the same
+class of inputs and model the same change output. Passing `5000` selects the standard ZIP-317
+marginal fee.
+
+Keeping this as a separate method preserves the existing estimator's shielded funding behavior.
+Adding a funding-mode argument to the existing method would change its public signature, while a
+second fixed-fee estimator would duplicate the dynamic estimator's standard-fee case.
+
 ## Funding Policy
 
 The new methods use a transparent-only spend policy:
@@ -82,5 +106,6 @@ Tests must cover the behavior at the lowest practical layer and the exported int
 5. Internal change addresses are sequential, discoverable, scoped as internal, and preserved by wallet serialization.
 6. Transparent PCZT inputs are signed by the existing one-click signer.
 7. Both fixed-fee and dynamic-fee WASM methods compile and appear in the generated bindings after rebuilding the package.
+8. The transparent fee estimator uses the transparent-only policy and appears in the generated WASM bindings.
 
 Verification includes focused memory-backend tests, root Rust tests, formatting, a WASM target check, and rebuilding the tracked `pkg` artifacts.
