@@ -11,8 +11,8 @@ mod wallet_write;
 pub mod testing;
 pub use block_source::*;
 pub use error::Error;
-pub use types::MemoryWalletDb;
 pub(crate) use types::*;
+pub use types::{MemoryWalletDb, SpendabilityDiagnostics};
 
 /// The maximum number of blocks the wallet is allowed to rewind. This is
 /// consistent with the bound in zcashd, and allows block data deeper than

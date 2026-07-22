@@ -275,6 +275,17 @@ impl<P, T> Wallet<MemoryWalletDb<P>, T>
 where
     P: Parameters,
 {
+    pub async fn spendability_diagnostics(
+        &self,
+        account_id: <MemoryWalletDb<P> as WalletRead>::AccountId,
+    ) -> Result<zcash_client_memory::SpendabilityDiagnostics, Error> {
+        Ok(self
+            .db
+            .read()
+            .await
+            .spendability_diagnostics(account_id, ConfirmationsPolicy::default())?)
+    }
+
     // Encodes the MemoryWallet into protobuf bytes
     pub async fn db_to_bytes(&self) -> Result<Vec<u8>, Error> {
         let mut memory_wallet_bytes = Vec::new();
@@ -1777,6 +1788,7 @@ where
             None,
             SpendPolicy::default(),
             TransparentChangePolicy::ShieldChange,
+            true,
         )
         .await
     }
@@ -1800,6 +1812,7 @@ where
             Some(expiry_delta_blocks),
             SpendPolicy::default(),
             TransparentChangePolicy::ShieldChange,
+            true,
         )
         .await
     }
@@ -1822,6 +1835,7 @@ where
             None,
             spend_policy,
             transparent_change_policy,
+            false,
         )
         .await
     }
@@ -1846,6 +1860,7 @@ where
             Some(expiry_delta_blocks),
             spend_policy,
             transparent_change_policy,
+            false,
         )
         .await
     }
@@ -1861,6 +1876,7 @@ where
         expiry_delta_blocks: Option<u32>,
         spend_policy: SpendPolicy,
         transparent_change_policy: TransparentChangePolicy,
+        allow_send_max_fallback: bool,
     ) -> Result<Pczt, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
@@ -1879,9 +1895,9 @@ where
         let input_selector = GreedyInputSelector::new();
         let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
         let payment = Payment::new(
-            to_address,
+            to_address.clone(),
             Some(Zatoshis::from_u64(value)?),
-            memo,
+            memo.clone(),
             None,
             None,
             vec![],
@@ -1889,7 +1905,7 @@ where
         .map_err(|e| Error::Zip321(e.with_index(0)))?;
         let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
-        let proposal = propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+        let proposal = match propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
             &mut *db,
             &self.network,
             account_id,
@@ -1899,12 +1915,40 @@ where
             self.confirmations_policy(),
             &spend_policy,
             None,
-        )
-        .map_err(|e| {
-            Error::Generic(format!(
-                "Failed to propose transfer. Possibly insufficient permitted funds: {e:?}"
-            ))
-        })?;
+        ) {
+            Ok(proposal) => proposal,
+            Err(transfer_error) => {
+                let max_proposal = if allow_send_max_fallback {
+                    propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+                        &mut *db,
+                        &self.network,
+                        account_id,
+                        &[
+                            ShieldedPool::Sapling,
+                            ShieldedPool::Orchard,
+                            ShieldedPool::Ironwood,
+                        ],
+                        &dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                        to_address,
+                        memo,
+                        MaxSpendMode::MaxSpendable,
+                        self.confirmations_policy(),
+                    )
+                    .ok()
+                } else {
+                    None
+                };
+
+                match max_proposal {
+                    Some(proposal) if proposal_payment_amount_zats(&proposal)? == value => proposal,
+                    _ => {
+                        return Err(Error::Generic(format!(
+                            "Failed to propose transfer. Possibly insufficient permitted funds: {transfer_error:?}"
+                        )));
+                    }
+                }
+            }
+        };
         let pczt = match expiry_delta_blocks {
             Some(expiry_delta_blocks) => create_pczt_from_proposal::<
                 _,

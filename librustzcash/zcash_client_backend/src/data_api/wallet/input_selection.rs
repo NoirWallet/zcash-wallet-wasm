@@ -10,16 +10,12 @@ use std::{
 use transparent::bundle::TxOut;
 use zcash_address::{ConversionError, ZcashAddress};
 use zcash_keys::address::{Address, UnifiedAddress};
-use zcash_primitives::transaction::fees::{
-    FeeRule,
-    transparent::InputSize,
-    zip317::{P2PKH_STANDARD_INPUT_SIZE, P2PKH_STANDARD_OUTPUT_SIZE},
-};
+use zcash_primitives::transaction::fees::{FeeRule, zip317::P2PKH_STANDARD_OUTPUT_SIZE};
 use zcash_protocol::{
     PoolType, ShieldedPool,
     consensus::{self, BlockHeight},
     memo::MemoBytes,
-    value::{BalanceError, Zatoshis},
+    value::{BalanceError, MAX_MONEY, Zatoshis},
 };
 use zip321::TransactionRequest;
 
@@ -44,7 +40,9 @@ use {
     },
     std::convert::Infallible,
     transparent::{address::TransparentAddress, bundle::OutPoint},
-    zcash_primitives::transaction::fees::transparent as transparent_fees,
+    zcash_primitives::transaction::fees::{
+        transparent as transparent_fees, transparent::InputSize, zip317::P2PKH_STANDARD_INPUT_SIZE,
+    },
     zip321::Payment,
 };
 
@@ -1477,7 +1475,12 @@ pub(crate) fn propose_send_max<ParamsT, InputSourceT, FeeRuleT>(
     memo: Option<MemoBytes>,
 ) -> Result<
     Proposal<FeeRuleT, InputSourceT::NoteRef>,
-    InputSelectorError<InputSourceT::Error, BalanceError, FeeRuleT::Error, InputSourceT::NoteRef>,
+    InputSelectorError<
+        InputSourceT::Error,
+        GreedyInputSelectorError,
+        FeeRuleT::Error,
+        InputSourceT::NoteRef,
+    >,
 >
 where
     ParamsT: consensus::Parameters,
@@ -1497,21 +1500,27 @@ where
 
     let input_total = spendable_notes
         .total_value()
-        .map_err(InputSelectorError::Selection)?;
+        .map_err(|e| InputSelectorError::Selection(GreedyInputSelectorError::Balance(e)))?;
 
     let mut payment_pools = BTreeMap::new();
 
+    // An Orchard receiver takes precedence only when this build can produce Orchard-family
+    // outputs. Otherwise a recipient with both receiver types must fall back to Sapling.
+    #[cfg(feature = "orchard")]
+    let orchard_receiver_payable = recipient.can_receive_as(PoolType::ORCHARD);
+    #[cfg(not(feature = "orchard"))]
+    let orchard_receiver_payable = false;
+
     let sapling_output_count = {
-        // we require a sapling output if the recipient has a Sapling receiver but not an Orchard
-        // receiver.
-        let requested_sapling_outputs: usize = if recipient.can_receive_as(PoolType::SAPLING)
-            && !recipient.can_receive_as(PoolType::ORCHARD)
-        {
-            payment_pools.insert(0, PoolType::SAPLING);
-            1
-        } else {
-            0
-        };
+        // We require a Sapling output when the recipient has a Sapling receiver and cannot be
+        // paid through an Orchard-family output.
+        let requested_sapling_outputs: usize =
+            if recipient.can_receive_as(PoolType::SAPLING) && !orchard_receiver_payable {
+                payment_pools.insert(0, PoolType::SAPLING);
+                1
+            } else {
+                0
+            };
 
         ::sapling::builder::BundleType::DEFAULT
             .num_outputs(spendable_notes.sapling.len(), requested_sapling_outputs)
@@ -1524,11 +1533,9 @@ where
     // once Ironwood is active (delivered to the Orchard receiver via the Ironwood bundle), and as
     // an Orchard-pool output otherwise. The per-bundle action counts below reflect that split.
     #[cfg(feature = "orchard")]
-    let orchard_receiver_present = recipient.can_receive_as(PoolType::ORCHARD);
-    #[cfg(feature = "orchard")]
     let orchard_receivers_fill_ironwood = ironwood_active_at(params, target_height);
     #[cfg(feature = "orchard")]
-    if orchard_receiver_present {
+    if orchard_receiver_payable {
         payment_pools.insert(
             0,
             if orchard_receivers_fill_ironwood {
@@ -1546,7 +1553,7 @@ where
         ::orchard::builder::BundleType::DEFAULT,
         orchard_bundle_version_for_height(params, target_height),
         spendable_notes.orchard.len(),
-        usize::from(orchard_receiver_present && !orchard_receivers_fill_ironwood),
+        usize::from(orchard_receiver_payable && !orchard_receivers_fill_ironwood),
     )
     .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?;
     #[cfg(not(feature = "orchard"))]
@@ -1556,13 +1563,13 @@ where
     let orchard_bundle_required = orchard_action_count > 0;
 
     #[cfg(feature = "orchard")]
-    let ironwood_action_count = orchard::builder::BundleType::DEFAULT
-        .num_actions(
-            orchard::bundle::Flags::ENABLED,
-            spendable_notes.ironwood.len(),
-            usize::from(orchard_receiver_present && orchard_receivers_fill_ironwood),
-        )
-        .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?;
+    let ironwood_action_count = orchard_fees::transactional_action_count(
+        ::orchard::builder::BundleType::DEFAULT,
+        ironwood_bundle_version_for_height(params, target_height),
+        spendable_notes.ironwood.len(),
+        usize::from(orchard_receiver_payable && orchard_receivers_fill_ironwood),
+    )
+    .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?;
     #[cfg(not(feature = "orchard"))]
     let ironwood_action_count: usize = 0;
 
@@ -1583,6 +1590,14 @@ where
             payment_pools.insert(0, PoolType::TRANSPARENT);
         }
         Address::Sapling(_) | Address::Unified(_) | Address::Tex(_) => {}
+    }
+
+    if payment_pools.is_empty() {
+        if let Address::Unified(addr) = &recipient_address {
+            return Err(InputSelectorError::Selection(
+                GreedyInputSelectorError::UnsupportedAddress(Box::new(addr.clone())),
+            ));
+        }
     }
 
     let (tr0_fee, tr1_fee) = match recipient_address {
@@ -1626,6 +1641,13 @@ where
                 ironwood_action_count,
             )
             .map(|fee| (fee, None)),
+        #[cfg(not(feature = "transparent-inputs"))]
+        Address::Tex(_) => {
+            return Err(InputSelectorError::Selection(
+                GreedyInputSelectorError::UnsupportedTexAddress,
+            ));
+        }
+        #[cfg(feature = "transparent-inputs")]
         Address::Tex(_) => fee_rule
             .fee_required(
                 params,
@@ -1658,16 +1680,19 @@ where
     // of TEX it means the fee requied to send the max value to the ephemeral
     // address + the fee to send the value in that ephemeral change address to
     // the TEX address.
-    let total_fee_required = (tr0_fee + tr1_fee.unwrap_or(Zatoshis::ZERO))
-        .expect("fee value addition does not overflow");
+    let total_fee_required = (tr0_fee + tr1_fee.unwrap_or(Zatoshis::ZERO)).ok_or(
+        InputSelectorError::Selection(GreedyInputSelectorError::Balance(BalanceError::Overflow)),
+    )?;
 
     // the total amount involved in the "send max" operation. This is the total
     // spendable value present in the wallet minus the fees required to perform
     // the send max operation.
-    let total_to_recipient =
-        (input_total - total_fee_required).ok_or(InputSelectorError::InsufficientFunds {
+    let total_to_recipient = (input_total - total_fee_required)
+        .filter(|amount| *amount > Zatoshis::ZERO)
+        .ok_or(InputSelectorError::InsufficientFunds {
             available: input_total,
-            required: total_fee_required,
+            required: (total_fee_required + Zatoshis::const_from_u64(1))
+                .unwrap_or(Zatoshis::const_from_u64(MAX_MONEY)),
         })?;
 
     // when the recipient of the send max operation is a TEX address this is the

@@ -20,6 +20,22 @@ fn shielded_send_max_routes_to_transparent() {
 }
 
 #[test]
+#[cfg(feature = "transparent-inputs")]
+fn send_max_rejects_fee_only_transfer() {
+    testing::pool::send_max_rejects_fee_only_transfer()
+}
+
+#[test]
+fn dust_note_is_reported_as_uneconomic() {
+    testing::pool::dust_note_is_reported_as_uneconomic()
+}
+
+#[test]
+fn incomplete_note_metadata_is_not_reported_as_spendable() {
+    testing::pool::incomplete_note_metadata_is_not_reported_as_spendable()
+}
+
+#[test]
 #[ignore] //FIXME
 #[cfg(feature = "transparent-inputs")]
 fn send_multi_step_proposed_transfer() {

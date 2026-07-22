@@ -36,6 +36,19 @@ impl WebWallet {
     pub fn inner_mut(&mut self) -> &mut MemoryWallet<tonic_web_wasm_client::Client> {
         &mut self.inner
     }
+
+    async fn ensure_spendability_consistent(&self, account_id: AccountId) -> Result<(), Error> {
+        let diagnostics = self.inner.spendability_diagnostics(account_id).await?;
+        if diagnostics.incomplete_note_count() > 0 {
+            Err(Error::SpendabilityMetadataIncomplete {
+                account_id: *account_id,
+                note_count: diagnostics.incomplete_note_count(),
+                value_zats: diagnostics.incomplete_value().into(),
+            })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -894,15 +907,11 @@ impl WebWallet {
         memo: Option<Vec<u8>>,
         marginal_fee_zats: u64,
     ) -> Result<u64, Error> {
+        let account_id = AccountId::from(account_id);
+        self.ensure_spendability_consistent(account_id).await?;
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
         self.inner
-            .estimate_pczt_transfer_fee(
-                AccountId::from(account_id),
-                to_address,
-                value,
-                memo,
-                marginal_fee_zats,
-            )
+            .estimate_pczt_transfer_fee(account_id, to_address, value, memo, marginal_fee_zats)
             .await
     }
 
@@ -941,15 +950,13 @@ impl WebWallet {
             fee_zats: String,
         }
 
+        let account_id = AccountId::from(account_id);
+        self.ensure_spendability_consistent(account_id).await?;
+
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
         let (max_amount_zats, fee_zats) = self
             .inner
-            .estimate_pczt_max_transfer(
-                AccountId::from(account_id),
-                to_address,
-                memo,
-                marginal_fee_zats,
-            )
+            .estimate_pczt_max_transfer(account_id, to_address, memo, marginal_fee_zats)
             .await?;
 
         serde_wasm_bindgen::to_value(&MaxTransferEstimate {

@@ -29,10 +29,11 @@ use zcash_client_backend::{
     wallet::{NoteId, WalletSaplingOutput},
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_primitives::transaction::Transaction;
+use zcash_primitives::transaction::{Transaction, fees::zip317};
 use zcash_protocol::{
     ShieldedPool, TxId,
     consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
+    value::Zatoshis,
 };
 use zip32::{Scope, fingerprint::SeedFingerprint};
 
@@ -115,6 +116,31 @@ pub struct MemoryWalletDb<P: consensus::Parameters> {
     pub(crate) transaction_data_request_queue: TransactionDataRequestQueue,
     /// Queue of block ranges that should be scanned along with their priority
     pub(crate) scan_queue: ScanQueue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpendabilityDiagnostics {
+    incomplete_note_count: usize,
+    incomplete_value: Zatoshis,
+}
+
+impl Default for SpendabilityDiagnostics {
+    fn default() -> Self {
+        Self {
+            incomplete_note_count: 0,
+            incomplete_value: Zatoshis::ZERO,
+        }
+    }
+}
+
+impl SpendabilityDiagnostics {
+    pub fn incomplete_note_count(&self) -> usize {
+        self.incomplete_note_count
+    }
+
+    pub fn incomplete_value(&self) -> Zatoshis {
+        self.incomplete_value
+    }
 }
 
 impl<P: consensus::Parameters + PartialEq> PartialEq for MemoryWalletDb<P> {
@@ -502,7 +528,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
     /// To be spendable a note must be:
     /// - unspent (obviously)
-    /// - not dust (value > 5000 ZATs)
+    /// - not dust (value greater than the ZIP 317 marginal fee)
     /// - be associated with an account with a ufvk
     /// - have a recipient key scope
     /// - We know the nullifier
@@ -548,7 +574,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
         Ok(!self.note_is_spent(note, target_height)?
             && !note_in_unscanned_range
-            && note.note.value().into_u64() > 5000
+            && note.note.value() > zip317::MARGINAL_FEE
             && note_account.ufvk().is_some()
             && note.nullifier().is_some()
             && note.commitment_tree_position.is_some()
@@ -565,6 +591,65 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 None => false,
             }
             && !exclude.contains(&note.note_id()))
+    }
+
+    pub fn spendability_diagnostics(
+        &self,
+        account_id: AccountId,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<SpendabilityDiagnostics, Error> {
+        let chain_tip_height = match self.chain_height()? {
+            Some(height) => height,
+            None => return Ok(SpendabilityDiagnostics::default()),
+        };
+        let target_height = TargetHeight::from(chain_tip_height + 1);
+        let birthday_height = match self.get_wallet_birthday()? {
+            Some(height) => height,
+            None => return Ok(SpendabilityDiagnostics::default()),
+        };
+        let mut diagnostics = SpendabilityDiagnostics::default();
+
+        for note in self
+            .received_notes
+            .iter()
+            .filter(|note| note.account_id() == account_id)
+        {
+            if note.note.value() <= zip317::MARGINAL_FEE
+                || self.note_is_spent(note, target_height)?
+                || self.note_is_pending(note, target_height, confirmations_policy)?
+                || self.note_is_spendable(
+                    note,
+                    birthday_height,
+                    target_height,
+                    confirmations_policy,
+                    &[],
+                )?
+            {
+                continue;
+            }
+
+            let account = self
+                .get_account(note.account_id())?
+                .ok_or(Error::AccountUnknown(note.account_id()))?;
+            let transaction = self
+                .tx_table
+                .get(&note.txid())
+                .ok_or_else(|| Error::TransactionNotFound(note.txid()))?;
+            let metadata_incomplete = account.ufvk().is_none()
+                || note.nullifier().is_none()
+                || note.commitment_tree_position.is_none()
+                || transaction.mined_height().is_none()
+                || note.recipient_key_scope.is_none();
+
+            if metadata_incomplete {
+                diagnostics.incomplete_note_count += 1;
+                diagnostics.incomplete_value =
+                    (diagnostics.incomplete_value + note.note.value())
+                        .ok_or(zcash_protocol::value::BalanceError::Overflow)?;
+            }
+        }
+
+        Ok(diagnostics)
     }
 
     /// To be pending a note must be:

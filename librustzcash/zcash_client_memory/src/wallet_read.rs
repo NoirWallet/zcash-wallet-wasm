@@ -26,7 +26,7 @@ use zcash_client_backend::{
 use zcash_keys::{address::UnifiedAddress, keys::UnifiedIncomingViewingKey};
 use zcash_primitives::{
     block::BlockHash,
-    transaction::{Transaction, TransactionData, TxId},
+    transaction::{Transaction, TransactionData, TxId, fees::zip317},
 };
 use zcash_protocol::{
     PoolType,
@@ -221,20 +221,6 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             if self.note_is_spent(note, target_height)? {
                 continue;
             }
-            // Notes in unscanned ranges contribute to the total balance, but are not spendable.
-            let note_in_unscanned_range = self.unscanned_ranges(note.note.pool()).into_iter().any(
-                |(_, _, start_position, end_position_exclusive)| {
-                    note.commitment_tree_position.is_some_and(|position| {
-                        if let (Some(start), Some(end_exclusive)) =
-                            (start_position, end_position_exclusive)
-                        {
-                            position >= start && position < end_exclusive
-                        } else {
-                            true
-                        }
-                    })
-                },
-            );
             // Don't count notes in unmined transactions that have expired.
             if let Some(note_tx) = self.tx_table.get_transaction(&note.txid) {
                 if note_tx.mined_height().is_none()
@@ -255,18 +241,26 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 .get_mut(&account_id)
                 .expect("Account balance should exist");
 
-            // Given a note update the balance for the account
-            // This includes determining if it is change, spendable, etc
+            let note_is_spendable = self.note_is_spendable(
+                note,
+                birthday_height,
+                target_height,
+                confirmations_policy,
+                &[],
+            )?;
+
+            // Keep the summary aligned with input selection: dust is uneconomic, while confirmed
+            // notes that still lack witness metadata remain pending until a rescan repairs them.
             let update_balance_with_note = |b: &mut Balance| -> Result<(), Error> {
-                match (
-                    note_in_unscanned_range
-                        || self.note_is_pending(note, target_height, confirmations_policy)?,
-                    note.is_change,
-                ) {
-                    (true, true) => b.add_pending_change_value(note.note.value()),
-                    (true, false) => b.add_pending_spendable_value(note.note.value()),
-                    (false, _) => b.add_spendable_value(note.note.value()),
-                }?;
+                if note.note.value() <= zip317::MARGINAL_FEE {
+                    b.add_uneconomic_value(note.note.value())?;
+                } else {
+                    match (note_is_spendable, note.is_change) {
+                        (true, _) => b.add_spendable_value(note.note.value()),
+                        (false, true) => b.add_pending_change_value(note.note.value()),
+                        (false, false) => b.add_pending_spendable_value(note.note.value()),
+                    }?;
+                }
                 Ok(())
             };
 
