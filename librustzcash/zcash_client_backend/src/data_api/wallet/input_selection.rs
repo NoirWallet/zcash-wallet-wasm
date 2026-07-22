@@ -1573,6 +1573,18 @@ where
         .clone()
         .convert_if_network(params.network_type())?;
 
+    match &recipient_address {
+        Address::Transparent(_) => {
+            payment_pools.insert(0, PoolType::TRANSPARENT);
+        }
+        Address::Unified(addr)
+            if addr.has_transparent() && !(addr.has_sapling() || addr.has_orchard()) =>
+        {
+            payment_pools.insert(0, PoolType::TRANSPARENT);
+        }
+        Address::Sapling(_) | Address::Unified(_) | Address::Tex(_) => {}
+    }
+
     let (tr0_fee, tr1_fee) = match recipient_address {
         Address::Sapling(_) => fee_rule
             .fee_required(

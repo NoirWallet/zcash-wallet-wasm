@@ -14,6 +14,12 @@ fn send_max_routes_orchard_to_ironwood() {
 }
 
 #[test]
+#[cfg(feature = "transparent-inputs")]
+fn shielded_send_max_routes_to_transparent() {
+    testing::pool::shielded_send_max_routes_to_transparent()
+}
+
+#[test]
 #[ignore] //FIXME
 #[cfg(feature = "transparent-inputs")]
 fn send_multi_step_proposed_transfer() {
