@@ -806,7 +806,7 @@ where
         batch_size: Option<u32>,
         optimized: bool,
         refresh: bool,
-        mut timings: Option<&mut [f64; 4]>,
+        timings: Option<&mut [f64; 4]>,
     ) -> Result<Option<Vec<u8>>, Error> {
         use prost::Message;
         use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
@@ -1009,7 +1009,7 @@ where
         }
 
         let t_stage_scan = js_sys::Date::now();
-        if let Some(t) = timings.as_deref_mut() {
+        if let Some(t) = timings {
             t[0] = t_sub - t_after_tip; // subtree roots
             t[1] = (t_after_tip - t_stage0) + (t_stage_setup - t_sub); // chain tip + UTXO refresh + verify
             t[2] = t_stage_dl - t_stage_setup; // block + tree-state download
