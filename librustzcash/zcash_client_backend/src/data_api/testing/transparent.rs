@@ -13,7 +13,7 @@ use zcash_keys::{
     keys::{UnifiedAddressRequest, transparent::gap_limits::GapLimits},
 };
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::{local_consensus::LocalNetwork, value::Zatoshis};
+use zcash_protocol::{local_consensus::LocalNetwork, memo::MemoBytes, value::Zatoshis};
 use zip321::{Payment, TransactionRequest};
 
 #[cfg(feature = "transparent-key-import")]
@@ -31,6 +31,7 @@ use crate::{
         wallet::{
             ConfirmationsPolicy, TargetHeight, decrypt_and_store_transaction,
             input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
+            propose_send_max_transparent_transfer,
         },
     },
     fees::{DustOutputPolicy, StandardFeeRule, standard},
@@ -2440,6 +2441,112 @@ where
         )
         .expect("AllFunds gather should succeed");
     assert_eq!(all.len(), n_dust);
+}
+
+pub fn transparent_send_max_uses_only_transparent_inputs<DSF>(dsf: DSF, cache: impl TestCache)
+where
+    DSF: DataStoreFactory,
+{
+    use std::convert::Infallible;
+
+    let mut st = TestBuilder::new()
+        .with_data_store_factory(dsf)
+        .with_block_cache(cache)
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+
+    let account = st.test_account().cloned().unwrap();
+    let uaddr = st
+        .wallet()
+        .get_last_generated_address_matching(account.id(), UnifiedAddressRequest::AllAvailableKeys)
+        .unwrap()
+        .unwrap();
+    let taddr = *uaddr.transparent().unwrap();
+
+    let not_our_key = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
+    let not_our_value = Zatoshis::const_from_u64(10_000);
+    let (start_height, _, _) =
+        st.generate_next_block(&not_our_key, AddressType::DefaultExternal, not_our_value);
+    for _ in 1..10 {
+        st.generate_next_block(&not_our_key, AddressType::DefaultExternal, not_our_value);
+    }
+    st.scan_cached_blocks(start_height, 10);
+
+    let height = st.wallet().chain_height().unwrap().unwrap();
+    let input_value = Zatoshis::const_from_u64(40_000);
+    for index in 0..2u32 {
+        let mut hash = [0u8; 32];
+        hash[..4].copy_from_slice(&index.to_le_bytes());
+        let utxo = WalletTransparentOutput::from_parts(
+            OutPoint::new(hash, 0),
+            TxOut::new(input_value, taddr.script().into()),
+            Some(height),
+            Some(account.id()),
+            Some(TransparentKeyScope::EXTERNAL),
+            None,
+        )
+        .unwrap();
+        st.wallet_mut()
+            .put_received_transparent_utxo(&utxo)
+            .unwrap();
+    }
+
+    let network = *st.network();
+    let proposal = propose_send_max_transparent_transfer::<_, _, _, Infallible>(
+        st.wallet_mut(),
+        &network,
+        account.id(),
+        &StandardFeeRule::Zip317,
+        Address::Transparent(taddr).to_zcash_address(&network),
+        None,
+        ConfirmationsPolicy::MIN,
+    )
+    .expect("transparent send-max proposal should succeed");
+    let step = &proposal.steps().head;
+
+    assert_eq!(
+        step.input_count_in_pool(zcash_protocol::PoolType::TRANSPARENT),
+        2
+    );
+    assert_eq!(
+        step.transaction_request()
+            .payments()
+            .get(&0)
+            .and_then(|payment| payment.amount()),
+        Some(Zatoshis::const_from_u64(70_000)),
+    );
+    assert_eq!(
+        step.balance().fee_required(),
+        Zatoshis::const_from_u64(10_000),
+    );
+    assert!(step.balance().proposed_change().is_empty());
+
+    let shielded_proposal = propose_send_max_transparent_transfer::<_, _, _, Infallible>(
+        st.wallet_mut(),
+        &network,
+        account.id(),
+        &StandardFeeRule::Zip317,
+        Address::Unified(uaddr).to_zcash_address(&network),
+        Some(MemoBytes::from_bytes(b"private memo").unwrap()),
+        ConfirmationsPolicy::MIN,
+    )
+    .expect("transparent send-max proposal to a shielded recipient should succeed");
+    let shielded_step = &shielded_proposal.steps().head;
+    assert_ne!(
+        shielded_step.payment_pools().get(&0),
+        Some(&zcash_protocol::PoolType::TRANSPARENT),
+    );
+    let shielded_amount = shielded_step
+        .transaction_request()
+        .payments()
+        .get(&0)
+        .and_then(|payment| payment.amount())
+        .unwrap();
+    assert_eq!(
+        (shielded_amount + shielded_step.balance().fee_required()).unwrap(),
+        Zatoshis::const_from_u64(80_000),
+    );
+    assert!(shielded_step.balance().proposed_change().is_empty());
 }
 
 /// Tests that [`WalletWrite::reserve_next_n_internal_addresses`] reserves sequential

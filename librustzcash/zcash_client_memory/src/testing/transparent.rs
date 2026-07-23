@@ -53,3 +53,11 @@ fn value_bounded_transparent_gather() {
         MemBlockCache::new(),
     );
 }
+
+#[test]
+fn transparent_send_max_uses_only_transparent_inputs() {
+    zcash_client_backend::data_api::testing::transparent::transparent_send_max_uses_only_transparent_inputs(
+        TestMemDbFactory::new(),
+        MemBlockCache::new(),
+    );
+}

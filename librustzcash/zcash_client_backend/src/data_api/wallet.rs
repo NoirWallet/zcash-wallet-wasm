@@ -57,6 +57,9 @@ use crate::{
     proposal::{Proposal, ProposalError, Step, StepOutputIndex},
     wallet::{Note, OvkPolicy, Recipient},
 };
+
+#[cfg(feature = "transparent-inputs")]
+use crate::data_api::wallet::input_selection::propose_send_max_transparent;
 use sapling::{
     note_encryption::{PreparedIncomingViewingKey, try_sapling_note_decryption},
     prover::{OutputProver, SpendProver},
@@ -860,6 +863,49 @@ where
     )?;
 
     Ok(proposal)
+}
+
+#[cfg(feature = "transparent-inputs")]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+pub fn propose_send_max_transparent_transfer<DbT, ParamsT, FeeRuleT, CommitmentTreeErrT>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    spend_from_account: <DbT as InputSource>::AccountId,
+    fee_rule: &FeeRuleT,
+    recipient: ZcashAddress,
+    memo: Option<MemoBytes>,
+    confirmations_policy: ConfirmationsPolicy,
+) -> Result<
+    Proposal<FeeRuleT, <DbT as InputSource>::NoteRef>,
+    ProposeSendMaxErrT<DbT, CommitmentTreeErrT, FeeRuleT>,
+>
+where
+    DbT: WalletRead + InputSource<Error = <DbT as WalletRead>::Error>,
+    <DbT as InputSource>::NoteRef: Copy + Eq + Ord,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule + Clone,
+{
+    let (target_height, anchor_height) = wallet_db
+        .get_target_and_anchor_heights(confirmations_policy.trusted())
+        .map_err(|e| Error::from(InputSelectorError::DataSource(e)))?
+        .ok_or_else(|| Error::from(InputSelectorError::SyncRequired))?;
+
+    if memo.is_some() && !recipient.can_receive_memo() {
+        return Err(Error::Payment(zip321::PaymentError::TransparentMemo));
+    }
+
+    Ok(propose_send_max_transparent(
+        params,
+        wallet_db,
+        fee_rule,
+        spend_from_account,
+        target_height,
+        anchor_height,
+        confirmations_policy,
+        recipient,
+        memo,
+    )?)
 }
 
 /// Constructs a proposal to shield all of the funds belonging to the provided set of

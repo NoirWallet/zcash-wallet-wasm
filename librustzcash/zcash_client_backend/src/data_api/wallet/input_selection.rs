@@ -1767,6 +1767,200 @@ where
 }
 
 #[cfg(feature = "transparent-inputs")]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub(crate) fn propose_send_max_transparent<ParamsT, InputSourceT, FeeRuleT>(
+    params: &ParamsT,
+    wallet_db: &InputSourceT,
+    fee_rule: &FeeRuleT,
+    source_account: InputSourceT::AccountId,
+    target_height: TargetHeight,
+    anchor_height: BlockHeight,
+    confirmations_policy: ConfirmationsPolicy,
+    recipient: ZcashAddress,
+    memo: Option<MemoBytes>,
+) -> Result<
+    Proposal<FeeRuleT, InputSourceT::NoteRef>,
+    InputSelectorError<
+        InputSourceT::Error,
+        GreedyInputSelectorError,
+        FeeRuleT::Error,
+        InputSourceT::NoteRef,
+    >,
+>
+where
+    ParamsT: consensus::Parameters,
+    InputSourceT: InputSource,
+    FeeRuleT: FeeRule + Clone,
+{
+    let transparent_inputs = wallet_db
+        .select_spendable_transparent_outputs(
+            source_account,
+            target_height,
+            confirmations_policy,
+            CoinbaseFilter::NonCoinbaseOnly,
+            None,
+            TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
+            shielding_max_inputs(DEFAULT_SHIELDING_BLOCK_SPACE_PERCENT),
+            &StandardFeeRule::Zip317,
+        )
+        .map_err(InputSelectorError::DataSource)?
+        .into_iter()
+        .map(WalletTransparentOutput::redact_account_data)
+        .collect::<Vec<_>>();
+
+    let input_total = transparent_inputs
+        .iter()
+        .map(WalletTransparentOutput::value)
+        .try_fold(Zatoshis::ZERO, |acc, value| acc + value)
+        .ok_or(InputSelectorError::Selection(
+            GreedyInputSelectorError::Balance(BalanceError::Overflow),
+        ))?;
+
+    let recipient_address: Address = recipient
+        .clone()
+        .convert_if_network(params.network_type())?;
+    let (
+        payment_pool,
+        transparent_output_sizes,
+        sapling_output_count,
+        orchard_action_count,
+        ironwood_action_count,
+    ) = match recipient_address {
+        Address::Transparent(_) => (
+            PoolType::TRANSPARENT,
+            vec![P2PKH_STANDARD_OUTPUT_SIZE],
+            0usize,
+            0usize,
+            0usize,
+        ),
+        Address::Sapling(_) => (
+            PoolType::SAPLING,
+            vec![],
+            ::sapling::builder::BundleType::DEFAULT
+                .num_outputs(0, 1)
+                .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?,
+            0usize,
+            0usize,
+        ),
+        Address::Unified(address) if address.has_orchard() => {
+            #[cfg(feature = "orchard")]
+            {
+                if ironwood_active_at(params, target_height) {
+                    (
+                        PoolType::IRONWOOD,
+                        vec![],
+                        0usize,
+                        0usize,
+                        orchard_fees::transactional_action_count(
+                            ::orchard::builder::BundleType::DEFAULT,
+                            ironwood_bundle_version_for_height(params, target_height),
+                            0,
+                            1,
+                        )
+                        .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?,
+                    )
+                } else {
+                    (
+                        PoolType::ORCHARD,
+                        vec![],
+                        0usize,
+                        orchard_fees::transactional_action_count(
+                            ::orchard::builder::BundleType::DEFAULT,
+                            orchard_bundle_version_for_height(params, target_height),
+                            0,
+                            1,
+                        )
+                        .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?,
+                        0usize,
+                    )
+                }
+            }
+            #[cfg(not(feature = "orchard"))]
+            {
+                return Err(InputSelectorError::Selection(
+                    GreedyInputSelectorError::UnsupportedAddress(Box::new(address)),
+                ));
+            }
+        }
+        Address::Unified(address) if address.has_sapling() => (
+            PoolType::SAPLING,
+            vec![],
+            ::sapling::builder::BundleType::DEFAULT
+                .num_outputs(0, 1)
+                .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?,
+            0usize,
+            0usize,
+        ),
+        Address::Unified(address) => {
+            if address.has_transparent() {
+                (
+                    PoolType::TRANSPARENT,
+                    vec![P2PKH_STANDARD_OUTPUT_SIZE],
+                    0usize,
+                    0usize,
+                    0usize,
+                )
+            } else {
+                return Err(InputSelectorError::Selection(
+                    GreedyInputSelectorError::UnsupportedAddress(Box::new(address)),
+                ));
+            }
+        }
+        Address::Tex(_) => {
+            return Err(InputSelectorError::Selection(
+                GreedyInputSelectorError::UnsupportedTexAddress,
+            ));
+        }
+    };
+
+    let fee = fee_rule
+        .fee_required(
+            params,
+            BlockHeight::from(target_height),
+            transparent_inputs
+                .iter()
+                .map(transparent_fees::InputView::serialized_size),
+            transparent_output_sizes,
+            0,
+            sapling_output_count,
+            orchard_action_count,
+            ironwood_action_count,
+        )
+        .map_err(|e| InputSelectorError::Change(ChangeError::StrategyError(e)))?;
+
+    let payment_amount = (input_total - fee)
+        .filter(|amount| *amount > Zatoshis::ZERO)
+        .ok_or_else(|| InputSelectorError::InsufficientFunds {
+            available: input_total,
+            required: (fee + Zatoshis::const_from_u64(1))
+                .unwrap_or(Zatoshis::const_from_u64(MAX_MONEY)),
+        })?;
+    let payment = Payment::new(recipient, Some(payment_amount), memo, None, None, vec![])
+        .map_err(|e| InputSelectorError::Proposal(ProposalError::Zip321(e.with_index(0))))?;
+    let request = TransactionRequest::new(vec![payment])
+        .map_err(|e| InputSelectorError::Proposal(ProposalError::Zip321(e)))?;
+    let balance = TransactionBalance::new(vec![], fee).map_err(|_| {
+        InputSelectorError::Selection(GreedyInputSelectorError::Balance(BalanceError::Overflow))
+    })?;
+
+    Proposal::single_step(
+        request,
+        BTreeMap::from_iter([(0, payment_pool)]),
+        transparent_inputs,
+        None,
+        anchor_height,
+        balance,
+        fee_rule.clone(),
+        target_height,
+        confirmations_policy,
+        false,
+        #[cfg(feature = "orchard")]
+        ironwood_active_at(params, target_height),
+    )
+    .map_err(InputSelectorError::Proposal)
+}
+
+#[cfg(feature = "transparent-inputs")]
 struct EphemeralStepConfig {
     ephemeral_output_value: Zatoshis,
     tr1_balance: TransactionBalance,

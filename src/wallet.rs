@@ -29,7 +29,8 @@ use zcash_client_backend::data_api::wallet::input_selection::{
 };
 use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
-    propose_send_max_transfer, propose_shielding, propose_transfer,
+    propose_send_max_transfer, propose_send_max_transparent_transfer, propose_shielding,
+    propose_transfer,
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, TransactionDataRequest,
@@ -2308,6 +2309,38 @@ where
             self.confirmations_policy(),
         )
         .map_err(|e| Error::Generic(format!("Error when estimating max transfer: {e:?}")))?;
+
+        Ok((
+            proposal_payment_amount_zats(&proposal)?,
+            proposal_fee_required_zats(&proposal)?,
+        ))
+    }
+
+    pub async fn estimate_pczt_max_transparent_transfer(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<(u64, u64), Error> {
+        let fee_rule = dynamic_zip317_fee_rule(marginal_fee_zats)?;
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let mut db = self.db.write().await;
+        let proposal =
+            propose_send_max_transparent_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+                &mut *db,
+                &self.network,
+                account_id,
+                &fee_rule,
+                to_address,
+                memo,
+                self.confirmations_policy(),
+            )
+            .map_err(|e| {
+                Error::Generic(format!(
+                    "Error when estimating max transparent transfer: {e:?}"
+                ))
+            })?;
 
         Ok((
             proposal_payment_amount_zats(&proposal)?,
