@@ -37,6 +37,7 @@ use zip32::fingerprint::SeedFingerprint;
 
 #[cfg(feature = "transparent-inputs")]
 use {
+    crate::input_source::TransparentOutputStatus,
     transparent::{address::TransparentAddress, keys::NonHardenedChildIndex},
     zcash_client_backend::wallet::{Exposure, TransparentAddressMetadata},
     zip32::Scope,
@@ -838,16 +839,25 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 false
             }
         }) {
-            if self.utxo_is_spendable(outpoint, target_height, confirmations_policy)? {
-                let address = txo.address;
-                let key_origin = TransparentKeyOrigin::Derived {
-                    scope: txo.key_scope,
-                };
-                let entry = balances
-                    .entry(address)
-                    .or_insert((key_origin, Balance::ZERO));
+            let status =
+                self.transparent_output_status(outpoint, target_height, confirmations_policy)?;
+            if status != TransparentOutputStatus::Unavailable {
+                let entry = balances.entry(txo.address).or_insert((
+                    TransparentKeyOrigin::Derived {
+                        scope: txo.key_scope,
+                    },
+                    Balance::ZERO,
+                ));
 
-                entry.1.add_spendable_value(txo.txout.value())?;
+                match status {
+                    TransparentOutputStatus::Spendable => {
+                        entry.1.add_spendable_value(txo.txout.value())?
+                    }
+                    TransparentOutputStatus::Pending => {
+                        entry.1.add_pending_spendable_value(txo.txout.value())?
+                    }
+                    TransparentOutputStatus::Unavailable => unreachable!(),
+                }
             }
         }
 

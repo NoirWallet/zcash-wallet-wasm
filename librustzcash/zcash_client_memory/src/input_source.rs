@@ -33,6 +33,14 @@ use {
 
 use crate::{AccountId, MemoryWalletDb, error::Error, to_spendable_notes};
 
+#[cfg(feature = "transparent-inputs")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransparentOutputStatus {
+    Spendable,
+    Pending,
+    Unavailable,
+}
+
 impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
     type Error = crate::error::Error;
     type AccountId = AccountId;
@@ -433,20 +441,40 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<bool, Error> {
+        Ok(matches!(
+            self.transparent_output_status(outpoint, target_height, confirmations_policy)?,
+            TransparentOutputStatus::Spendable
+        ))
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) fn transparent_output_status(
+        &self,
+        outpoint: &OutPoint,
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<TransparentOutputStatus, Error> {
         let utxo = self
             .transparent_received_outputs
             .get(outpoint)
             .ok_or(Error::NoteNotFound)?;
+        if self.utxo_is_spent(outpoint, target_height)? {
+            return Ok(TransparentOutputStatus::Unavailable);
+        }
+
         let required_confirmations =
             self.transparent_required_confirmations(&utxo.transaction_id, confirmations_policy);
         let confirmed_height = BlockHeight::from(target_height) - u32::from(required_confirmations);
         if let Some(tx) = self.tx_table.get(&utxo.transaction_id) {
-            Ok(
-                tx.is_mined_or_unexpired_at(confirmed_height) // tx that created it is mined
-                && !self.utxo_is_spent(outpoint, target_height)?, // not spent
-            )
+            if tx.is_mined_or_unexpired_at(confirmed_height) {
+                Ok(TransparentOutputStatus::Spendable)
+            } else if tx.is_mined_or_unexpired_at(BlockHeight::from(target_height)) {
+                Ok(TransparentOutputStatus::Pending)
+            } else {
+                Ok(TransparentOutputStatus::Unavailable)
+            }
         } else {
-            Ok(false)
+            Ok(TransparentOutputStatus::Unavailable)
         }
     }
 
