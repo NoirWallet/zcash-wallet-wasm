@@ -22,6 +22,7 @@ use zcash_protocol::{
 use {
     transparent::{address::TransparentAddress, bundle::OutPoint},
     zcash_client_backend::data_api::TransactionStatus,
+    zcash_primitives::transaction::TxId,
     zcash_primitives::transaction::fees::{
         FeeRule,
         transparent::{InputSize, InputView},
@@ -432,12 +433,13 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<bool, Error> {
-        let confirmed_height =
-            BlockHeight::from(target_height) - u32::from(confirmations_policy.trusted());
         let utxo = self
             .transparent_received_outputs
             .get(outpoint)
             .ok_or(Error::NoteNotFound)?;
+        let required_confirmations =
+            self.transparent_required_confirmations(&utxo.transaction_id, confirmations_policy);
+        let confirmed_height = BlockHeight::from(target_height) - u32::from(required_confirmations);
         if let Some(tx) = self.tx_table.get(&utxo.transaction_id) {
             Ok(
                 tx.is_mined_or_unexpired_at(confirmed_height) // tx that created it is mined
@@ -445,6 +447,32 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             )
         } else {
             Ok(false)
+        }
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn transaction_is_wallet_created(&self, txid: &TxId) -> bool {
+        self.sent_notes.keys().any(|note_id| note_id.txid() == txid)
+            || self
+                .received_note_spends
+                .values()
+                .any(|spend_txid| spend_txid == txid)
+            || self
+                .transparent_received_output_spends
+                .values()
+                .any(|spend_txid| spend_txid == txid)
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn transparent_required_confirmations(
+        &self,
+        txid: &TxId,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> NonZeroU32 {
+        if self.transaction_is_wallet_created(txid) {
+            confirmations_policy.trusted()
+        } else {
+            confirmations_policy.untrusted()
         }
     }
 
@@ -551,5 +579,36 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "transparent-inputs"))]
+mod tests {
+    use super::*;
+    use zcash_protocol::consensus::Network;
+
+    #[test]
+    fn distinguishes_wallet_created_and_external_transparent_outputs() {
+        let mut wallet = MemoryWalletDb::new(Network::TestNetwork, 100);
+        let external_txid = TxId::from_bytes([1; 32]);
+        let wallet_created_txid = TxId::from_bytes([2; 32]);
+        let funding_outpoint = OutPoint::new([3; 32], 0);
+        let policy = ConfirmationsPolicy::default();
+
+        assert!(!wallet.transaction_is_wallet_created(&external_txid));
+        assert_eq!(
+            u32::from(wallet.transparent_required_confirmations(&external_txid, policy)),
+            10
+        );
+
+        wallet
+            .transparent_received_output_spends
+            .insert(funding_outpoint, wallet_created_txid);
+
+        assert!(wallet.transaction_is_wallet_created(&wallet_created_txid));
+        assert_eq!(
+            u32::from(wallet.transparent_required_confirmations(&wallet_created_txid, policy)),
+            3
+        );
     }
 }
