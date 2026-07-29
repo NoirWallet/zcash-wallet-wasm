@@ -110,7 +110,7 @@ use zcash_script::script::{self as zs_script, Evaluable};
 use {
     crate::data_api::error::PcztError,
     bip32::ChildNumber,
-    orchard::note_encryption::OrchardDomain,
+    orchard::note_encryption::{IronwoodDomain, OrchardDomain},
     pczt::roles::{
         creator::Creator, io_finalizer::IoFinalizer, spend_finalizer::SpendFinalizer,
         tx_extractor::TransactionExtractor, updater::Updater,
@@ -2948,6 +2948,60 @@ where
         })
         .collect::<Result<Vec<_>, PcztError>>()?;
 
+    let ironwood_output_info = finalized
+        .ironwood()
+        .actions()
+        .iter()
+        .map(|act| {
+            let note = || {
+                let recipient =
+                    act.output().recipient().as_ref().and_then(|b| {
+                        ::orchard::Address::from_raw_address_bytes(b).into_option()
+                    })?;
+                let value = act
+                    .output()
+                    .value()
+                    .map(orchard::value::NoteValue::from_raw)?;
+                let rho = orchard::note::Rho::from_bytes(act.spend().nullifier()).into_option()?;
+                let rseed = act.output().rseed().as_ref().and_then(|rseed| {
+                    orchard::note::RandomSeed::from_bytes(*rseed, &rho).into_option()
+                })?;
+
+                orchard::Note::from_parts(
+                    recipient,
+                    value,
+                    rho,
+                    rseed,
+                    orchard::note::NoteVersion::V3,
+                )
+                .into_option()
+            };
+
+            let external_address = act
+                .output()
+                .user_address()
+                .as_deref()
+                .map(ZcashAddress::try_from_encoded)
+                .transpose()
+                .map_err(|e| PcztError::Invalid(format!("Invalid user_address: {e}")))?;
+
+            let pczt_recipient = act
+                .output()
+                .proprietary()
+                .get(PROPRIETARY_OUTPUT_INFO)
+                .map(|v| postcard::from_bytes::<PcztRecipient<DbT::AccountId>>(v))
+                .transpose()
+                .map_err(|e: postcard::Error| {
+                    PcztError::Invalid(format!(
+                        "Postcard decoding of proprietary output info failed: {e}"
+                    ))
+                })?
+                .map(|pczt_recipient| (pczt_recipient, external_address));
+
+            Ok(pczt_recipient.zip(note()))
+        })
+        .collect::<Result<Vec<_>, PcztError>>()?;
+
     let sapling_output_info = finalized
         .sapling()
         .outputs()
@@ -3139,6 +3193,40 @@ where
         })
         .transpose()?;
 
+    #[cfg(feature = "orchard")]
+    let ironwood_outputs = transaction
+        .ironwood_bundle()
+        .map(|bundle| {
+            assert_eq!(bundle.actions().len(), ironwood_output_info.len());
+            bundle
+                .actions()
+                .iter()
+                .zip(ironwood_output_info)
+                .enumerate()
+                .filter_map(|(output_index, (action, output_info))| {
+                    output_info.map(|((pczt_recipient, external_address), note)| {
+                        let domain = IronwoodDomain::for_action(action);
+                        to_sent_transaction_output::<_, _, _, DbT, _>(
+                            domain,
+                            note,
+                            action,
+                            ShieldedPool::Ironwood,
+                            output_index,
+                            pczt_recipient,
+                            external_address,
+                            |note| note.value().inner(),
+                            |memo| memo,
+                            |note| Note::Orchard {
+                                note,
+                                pool: orchard::ValuePool::Ironwood,
+                            },
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+
     let sapling_outputs = transaction
         .sapling_bundle()
         .map(|bundle| {
@@ -3246,6 +3334,8 @@ where
     let mut outputs: Vec<SentTransactionOutput<_>> = vec![];
     #[cfg(feature = "orchard")]
     outputs.extend(orchard_outputs.into_iter().flatten());
+    #[cfg(feature = "orchard")]
+    outputs.extend(ironwood_outputs.into_iter().flatten());
     outputs.extend(sapling_outputs.into_iter().flatten());
     outputs.extend(transparent_outputs.into_iter().flatten());
 
