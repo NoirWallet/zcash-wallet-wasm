@@ -1,6 +1,26 @@
-use pczt::roles::{combiner::Combiner, redactor::Redactor};
+use orchard::ValuePool;
+use pczt::roles::{
+    combiner::Combiner,
+    redactor::Redactor,
+    signer::{Signer, SpendAuthSignature},
+};
+use serde::Deserialize;
 
 use crate::*;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LedgerSignatures {
+    orchard: Vec<LedgerActionSignature>,
+    transparent_input_sigs: Vec<Vec<u8>>,
+    ironwood: Vec<LedgerActionSignature>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LedgerActionSignature {
+    spend_auth_sig: Vec<u8>,
+}
 
 #[wasm_bindgen]
 #[derive(Clone, Debug)]
@@ -82,6 +102,26 @@ impl Pczt {
         Pczt(redacted)
     }
 
+    /// Produces the structured transaction consumed by Ledger's Zcash signer.
+    /// The returned action-index arrays are retained by the wallet and bind the
+    /// device's compact signature result back to the original PCZT actions.
+    pub fn to_ledger_signing_payload(&self, account_index: u32) -> Result<JsValue, Error> {
+        let payload = crate::ledger_pczt::signing_payload(&self.0, Some(account_index))
+            .map_err(|message| Error::PcztSign(message))?;
+        serde_wasm_bindgen::to_value(&payload).map_err(Error::from)
+    }
+
+    /// Verifies and applies signatures returned by Ledger's PCZT signer.
+    pub fn apply_ledger_signatures(
+        &self,
+        value: JsValue,
+        account_index: u32,
+    ) -> Result<Pczt, Error> {
+        let signatures: LedgerSignatures =
+            serde_wasm_bindgen::from_value(value).map_err(Error::from)?;
+        apply_ledger_signatures_inner(&self.0, signatures, account_index).map(Pczt)
+    }
+
     /// Combines this PCZT with another representing the same transaction.
     ///
     /// Used after external signing: `self` is the full PCZT kept by the wallet
@@ -93,5 +133,187 @@ impl Pczt {
             .combine()
             .map(Pczt)
             .map_err(|e| Error::Generic(format!("Failed to combine PCZTs: {e:?}")))
+    }
+}
+
+fn apply_ledger_signatures_inner(
+    pczt: &pczt::Pczt,
+    signatures: LedgerSignatures,
+    account_index: u32,
+) -> Result<pczt::Pczt, Error> {
+    let payload =
+        crate::ledger_pczt::signing_payload(pczt, Some(account_index)).map_err(Error::PcztSign)?;
+
+    if signatures.transparent_input_sigs.len() != payload.transaction.transparent_inputs.len() {
+        return Err(Error::PcztSign(format!(
+            "Ledger returned {} transparent signatures, expected {}",
+            signatures.transparent_input_sigs.len(),
+            payload.transaction.transparent_inputs.len()
+        )));
+    }
+    if signatures.orchard.len() != payload.orchard_signature_indices.len() {
+        return Err(Error::PcztSign(format!(
+            "Ledger returned {} Orchard signatures, expected {}",
+            signatures.orchard.len(),
+            payload.orchard_signature_indices.len()
+        )));
+    }
+    if signatures.ironwood.len() != payload.ironwood_signature_indices.len() {
+        return Err(Error::PcztSign(format!(
+            "Ledger returned {} Ironwood signatures, expected {}",
+            signatures.ironwood.len(),
+            payload.ironwood_signature_indices.len()
+        )));
+    }
+
+    let mut signer = Signer::new(pczt.clone())
+        .map_err(|error| Error::PcztSign(format!("Invalid PCZT: {error:?}")))?;
+
+    for (index, raw) in signatures.transparent_input_sigs.iter().enumerate() {
+        let Some((&sighash_type, der)) = raw.split_last() else {
+            return Err(Error::PcztSign(format!(
+                "Ledger returned an empty transparent signature for input {index}"
+            )));
+        };
+        if sighash_type != 1 {
+            return Err(Error::PcztSign(format!(
+                "Ledger returned unsupported sighash type {sighash_type} for input {index}"
+            )));
+        }
+        let signature = secp256k1::ecdsa::Signature::from_der(der).map_err(|error| {
+            Error::PcztSign(format!(
+                "Ledger returned invalid DER for transparent input {index}: {error}"
+            ))
+        })?;
+        signer
+            .append_transparent_signature(index, signature)
+            .map_err(|error| {
+                Error::PcztSign(format!(
+                    "Invalid Ledger signature for transparent input {index}: {error:?}"
+                ))
+            })?;
+    }
+
+    for (result, action_index) in signatures
+        .orchard
+        .iter()
+        .zip(payload.orchard_signature_indices)
+    {
+        apply_action_signature(&mut signer, ValuePool::Orchard, action_index, result)?;
+    }
+    for (result, action_index) in signatures
+        .ironwood
+        .iter()
+        .zip(payload.ironwood_signature_indices)
+    {
+        apply_action_signature(&mut signer, ValuePool::Ironwood, action_index, result)?;
+    }
+
+    Ok(signer.finish())
+}
+
+fn apply_action_signature(
+    signer: &mut Signer,
+    pool: ValuePool,
+    action_index: usize,
+    result: &LedgerActionSignature,
+) -> Result<(), Error> {
+    let signature: [u8; 64] = result.spend_auth_sig.as_slice().try_into().map_err(|_| {
+        Error::PcztSign(format!(
+            "Ledger returned a {}-byte {pool:?} signature for action {action_index}",
+            result.spend_auth_sig.len()
+        ))
+    })?;
+    signer
+        .apply_orchard_spend_auth_signature(&SpendAuthSignature::from_parts(
+            pool,
+            action_index,
+            signature,
+        ))
+        .map_err(|error| {
+            Error::PcztSign(format!(
+                "Invalid Ledger {pool:?} signature for action {action_index}: {error:?}"
+            ))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LedgerActionSignature, LedgerSignatures, apply_ledger_signatures_inner};
+    use crate::{
+        bindgen::sign::{
+            pczt_sign_inner,
+            tests::{OrchardPool, orchard_pczt},
+        },
+        error::Error,
+        ledger_pczt::signing_payload,
+    };
+
+    #[test]
+    fn converts_real_pczt_to_ledger_payload() {
+        let (_, pczt, _, _, spend_index) = orchard_pczt(OrchardPool::Orchard, true);
+        let payload = signing_payload(&pczt, Some(0)).unwrap();
+        let orchard = payload.transaction.orchard_bundle.unwrap();
+
+        assert_eq!(payload.transaction.global.coin_type, 1);
+        assert_eq!(payload.orchard_signature_indices, vec![spend_index]);
+        assert!(payload.ironwood_signature_indices.is_empty());
+        assert_eq!(orchard.actions[spend_index].spend_value, 1_000_000);
+        assert_eq!(orchard.actions[spend_index].signing_path, "32'/1'/0'");
+        assert!(payload.transaction.ironwood_bundle.is_some());
+    }
+
+    #[tokio::test]
+    async fn applies_external_orchard_signature_to_pczt() {
+        let (network, pczt, usk, seed_fingerprint, spend_index) =
+            orchard_pczt(OrchardPool::Orchard, true);
+        let signed = pczt_sign_inner(network, pczt.clone(), usk, seed_fingerprint)
+            .await
+            .unwrap();
+        let signature = signed.orchard().actions()[spend_index]
+            .spend()
+            .spend_auth_sig()
+            .unwrap();
+
+        let applied = apply_ledger_signatures_inner(
+            &pczt,
+            LedgerSignatures {
+                orchard: vec![LedgerActionSignature {
+                    spend_auth_sig: signature.to_vec(),
+                }],
+                transparent_input_sigs: vec![],
+                ironwood: vec![],
+            },
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            applied.orchard().actions()[spend_index]
+                .spend()
+                .spend_auth_sig(),
+            &Some(signature)
+        );
+    }
+
+    #[test]
+    fn rejects_missing_orchard_signature() {
+        let (_, pczt, _, _, _) = orchard_pczt(OrchardPool::Orchard, true);
+        let error = apply_ledger_signatures_inner(
+            &pczt,
+            LedgerSignatures {
+                orchard: vec![],
+                transparent_input_sigs: vec![],
+                ironwood: vec![],
+            },
+            0,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::PcztSign(message)
+                if message == "Ledger returned 0 Orchard signatures, expected 1"
+        ));
     }
 }
