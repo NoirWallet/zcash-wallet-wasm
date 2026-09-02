@@ -62,6 +62,10 @@ export class Pczt {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Verifies and applies signatures returned by Ledger's PCZT signer.
+     */
+    apply_ledger_signatures(value: any, account_index: number): Pczt;
+    /**
      * Combines this PCZT with another representing the same transaction.
      *
      * Used after external signing: `self` is the full PCZT kept by the wallet
@@ -101,6 +105,12 @@ export class Pczt {
      * Returns a JSON object with the details of the Pczt.
      */
     to_json(): any;
+    /**
+     * Produces the structured transaction consumed by Ledger's Zcash signer.
+     * The returned action-index arrays are retained by the wallet and bind the
+     * device's compact signature result back to the original PCZT actions.
+     */
+    to_ledger_signing_payload(account_index: number): any;
 }
 
 export class ProofGenerationKey {
@@ -735,6 +745,8 @@ export interface InitOutput {
     readonly pczt_serialize: (a: number, b: number) => void;
     readonly pczt_from_bytes: (a: number, b: number, c: number) => void;
     readonly pczt_redact_for_signer: (a: number) => number;
+    readonly pczt_to_ledger_signing_payload: (a: number, b: number, c: number) => void;
+    readonly pczt_apply_ledger_signatures: (a: number, b: number, c: number, d: number) => void;
     readonly pczt_combine: (a: number, b: number, c: number) => void;
     readonly __wbg_transactionrequest_free: (a: number, b: number) => void;
     readonly transactionrequest_new: (a: number, b: number, c: number) => void;
@@ -818,10 +830,6 @@ export interface InitOutput {
     readonly __wbg_set_blockrange_0: (a: number, b: number) => void;
     readonly __wbg_get_blockrange_1: (a: number) => number;
     readonly __wbg_set_blockrange_1: (a: number, b: number) => void;
-    readonly rustsecp256k1_v0_8_1_context_create: (a: number) => number;
-    readonly rustsecp256k1_v0_8_1_context_destroy: (a: number) => void;
-    readonly rustsecp256k1_v0_8_1_default_illegal_callback_fn: (a: number, b: number) => void;
-    readonly rustsecp256k1_v0_8_1_default_error_callback_fn: (a: number, b: number) => void;
     readonly __wbg_wbg_rayon_poolbuilder_free: (a: number, b: number) => void;
     readonly wbg_rayon_poolbuilder_numThreads: (a: number) => number;
     readonly wbg_rayon_poolbuilder_receiver: (a: number) => number;
@@ -845,11 +853,11 @@ export interface InitOutput {
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;
     readonly rustsecp256k1_v0_10_0_default_illegal_callback_fn: (a: number, b: number) => void;
     readonly rustsecp256k1_v0_10_0_default_error_callback_fn: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_8025: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_8053: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3425: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_8021: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_3360: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_8070: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_8098: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3457: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_8066: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_3392: (a: number, b: number) => void;
     readonly memory: WebAssembly.Memory;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
