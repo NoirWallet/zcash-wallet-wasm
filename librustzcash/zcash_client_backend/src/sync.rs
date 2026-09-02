@@ -9,38 +9,38 @@
 //! - There is no mechanism for interrupting the synchronization flow, other than ending
 //!   the process.
 
-use std::fmt;
-
-use futures_util::TryStreamExt;
-use shardtree::error::ShardTreeError;
-use subtle::ConditionallySelectable;
-use tonic::{
-    body::Body as TonicBody,
-    client::GrpcService,
-    codegen::{Body, Bytes, StdError},
-};
-use tracing::{debug, info};
-
-use zcash_primitives::merkle_tree::HashSer;
-use zcash_protocol::consensus::{BlockHeight, Parameters};
-
-use crate::{
-    data_api::{
-        WalletCommitmentTrees, WalletRead, WalletWrite,
-        chain::{
-            BlockCache, ChainState, CommitmentTreeRoot, error::Error as ChainError,
-            scan_cached_blocks, scan_cached_blocks_optimized,
+#[cfg(feature = "sync")]
+use {
+    crate::{
+        data_api::{
+            WalletCommitmentTrees, WalletRead, WalletWrite,
+            chain::{
+                BlockCache, ChainState, CommitmentTreeRoot, error::Error as ChainError,
+                scan_cached_blocks, scan_cached_blocks_optimized,
+            },
+            scanning::{ScanPriority, ScanRange},
         },
-        scanning::{ScanPriority, ScanRange},
+        proto::service::{self, BlockId, compact_tx_streamer_client::CompactTxStreamerClient},
+        scanning::ScanError,
     },
-    proto::service::{self, BlockId, compact_tx_streamer_client::CompactTxStreamerClient},
-    scanning::ScanError,
+    futures_util::TryStreamExt,
+    shardtree::error::ShardTreeError,
+    std::fmt,
+    subtle::ConditionallySelectable,
+    tonic::{
+        body::Body as TonicBody,
+        client::GrpcService,
+        codegen::{Body, Bytes, StdError},
+    },
+    tracing::{debug, info},
+    zcash_primitives::merkle_tree::HashSer,
+    zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters},
 };
 
-#[cfg(feature = "orchard")]
+#[cfg(all(feature = "sync", feature = "orchard"))]
 use orchard::tree::MerkleHashOrchard;
 
-#[cfg(feature = "transparent-inputs")]
+#[cfg(all(feature = "sync", feature = "transparent-inputs"))]
 use {
     crate::wallet::WalletTransparentOutput,
     ::transparent::{
@@ -52,7 +52,11 @@ use {
     zcash_script::script,
 };
 
+#[cfg(feature = "sync-decryptor")]
+pub mod decryptor;
+
 /// Scans the chain until the wallet is up-to-date.
+#[cfg(feature = "sync")]
 pub async fn run<P, ChT, CaT, DbT>(
     client: &mut CompactTxStreamerClient<ChT>,
     params: &P,
@@ -73,11 +77,21 @@ where
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
+    let mut tip_height = update_chain_tip(client, db_data).await?;
+    let mut ironwood_active = params.is_nu_active(NetworkUpgrade::Nu6_3, tip_height);
+
     // 1) Download note commitment tree data from lightwalletd
     // 2) Pass the commitment tree data to the database.
-    update_subtree_roots(client, db_data).await?;
+    update_subtree_roots(client, params, tip_height, db_data).await?;
 
-    while running(client, params, db_cache, db_data, batch_size).await? {}
+    while running(client, params, db_cache, db_data, batch_size).await? {
+        tip_height = update_chain_tip(client, db_data).await?;
+        let next_ironwood_active = params.is_nu_active(NetworkUpgrade::Nu6_3, tip_height);
+        if next_ironwood_active && !ironwood_active {
+            update_subtree_roots(client, params, tip_height, db_data).await?;
+        }
+        ironwood_active = next_ironwood_active;
+    }
 
     Ok(())
 }
@@ -87,6 +101,7 @@ where
 /// Unlike [`run`], which loops until the wallet is fully synced, this function
 /// processes at most `batch_size` blocks after handling any Verify-priority
 /// ranges needed for chain continuity.
+#[cfg(feature = "sync")]
 pub async fn run_next_batch<P, ChT, CaT, DbT>(
     client: &mut CompactTxStreamerClient<ChT>,
     params: &P,
@@ -110,10 +125,12 @@ where
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
-    update_subtree_roots(client, db_data).await?;
+    let tip_height = update_chain_tip(client, db_data).await?;
+    update_subtree_roots(client, params, tip_height, db_data).await?;
     running_single_batch(client, params, db_cache, db_data, batch_size).await
 }
 
+#[cfg(feature = "sync")]
 /// Syncs a single batch using the optimized scanner.
 ///
 /// This has the same return semantics as [`run_next_batch`], but uses
@@ -142,7 +159,8 @@ where
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
-    update_subtree_roots(client, db_data).await?;
+    let tip_height = update_chain_tip(client, db_data).await?;
+    update_subtree_roots(client, params, tip_height, db_data).await?;
     running_single_batch_optimized(client, params, db_cache, db_data, batch_size).await
 }
 
@@ -165,8 +183,6 @@ where
     DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
 {
-    update_chain_tip(client, db_data).await?;
-
     #[cfg(feature = "transparent-inputs")]
     for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
         let start_height = db_data
@@ -242,6 +258,7 @@ where
     }
 }
 
+#[cfg(feature = "sync")]
 async fn running_single_batch_optimized<P, ChT, CaT, DbT, TrErr>(
     client: &mut CompactTxStreamerClient<ChT>,
     params: &P,
@@ -261,8 +278,6 @@ where
     DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
 {
-    update_chain_tip(client, db_data).await?;
-
     #[cfg(feature = "transparent-inputs")]
     for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
         let start_height = db_data
@@ -360,8 +375,6 @@ where
 {
     // 3) Download chain tip metadata from lightwalletd
     // 4) Notify the wallet of the updated chain tip.
-    update_chain_tip(client, db_data).await?;
-
     // Refresh UTXOs for the accounts in the wallet. We do this before we perform
     // any shielded scanning, to ensure that we discover any UTXOs between the old
     // fully-scanned height and the current chain tip.
@@ -477,11 +490,45 @@ where
     Ok(false)
 }
 
-async fn update_subtree_roots<ChT, DbT, CaErr, DbErr>(
+#[cfg(feature = "sync")]
+async fn download_subtree_roots<ChT, H>(
     client: &mut CompactTxStreamerClient<ChT>,
+    protocol: service::ShieldedProtocol,
+) -> Result<Vec<CommitmentTreeRoot<H>>, tonic::Status>
+where
+    ChT: GrpcService<TonicBody>,
+    ChT::Error: Into<StdError>,
+    ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
+    H: HashSer,
+{
+    let mut request = service::GetSubtreeRootsArg::default();
+    request.set_shielded_protocol(protocol);
+
+    client
+        .get_subtree_roots(request)
+        .await?
+        .into_inner()
+        .and_then(|root| async move {
+            let root_hash = H::read(&root.root_hash[..])?;
+            Ok(CommitmentTreeRoot::from_parts(
+                BlockHeight::from_u32(root.completing_block_height as u32),
+                root_hash,
+            ))
+        })
+        .try_collect()
+        .await
+}
+
+#[cfg(feature = "sync")]
+async fn update_subtree_roots<P, ChT, DbT, CaErr, DbErr>(
+    client: &mut CompactTxStreamerClient<ChT>,
+    params: &P,
+    tip_height: BlockHeight,
     db_data: &mut DbT,
 ) -> Result<(), Error<CaErr, DbErr, <DbT as WalletCommitmentTrees>::Error>>
 where
+    P: Parameters,
     ChT: GrpcService<TonicBody>,
     ChT::Error: Into<StdError>,
     ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
@@ -489,22 +536,8 @@ where
     DbT: WalletCommitmentTrees,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
-    let mut request = service::GetSubtreeRootsArg::default();
-    request.set_shielded_protocol(service::ShieldedProtocol::Sapling);
-
-    let sapling_roots: Vec<CommitmentTreeRoot<sapling::Node>> = client
-        .get_subtree_roots(request)
-        .await?
-        .into_inner()
-        .and_then(|root| async move {
-            let root_hash = sapling::Node::read(&root.root_hash[..])?;
-            Ok(CommitmentTreeRoot::from_parts(
-                BlockHeight::from_u32(root.completing_block_height as u32),
-                root_hash,
-            ))
-        })
-        .try_collect()
-        .await?;
+    let sapling_roots: Vec<CommitmentTreeRoot<sapling::Node>> =
+        download_subtree_roots(client, service::ShieldedProtocol::Sapling).await?;
 
     info!("Sapling tree has {} subtrees", sapling_roots.len());
     db_data
@@ -513,36 +546,33 @@ where
 
     #[cfg(feature = "orchard")]
     {
-        let mut request = service::GetSubtreeRootsArg::default();
-        request.set_shielded_protocol(service::ShieldedProtocol::Orchard);
-
-        let orchard_roots: Vec<CommitmentTreeRoot<MerkleHashOrchard>> = client
-            .get_subtree_roots(request)
-            .await?
-            .into_inner()
-            .and_then(|root| async move {
-                let root_hash = MerkleHashOrchard::read(&root.root_hash[..])?;
-                Ok(CommitmentTreeRoot::from_parts(
-                    BlockHeight::from_u32(root.completing_block_height as u32),
-                    root_hash,
-                ))
-            })
-            .try_collect()
-            .await?;
+        let orchard_roots: Vec<CommitmentTreeRoot<MerkleHashOrchard>> =
+            download_subtree_roots(client, service::ShieldedProtocol::Orchard).await?;
 
         info!("Orchard tree has {} subtrees", orchard_roots.len());
         db_data
             .put_orchard_subtree_roots(0, &orchard_roots)
             .map_err(Error::WalletTrees)?;
+
+        if params.is_nu_active(NetworkUpgrade::Nu6_3, tip_height) {
+            let ironwood_roots: Vec<CommitmentTreeRoot<MerkleHashOrchard>> =
+                download_subtree_roots(client, service::ShieldedProtocol::Ironwood).await?;
+
+            info!("Ironwood tree has {} subtrees", ironwood_roots.len());
+            db_data
+                .put_ironwood_subtree_roots(0, &ironwood_roots)
+                .map_err(Error::WalletTrees)?;
+        }
     }
 
     Ok(())
 }
 
+#[cfg(feature = "sync")]
 async fn update_chain_tip<ChT, DbT, CaErr, TrErr>(
     client: &mut CompactTxStreamerClient<ChT>,
     db_data: &mut DbT,
-) -> Result<(), Error<CaErr, <DbT as WalletRead>::Error, TrErr>>
+) -> Result<BlockHeight, Error<CaErr, <DbT as WalletRead>::Error, TrErr>>
 where
     ChT: GrpcService<TonicBody>,
     ChT::Error: Into<StdError>,
@@ -564,9 +594,10 @@ where
         .update_chain_tip(tip_height)
         .map_err(Error::Wallet)?;
 
-    Ok(())
+    Ok(tip_height)
 }
 
+#[cfg(feature = "sync")]
 async fn download_blocks<ChT, CaT, DbErr, TrErr>(
     client: &mut CompactTxStreamerClient<ChT>,
     db_cache: &CaT,
@@ -605,6 +636,7 @@ where
     Ok(())
 }
 
+#[cfg(feature = "sync")]
 async fn download_chain_state<ChT, CaErr, DbErr, TrErr>(
     client: &mut CompactTxStreamerClient<ChT>,
     block_height: BlockHeight,
@@ -632,6 +664,7 @@ where
 /// chain tip is out of sync with blockchain history.
 ///
 /// Returns `true` if scanning these blocks materially changed the suggested scan ranges.
+#[cfg(feature = "sync")]
 async fn scan_blocks<P, CaT, DbT, TrErr>(
     params: &P,
     db_cache: &CaT,
@@ -799,7 +832,7 @@ where
 /// TXOs from `lightwalletd` instead of just UTXOs.
 ///
 /// [a comment in the Android SDK]: https://github.com/Electric-Coin-Company/zcash-android-wallet-sdk/blob/855204fc8ae4057fdac939f98df4aa38c8e662f1/sdk-lib/src/main/java/cash/z/ecc/android/sdk/block/processor/CompactBlockProcessor.kt#L979-L991
-#[cfg(feature = "transparent-inputs")]
+#[cfg(all(feature = "sync", feature = "transparent-inputs"))]
 pub async fn refresh_utxos<P, ChT, DbT, CaErr, TrErr>(
     params: &P,
     client: &mut CompactTxStreamerClient<ChT>,
@@ -855,6 +888,9 @@ where
                         BlockHeight::try_from(reply.height)
                             .map_err(|_| Error::MisbehavingServer)?,
                     ),
+                    Some(account_id),
+                    None,
+                    None,
                 )
                 .ok_or(Error::MisbehavingServer)
             })
@@ -869,6 +905,7 @@ where
 }
 
 /// Errors that can occur while syncing.
+#[cfg(feature = "sync")]
 #[derive(Debug)]
 pub enum Error<CaErr, DbErr, TrErr> {
     /// An error while interacting with a [`BlockCache`].
@@ -886,6 +923,7 @@ pub enum Error<CaErr, DbErr, TrErr> {
     WalletTrees(ShardTreeError<TrErr>),
 }
 
+#[cfg(feature = "sync")]
 impl<CaErr, DbErr, TrErr> fmt::Display for Error<CaErr, DbErr, TrErr>
 where
     CaErr: fmt::Display,
@@ -909,6 +947,7 @@ where
     }
 }
 
+#[cfg(feature = "sync")]
 impl<CaErr, DbErr, TrErr> std::error::Error for Error<CaErr, DbErr, TrErr>
 where
     CaErr: std::error::Error,
@@ -917,6 +956,7 @@ where
 {
 }
 
+#[cfg(feature = "sync")]
 impl<CaErr, DbErr, TrErr> From<ChainError<DbErr, CaErr>> for Error<CaErr, DbErr, TrErr> {
     fn from(e: ChainError<DbErr, CaErr>) -> Self {
         match e {
@@ -927,8 +967,88 @@ impl<CaErr, DbErr, TrErr> From<ChainError<DbErr, CaErr>> for Error<CaErr, DbErr,
     }
 }
 
+#[cfg(feature = "sync")]
 impl<CaErr, DbErr, TrErr> From<tonic::Status> for Error<CaErr, DbErr, TrErr> {
     fn from(status: tonic::Status) -> Self {
         Error::Server(status)
+    }
+}
+
+#[cfg(all(test, feature = "sync", feature = "orchard"))]
+mod tests {
+    use std::{
+        convert::Infallible,
+        future::{Ready, ready},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Poll},
+    };
+
+    use tonic::{
+        body::Body as TonicBody,
+        codegen::{Service, http::Request, http::Response},
+    };
+    use zcash_protocol::consensus::{BlockHeight, Network};
+
+    use crate::{
+        data_api::testing::MockWalletDb,
+        proto::service::compact_tx_streamer_client::CompactTxStreamerClient,
+    };
+
+    use super::update_subtree_roots;
+
+    #[derive(Clone)]
+    struct CountingGrpcService(Arc<AtomicUsize>);
+
+    impl Service<Request<TonicBody>> for CountingGrpcService {
+        type Response = Response<TonicBody>;
+        type Error = Infallible;
+        type Future = Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: Request<TonicBody>) -> Self::Future {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            ready(Ok(Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "0")
+                .body(TonicBody::empty())
+                .unwrap()))
+        }
+    }
+
+    fn subtree_root_request_count(tip_height: u32) -> usize {
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let mut client =
+            CompactTxStreamerClient::new(CountingGrpcService(Arc::clone(&request_count)));
+        let network = Network::MainNetwork;
+        let mut wallet = MockWalletDb::new(network);
+
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            update_subtree_roots::<_, _, _, Infallible, Infallible>(
+                &mut client,
+                &network,
+                BlockHeight::from_u32(tip_height),
+                &mut wallet,
+            )
+            .await
+            .unwrap();
+        });
+
+        request_count.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn subtree_root_sync_skips_ironwood_before_activation() {
+        assert_eq!(subtree_root_request_count(3_428_142), 2);
+    }
+
+    #[test]
+    fn subtree_root_sync_requests_ironwood_at_activation() {
+        assert_eq!(subtree_root_request_count(3_428_143), 3);
     }
 }

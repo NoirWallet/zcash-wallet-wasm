@@ -153,9 +153,12 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(err, InvalidInputIndex {
-            index: 1,
-            input_count: 1,
-        });
+        assert_eq!(
+            err,
+            InvalidInputIndex {
+                index: 1,
+                input_count: 1,
+            }
+        );
     }
 }

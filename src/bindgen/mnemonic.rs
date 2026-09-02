@@ -281,15 +281,15 @@ pub fn mnemonic_to_transparent_address(
     let address = transparent_key
         .to_account_pubkey()
         .derive_external_ivk()
-        .map_err(|e| Error::Generic(format!("Failed to derive IVK: {:?}", e)))?
+        .map_err(|e| Error::Generic(format!("Failed to derive IVK: {e:?}")))?
         .derive_address(address_index)
-        .map_err(|e| Error::Generic(format!("Failed to derive address: {:?}", e)))?
+        .map_err(|e| Error::Generic(format!("Failed to derive address: {e:?}")))?
         .encode(&net);
 
     let public_key = transparent_key
         .to_account_pubkey()
         .derive_address_pubkey(TransparentKeyScope::EXTERNAL, address_index)
-        .map_err(|e| Error::Generic(format!("Failed to derive public key: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to derive public key: {e:?}")))?;
     let pubkey = hex::encode(public_key.serialize_uncompressed());
 
     Ok(serde_wasm_bindgen::to_value(&TransparentAddressInfo {

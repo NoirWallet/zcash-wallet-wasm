@@ -176,7 +176,9 @@ impl TransactionTable {
     ) {
         match self.0.entry(tx.txid()) {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().fee = fee;
+                if fee.is_some() {
+                    entry.get_mut().fee = fee;
+                }
                 entry.get_mut().expiry_height = Some(tx.expiry_height());
 
                 let mut raw = Vec::new();
@@ -260,6 +262,50 @@ impl TxLocatorMap {
     }
     pub(crate) fn entry(&mut self, k: (BlockHeight, u32)) -> Entry<'_, (BlockHeight, u32), TxId> {
         self.0.entry(k)
+    }
+
+    pub(crate) fn truncate_to_height(&mut self, height: BlockHeight) {
+        self.0
+            .retain(|(block_height, _), _| *block_height <= height);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+    use zcash_protocol::consensus::BranchId;
+
+    #[test]
+    fn full_transaction_updates_fee_only_when_known() {
+        let tx = TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::Nu5,
+            0,
+            BlockHeight::from(1),
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let initial_fee = Zatoshis::from_u64(10_000).unwrap();
+        let on_chain_fee = Zatoshis::from_u64(12_000).unwrap();
+        let mut table = TransactionTable::new();
+
+        table.put_tx_data(&tx, Some(initial_fee), None);
+        table.put_tx_data(&tx, None, None);
+        assert_eq!(
+            table.get_transaction(&tx.txid()).unwrap().fee(),
+            Some(initial_fee)
+        );
+
+        table.put_tx_data(&tx, Some(on_chain_fee), None);
+        assert_eq!(
+            table.get_transaction(&tx.txid()).unwrap().fee(),
+            Some(on_chain_fee)
+        );
     }
 }
 

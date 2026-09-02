@@ -53,10 +53,11 @@ impl NodeDataIterator {
             EntryLink::Stored(0),
             EntryLink::Stored(1),
         );
-        let tree = Tree::new(3, vec![(2, root)], vec![
-            (0, Entry::new_leaf(leaf(1))),
-            (1, Entry::new_leaf(leaf(2))),
-        ]);
+        let tree = Tree::new(
+            3,
+            vec![(2, root)],
+            vec![(0, Entry::new_leaf(leaf(1))), (1, Entry::new_leaf(leaf(2)))],
+        );
 
         NodeDataIterator {
             return_stack: Vec::new(),

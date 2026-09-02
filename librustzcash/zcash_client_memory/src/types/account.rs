@@ -11,7 +11,9 @@ use transparent::keys::{
 };
 use zcash_address::ZcashAddress;
 #[cfg(feature = "transparent-inputs")]
-use zcash_client_backend::wallet::{Exposure, TransparentAddressMetadata};
+use zcash_address::unified::Typecode;
+#[cfg(feature = "transparent-inputs")]
+use zcash_client_backend::wallet::{Exposure, GapMetadata, TransparentAddressMetadata};
 use zcash_client_backend::{
     address::UnifiedAddress,
     data_api::{Account as _, AccountBirthday, AccountPurpose, AccountSource},
@@ -23,7 +25,7 @@ use zcash_keys::{
     keys::{AddressGenerationError, UnifiedIncomingViewingKey},
 };
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::NetworkType;
+use zcash_protocol::consensus::{BlockHeight, NetworkType};
 use zip32::DiversifierIndex;
 
 use crate::error::Error;
@@ -33,6 +35,9 @@ use crate::error::Error;
 // as is implemented in zcash_client_sqlite/src/wallet/transparent.rs
 #[cfg(feature = "transparent-inputs")]
 pub(crate) const EPHEMERAL_GAP_LIMIT: u32 = 5;
+
+#[cfg(feature = "transparent-inputs")]
+pub(crate) const INTERNAL_GAP_LIMIT: u32 = 5;
 
 /// Internal representation of ID type for accounts. Will be unique for each account.
 #[derive(
@@ -145,6 +150,15 @@ impl Accounts {
         {
             Ok(Some(id))
         } else {
+            if let Some(id) = self
+                .accounts
+                .iter()
+                .find(|(_, account)| account.contains_internal_address(address))
+                .map(|(id, _)| *id)
+            {
+                return Ok(Some(id));
+            }
+
             // then look at ephemeral addresses
             if let Some(id) = self.find_account_for_ephemeral_address(address)? {
                 Ok(Some(id))
@@ -214,6 +228,12 @@ pub(crate) struct EphemeralAddress {
     pub(crate) seen: Option<TxId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InternalAddress {
+    pub(crate) address: TransparentAddress,
+    pub(crate) exposed_at_height: BlockHeight,
+}
+
 impl EphemeralAddress {
     #[cfg(feature = "transparent-inputs")]
     fn mark_used(&mut self, tx: TxId) {
@@ -241,6 +261,7 @@ pub struct Account {
     /// Stores diversified Unified Addresses that have been generated from accounts in the wallet.
     addresses: BTreeMap<DiversifierIndex, UnifiedAddress>,
     pub(crate) ephemeral_addresses: BTreeMap<u32, EphemeralAddress>, // NonHardenedChildIndex (< 1 << 31)
+    pub(crate) internal_addresses: BTreeMap<u32, InternalAddress>,
     _notes: BTreeSet<NoteId>,
 }
 
@@ -258,6 +279,7 @@ impl PartialEq for Account {
             && self.birthday == other.birthday
             && self.addresses == other.addresses
             && self.ephemeral_addresses == other.ephemeral_addresses
+            && self.internal_addresses == other.internal_addresses
             && self._notes == other._notes
     }
 }
@@ -277,6 +299,7 @@ impl Account {
             viewing_key,
             birthday,
             ephemeral_addresses: BTreeMap::new(),
+            internal_addresses: BTreeMap::new(),
             addresses: BTreeMap::new(),
             _notes: BTreeSet::new(),
         };
@@ -386,6 +409,7 @@ impl Account {
             .map(|tivk| tivk.default_address()))
     }
 
+    #[cfg(feature = "transparent-inputs")]
     pub(crate) fn transparent_key_scope_for_address(
         &self,
         address: &TransparentAddress,
@@ -396,6 +420,10 @@ impl Account {
             .any(|(_, unified_address)| unified_address.transparent() == Some(address))
         {
             return Ok(Some(TransparentKeyScope::EXTERNAL));
+        }
+
+        if self.contains_internal_address(address) {
+            return Ok(Some(TransparentKeyScope::INTERNAL));
         }
 
         if self
@@ -418,6 +446,123 @@ impl Account {
 }
 #[cfg(feature = "transparent-inputs")]
 impl Account {
+    pub(crate) fn contains_internal_address(&self, address: &TransparentAddress) -> bool {
+        self.internal_addresses
+            .values()
+            .any(|internal| internal.address == *address)
+    }
+
+    pub(crate) fn internal_address_index(&self, address: &TransparentAddress) -> Option<u32> {
+        self.internal_addresses
+            .iter()
+            .find_map(|(index, internal)| (internal.address == *address).then_some(*index))
+    }
+
+    pub(crate) fn next_internal_address_index(&self) -> Result<u32, Error> {
+        self.internal_addresses
+            .last_key_value()
+            .map_or(Ok(0), |(index, _)| {
+                index
+                    .checked_add(1)
+                    .filter(|index| *index < (1 << 31))
+                    .ok_or_else(|| AddressGenerationError::DiversifierSpaceExhausted.into())
+            })
+    }
+
+    fn internal_address_metadata(
+        index: u32,
+        internal: &InternalAddress,
+        first_gap_index: u32,
+    ) -> TransparentAddressMetadata {
+        let gap_metadata = if index < first_gap_index {
+            GapMetadata::GapRecoverable {
+                gap_limit: INTERNAL_GAP_LIMIT,
+            }
+        } else {
+            GapMetadata::InGap {
+                gap_position: index - first_gap_index,
+                gap_limit: INTERNAL_GAP_LIMIT,
+            }
+        };
+
+        TransparentAddressMetadata::derived(
+            TransparentKeyScope::INTERNAL,
+            NonHardenedChildIndex::from_index(index)
+                .expect("stored internal address index is non-hardened"),
+            Exposure::Exposed {
+                at_height: internal.exposed_at_height,
+                gap_metadata,
+            },
+            None,
+        )
+    }
+
+    pub(crate) fn internal_addresses(
+        &self,
+        first_gap_index: u32,
+    ) -> Vec<(TransparentAddress, TransparentAddressMetadata)> {
+        self.internal_addresses
+            .iter()
+            .map(|(index, internal)| {
+                (
+                    internal.address,
+                    Self::internal_address_metadata(*index, internal, first_gap_index),
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn metadata_for_internal_address(
+        &self,
+        address: &TransparentAddress,
+        first_gap_index: u32,
+    ) -> Option<TransparentAddressMetadata> {
+        self.internal_addresses
+            .iter()
+            .find(|(_, internal)| internal.address == *address)
+            .map(|(index, internal)| {
+                Self::internal_address_metadata(*index, internal, first_gap_index)
+            })
+    }
+
+    pub(crate) fn reserve_internal_addresses(
+        &mut self,
+        start: u32,
+        n: usize,
+        exposed_at_height: BlockHeight,
+        first_gap_index: u32,
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Error> {
+        if n == 0 {
+            return Ok(vec![]);
+        }
+
+        let end = start
+            .checked_add(u32::try_from(n)?)
+            .filter(|end| *end <= (1 << 31))
+            .ok_or(AddressGenerationError::DiversifierSpaceExhausted)?;
+        let account_pubkey = self
+            .viewing_key
+            .transparent()
+            .ok_or(AddressGenerationError::KeyNotAvailable(Typecode::P2pkh))?;
+        let internal_ivk = account_pubkey.derive_internal_ivk()?;
+
+        (start..end)
+            .map(|raw_index| {
+                let address_index = NonHardenedChildIndex::from_index(raw_index)
+                    .ok_or(AddressGenerationError::DiversifierSpaceExhausted)?;
+                let address = internal_ivk.derive_address(address_index)?;
+                let internal = InternalAddress {
+                    address,
+                    exposed_at_height,
+                };
+                let metadata =
+                    Self::internal_address_metadata(raw_index, &internal, first_gap_index);
+                self.internal_addresses.insert(raw_index, internal);
+                Ok((address, metadata))
+            })
+            .collect()
+    }
+
     pub(crate) fn ephemeral_addresses(
         &self,
     ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Error> {
@@ -483,12 +628,14 @@ impl Account {
                             ephemeral_ivk
                                 .derive_ephemeral_address(address_index)
                                 .map(|addr| {
-                                    self.ephemeral_addresses
-                                        .insert(raw_index, EphemeralAddress {
+                                    self.ephemeral_addresses.insert(
+                                        raw_index,
+                                        EphemeralAddress {
                                             address: addr,
                                             seen: None,
                                             used: None,
-                                        });
+                                        },
+                                    );
                                     (
                                         addr,
                                         TransparentAddressMetadata::derived(
@@ -587,6 +734,8 @@ impl zcash_client_backend::data_api::Account for Account {
 }
 
 mod serialization {
+    #[cfg(feature = "orchard")]
+    use incrementalmerkletree::frontier::Frontier;
     use zcash_client_backend::data_api::Zip32Derivation;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_keys::encoding::AddressCodec;
@@ -691,8 +840,20 @@ mod serialization {
                         }),
                     })
                     .collect(),
+                #[cfg(feature = "transparent-inputs")]
+                internal_addresses: acc
+                    .internal_addresses
+                    .into_iter()
+                    .map(|(index, internal)| proto::InternalAddressRecord {
+                        index,
+                        address: internal.address.encode(&EncodingParams),
+                        exposed_at_height: internal.exposed_at_height.into(),
+                    })
+                    .collect(),
                 #[cfg(not(feature = "transparent-inputs"))]
                 ephemeral_addresses: Default::default(),
+                #[cfg(not(feature = "transparent-inputs"))]
+                internal_addresses: Default::default(),
             }
         }
     }
@@ -758,21 +919,50 @@ mod serialization {
                     .into_iter()
                     .map(|address_record| {
                         let address = read_optional!(address_record, ephemeral_address)?;
-                        Ok((address_record.index, EphemeralAddress {
-                            address: TransparentAddress::decode(&EncodingParams, &address.address)?,
-                            used: address
-                                .used_in_tx
-                                .map::<Result<_, Error>, _>(|s| Ok(TxId::from_bytes(s.try_into()?)))
-                                .transpose()?,
-                            seen: address
-                                .seen_in_tx
-                                .map::<Result<_, Error>, _>(|s| Ok(TxId::from_bytes(s.try_into()?)))
-                                .transpose()?,
-                        }))
+                        Ok((
+                            address_record.index,
+                            EphemeralAddress {
+                                address: TransparentAddress::decode(
+                                    &EncodingParams,
+                                    &address.address,
+                                )?,
+                                used: address
+                                    .used_in_tx
+                                    .map::<Result<_, Error>, _>(|s| {
+                                        Ok(TxId::from_bytes(s.try_into()?))
+                                    })
+                                    .transpose()?,
+                                seen: address
+                                    .seen_in_tx
+                                    .map::<Result<_, Error>, _>(|s| {
+                                        Ok(TxId::from_bytes(s.try_into()?))
+                                    })
+                                    .transpose()?,
+                            },
+                        ))
+                    })
+                    .collect::<Result<_, Error>>()?,
+                #[cfg(feature = "transparent-inputs")]
+                internal_addresses: acc
+                    .internal_addresses
+                    .into_iter()
+                    .map(|internal| {
+                        Ok((
+                            internal.index,
+                            InternalAddress {
+                                address: TransparentAddress::decode(
+                                    &EncodingParams,
+                                    &internal.address,
+                                )?,
+                                exposed_at_height: BlockHeight::from(internal.exposed_at_height),
+                            },
+                        ))
                     })
                     .collect::<Result<_, Error>>()?,
                 #[cfg(not(feature = "transparent-inputs"))]
                 ephemeral_addresses: Default::default(),
+                #[cfg(not(feature = "transparent-inputs"))]
+                internal_addresses: Default::default(),
                 _notes: Default::default(),
             })
         }
@@ -794,6 +984,14 @@ mod serialization {
             };
             #[cfg(not(feature = "orchard"))]
             let orchard_tree_bytes = vec![];
+            #[cfg(feature = "orchard")]
+            let ironwood_tree_bytes = {
+                let mut ironwood_tree_bytes = vec![];
+                write_frontier_v1(&mut ironwood_tree_bytes, cstate.final_ironwood_tree())?;
+                ironwood_tree_bytes
+            };
+            #[cfg(not(feature = "orchard"))]
+            let ironwood_tree_bytes = vec![];
 
             Ok(Self {
                 prior_chain_state: Some(proto::ChainState {
@@ -801,6 +999,7 @@ mod serialization {
                     block_hash: cstate.block_hash().0.to_vec(),
                     final_sapling_tree: sapling_tree_bytes,
                     final_orchard_tree: orchard_tree_bytes,
+                    final_ironwood_tree: ironwood_tree_bytes,
                 }),
                 recover_until: birthday.recover_until().map(|r| r.into()),
             })
@@ -818,6 +1017,12 @@ mod serialization {
                 read_frontier_v1(&cs.final_sapling_tree[..])?,
                 #[cfg(feature = "orchard")]
                 read_frontier_v1(&cs.final_orchard_tree[..])?,
+                #[cfg(feature = "orchard")]
+                if cs.final_ironwood_tree.is_empty() {
+                    Frontier::empty()
+                } else {
+                    read_frontier_v1(&cs.final_ironwood_tree[..])?
+                },
             );
 
             let recover_until = birthday.recover_until.map(|r| r.into());
@@ -836,7 +1041,7 @@ mod serialization {
 
         #[test]
         fn test_account_serialization_roundtrip() {
-            let acc = Account::new(
+            let mut acc = Account::new(
                 "test_account_name".to_string(),
                 AccountId(0),
                 AccountSource::Imported {
@@ -851,11 +1056,20 @@ mod serialization {
             )
             .unwrap();
 
+            #[cfg(feature = "transparent-inputs")]
+            acc.reserve_internal_addresses(0, 1, BlockHeight::from(123), 0)
+                .unwrap();
+
             let proto_acc: proto::Account = acc.clone().into();
             let acc2: Account = proto_acc.clone().try_into().unwrap();
             let proto_acc2: proto::Account = acc2.clone().into();
 
             assert_eq!(proto_acc, proto_acc2);
+
+            let mut legacy_proto = proto_acc2;
+            legacy_proto.internal_addresses.clear();
+            let legacy_acc: Account = legacy_proto.try_into().unwrap();
+            assert!(legacy_acc.internal_addresses.is_empty());
         }
     }
 }

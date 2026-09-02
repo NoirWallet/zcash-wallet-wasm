@@ -353,9 +353,12 @@ impl TryFrom<&RawTransactionRequest> for Erc20Request {
         // Get the function name and ensure it's "transfer"
         let fn_name = raw.function_name.as_ref().context(MissingFnSnafu)?;
         let decoded = fn_name.decode()?;
-        ensure!(decoded == "transfer", FnNameSnafu {
-            seen: decoded.to_string()
-        });
+        ensure!(
+            decoded == "transfer",
+            FnNameSnafu {
+                seen: decoded.to_string()
+            }
+        );
 
         // Check ABI parameters - must have exactly address and uint256
         let abi_params: Vec<_> = raw
@@ -363,9 +366,12 @@ impl TryFrom<&RawTransactionRequest> for Erc20Request {
             .iter()
             .flat_map(|p| p.abi_parameters())
             .collect();
-        ensure!(abi_params.len() == 2, AbiParameterLenSnafu {
-            seen: abi_params.len()
-        });
+        ensure!(
+            abi_params.len() == 2,
+            AbiParameterLenSnafu {
+                seen: abi_params.len()
+            }
+        );
 
         // Indexing is safe here because we ensured the length == 2 above
         let (param1_ty, param1_value) = abi_params[0];

@@ -50,6 +50,11 @@ message MemoryWallet {
   repeated TransparentSpendCacheRecord transparent_spend_map = 17;
   // Queue of transaction data requests the wallet should make to the lightwalletd provided to obtain more complete information
   repeated TransactionDataRequest transaction_data_requests = 18;
+
+  // Ironwood shielded pool shard tree
+  ShardTree ironwood_tree = 19;
+  // the block heights corresponding to the last note commitment for each shard in the Ironwood tree
+  repeated TreeEndHeightsRecord ironwood_tree_shard_end_heights = 20;
 }
 
 message Accounts {
@@ -73,6 +78,7 @@ message Account {
   repeated EphemeralAddressRecord ephemeral_addresses = 9; // map from index to encoded unified address
   string account_name = 10; // human readable name for the account
   optional string key_source = 11; // key source metadata
+  repeated InternalAddressRecord internal_addresses = 12; // map from internal child index to transparent change address
 }
 
 enum AccountKind {
@@ -114,11 +120,18 @@ message EphemeralAddressRecord {
   EphemeralAddress ephemeral_address = 2;
 }
 
+message InternalAddressRecord {
+  uint32 index = 1;
+  string address = 2;
+  uint32 exposed_at_height = 3;
+}
+
 message ChainState {
   uint32 block_height = 1; // the height of this block
   bytes block_hash = 2;
   bytes final_sapling_tree = 3;
   bytes final_orchard_tree = 4;
+  bytes final_ironwood_tree = 5;
 }
 
 message WalletBlock {
@@ -131,6 +144,8 @@ message WalletBlock {
   optional uint32 sapling_output_count = 7; // the number of Sapling outputs in this block
   optional uint32 orchard_commitment_tree_size = 8; // the size of the Orchard note commitment tree as of the end of this block
   optional uint32 orchard_action_count = 9; // the number of Orchard actions in this block
+  optional uint32 ironwood_commitment_tree_size = 10; // the size of the Ironwood note commitment tree as of the end of this block
+  optional uint32 ironwood_action_count = 11; // the number of Ironwood actions in this block
 }
 
 message TransactionEntry {

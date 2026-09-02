@@ -77,7 +77,7 @@ impl TryFrom<(u32, &[u8])> for Ivk {
             Typecode::Unknown(_) => Ok(Ivk::Unknown { typecode, data }),
         }
         .map_err(|e| {
-            ParseError::InvalidEncoding(format!("Invalid ivk for typecode {}: {:?}", typecode, e))
+            ParseError::InvalidEncoding(format!("Invalid ivk for typecode {typecode}: {e:?}"))
         })
     }
 }
@@ -364,15 +364,18 @@ mod tests {
         ]);
 
         // `Uivk::items` sorts the ivks in priority order.
-        assert_eq!(uivk.items(), vec![
-            Ivk::Orchard([0; 64]),
-            Ivk::Sapling([0; 64]),
-            Ivk::P2pkh([0; 65]),
-            Ivk::Unknown {
-                typecode: 0xff,
-                data: vec![],
-            },
-        ])
+        assert_eq!(
+            uivk.items(),
+            vec![
+                Ivk::Orchard([0; 64]),
+                Ivk::Sapling([0; 64]),
+                Ivk::P2pkh([0; 65]),
+                Ivk::Unknown {
+                    typecode: 0xff,
+                    data: vec![],
+                },
+            ]
+        )
     }
 
     #[test]
@@ -387,23 +390,29 @@ mod tests {
         );
         assert_eq!(format!("{:?}", Ivk::P2pkh([0; 65])), "Ivk::P2pkh(\"...\")");
         assert_eq!(
-            format!("{:?}", Ivk::Unknown {
-                typecode: 31337,
-                data: vec![4, 5, 6],
-            }),
+            format!(
+                "{:?}",
+                Ivk::Unknown {
+                    typecode: 31337,
+                    data: vec![4, 5, 6],
+                }
+            ),
             "Ivk::Unknown { typecode: 31337, data: \"...\" }"
         );
     }
 
     #[test]
     fn uivk_debug_redaction() {
-        let uivk = Uivk(vec![Ivk::Sapling([0; 64]), Ivk::Unknown {
-            typecode: 9,
-            data: vec![8, 8, 8],
-        }]);
+        let uivk = Uivk(vec![
+            Ivk::Sapling([0; 64]),
+            Ivk::Unknown {
+                typecode: 9,
+                data: vec![8, 8, 8],
+            },
+        ]);
 
         assert_eq!(
-            format!("{:?}", uivk),
+            format!("{uivk:?}"),
             "Uivk([Ivk::Sapling(\"...\"), Ivk::Unknown { typecode: 9, data: \"...\" }])"
         );
     }

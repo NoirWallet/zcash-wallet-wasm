@@ -27,6 +27,7 @@ jobs:
           - Orchard
           - all-pools
           - all-features
+          - NU6.3
           - NU7
 
         include:
@@ -54,7 +55,7 @@ jobs:
       RUSTDOCFLAGS: ${{ matrix.rustflags }}
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - id: prepare
@@ -92,6 +93,7 @@ jobs:
           - Orchard
           - all-pools
           - all-features
+          - NU6.3
           - NU7
 
         include:
@@ -116,6 +118,8 @@ jobs:
           - target: macOS
             state: all-features
           - target: macOS
+            state: NU6.3
+          - target: macOS
             state: NU7
 
     env:
@@ -123,7 +127,7 @@ jobs:
       RUSTDOCFLAGS: ${{ matrix.rustflags }}
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - id: prepare
@@ -137,7 +141,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: msrv
-          save-if: ${{ matrix.state == 'all-features' }}
+          save-if: ${{ matrix.state == 'all-features' && matrix.target != 'Windows' }}
       - name: Run tests
         run: >
           cargo test
@@ -159,6 +163,7 @@ jobs:
           - Sapling-only
           - Orchard
           - all-features
+          - NU6.3
           - NU7
 
         include:
@@ -180,7 +185,7 @@ jobs:
       RUSTDOCFLAGS: ${{ matrix.rustflags }}
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - id: prepare
@@ -204,61 +209,6 @@ jobs:
       - name: Verify working directory is clean
         run: git diff --exit-code
 
-  # States that we want to ensure can be built, but that we don't actively run tests for.
-  check-msrv:
-    name: Check ${{ matrix.state }} build on ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        target:
-          - Linux
-          - macOS
-          - Windows
-        state:
-          - ZFuture
-          - ZFuture-allfeatures
-
-        include:
-          - target: Linux
-            os: ubuntu-latest
-          - target: macOS
-            os: macOS-latest
-          - target: Windows
-            os: windows-latest
-
-          - state: ZFuture
-            rustflags: '--cfg zcash_unstable="zfuture"'
-          - state: ZFuture-allfeatures
-            all-features: true
-            rustflags: '--cfg zcash_unstable="zfuture"'
-
-    env:
-      RUSTFLAGS: ${{ matrix.rustflags }}
-      RUSTDOCFLAGS: ${{ matrix.rustflags }}
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - id: prepare
-        uses: ./.github/actions/prepare
-        with:
-          all-features: ${{ matrix.all-features || false }}
-          extra-features: ${{ matrix.extra_flags || '' }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          shared-key: msrv
-          save-if: "false"
-      - name: Run check
-        run: >
-          cargo check
-          --release
-          --workspace
-          --tests
-          ${{ steps.prepare.outputs.feature-flags }}
-      - name: Verify working directory is clean
-        run: git diff --exit-code
-
   build-latest:
     name: Latest build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -270,7 +220,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macOS-latest]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - id: prepare
@@ -314,7 +264,7 @@ jobs:
             build_deps: >
               gcc-multilib
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           path: crates
@@ -360,7 +310,7 @@ jobs:
             build_deps: >
               gcc-arm-none-eabi
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           path: crates
@@ -407,7 +357,7 @@ jobs:
     name: Bitrot check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       # Build benchmarks to prevent bitrot
@@ -420,7 +370,7 @@ jobs:
     permissions:
       checks: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       # We can't currently use only the common feature set (to exclude checking of
@@ -444,7 +394,7 @@ jobs:
       checks: write
     continue-on-error: true
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       # We can't currently use only the common feature set (to exclude checking of
@@ -475,7 +425,7 @@ jobs:
     name: Intra-doc links
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - id: prepare
@@ -501,7 +451,7 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Check formatting
@@ -511,7 +461,7 @@ jobs:
     name: Readme dependency graph
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Check consistency
@@ -521,7 +471,7 @@ jobs:
     name: protobuf consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - id: prepare
@@ -547,7 +497,7 @@ jobs:
     name: UUID validity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Extract UUIDs
@@ -581,7 +531,6 @@ jobs:
     name: Required status checks have passed
     needs:
       - required-test
-      - check-msrv
       - build-latest
       - build-nodefault
       - bitrot

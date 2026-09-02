@@ -1,7 +1,9 @@
 use std::num::NonZeroU32;
 
 #[cfg(feature = "transparent-inputs")]
-use zcash_client_backend::data_api::{TransparentOutputFilter, WalletUtxo};
+use zcash_client_backend::{
+    data_api::CoinbaseFilter, fees::StandardFeeRule, wallet::WalletTransparentOutput,
+};
 use zcash_client_backend::{
     data_api::{
         AccountMeta, InputSource, NoteFilter, PoolMeta, ReceivedNotes, TargetValue, WalletRead,
@@ -11,22 +13,33 @@ use zcash_client_backend::{
 };
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
-    ShieldedProtocol::{self, Sapling},
+    ShieldedPool,
     consensus::{self, BranchId},
     value::Zatoshis,
 };
-
-#[cfg(feature = "orchard")]
-use zcash_protocol::ShieldedProtocol::Orchard;
 
 #[cfg(feature = "transparent-inputs")]
 use {
     transparent::{address::TransparentAddress, bundle::OutPoint},
     zcash_client_backend::data_api::TransactionStatus,
+    zcash_primitives::transaction::TxId,
+    zcash_primitives::transaction::fees::{
+        FeeRule,
+        transparent::{InputSize, InputView},
+        zip317,
+    },
     zcash_protocol::consensus::BlockHeight,
 };
 
 use crate::{AccountId, MemoryWalletDb, error::Error, to_spendable_notes};
+
+#[cfg(feature = "transparent-inputs")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransparentOutputStatus {
+    Spendable,
+    Pending,
+    Unavailable,
+}
 
 impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
     type Error = crate::error::Error;
@@ -36,7 +49,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
     fn get_spendable_note(
         &self,
         txid: &zcash_primitives::transaction::TxId,
-        protocol: zcash_protocol::ShieldedProtocol,
+        protocol: ShieldedPool,
         index: u32,
         target_height: TargetHeight,
     ) -> Result<
@@ -48,9 +61,10 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         >,
         Self::Error,
     > {
-        let note = self.received_notes.iter().find(|rn| {
-            &rn.txid == txid && rn.note.protocol() == protocol && rn.output_index == index
-        });
+        let note = self
+            .received_notes
+            .iter()
+            .find(|rn| &rn.txid == txid && rn.note.pool() == protocol && rn.output_index == index);
 
         Ok(if let Some(note) = note {
             if self.note_is_spent(note, target_height)? {
@@ -99,16 +113,16 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         &self,
         account: Self::AccountId,
         target_value: TargetValue,
-        sources: &[zcash_protocol::ShieldedProtocol],
+        sources: &[ShieldedPool],
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         exclude: &[Self::NoteRef],
     ) -> Result<zcash_client_backend::data_api::ReceivedNotes<Self::NoteRef>, Self::Error> {
-        let sapling_eligible_notes = if sources.contains(&Sapling) {
+        let sapling_eligible_notes = if sources.contains(&ShieldedPool::Sapling) {
             self.select_spendable_notes_from_pool(
                 account,
                 target_value,
-                &Sapling,
+                &ShieldedPool::Sapling,
                 target_height,
                 confirmations_policy,
                 exclude,
@@ -118,11 +132,25 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         };
 
         #[cfg(feature = "orchard")]
-        let orchard_eligible_notes = if sources.contains(&Orchard) {
+        let orchard_eligible_notes = if sources.contains(&ShieldedPool::Orchard) {
             self.select_spendable_notes_from_pool(
                 account,
                 target_value,
-                &Orchard,
+                &ShieldedPool::Orchard,
+                target_height,
+                confirmations_policy,
+                exclude,
+            )?
+        } else {
+            Vec::new()
+        };
+
+        #[cfg(feature = "orchard")]
+        let ironwood_eligible_notes = if sources.contains(&ShieldedPool::Ironwood) {
+            self.select_spendable_notes_from_pool(
+                account,
+                target_value,
+                &ShieldedPool::Ironwood,
                 target_height,
                 confirmations_policy,
                 exclude,
@@ -135,13 +163,15 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             &sapling_eligible_notes,
             #[cfg(feature = "orchard")]
             &orchard_eligible_notes,
+            #[cfg(feature = "orchard")]
+            &ironwood_eligible_notes,
         )
     }
 
     fn select_unspent_notes(
         &self,
         _account: Self::AccountId,
-        _sources: &[ShieldedProtocol],
+        _sources: &[ShieldedPool],
         _target_height: TargetHeight,
         _exclude: &[Self::NoteRef],
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
@@ -154,8 +184,8 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         address: &TransparentAddress,
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
-        output_filter: TransparentOutputFilter,
-    ) -> Result<Vec<WalletUtxo>, Self::Error> {
+        output_filter: CoinbaseFilter,
+    ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         // TODO: take into consideration coinbase maturity
         // See <https://github.com/zcash/librustzcash/issues/821>
         let txos = self
@@ -168,27 +198,112 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
                     .unwrap_or(false)
             })
             .filter(|(_, _, tx)| match output_filter {
-                TransparentOutputFilter::All => true,
+                CoinbaseFilter::AllTransparentOutputs => true,
                 // Coinbase transactions have tx_index == 0. If tx_index is unknown
                 // (None), conservatively treat it as **non-coinbase**, matching the SQL
                 // implementation's IFNULL(tx_index, 1) == 0 behavior.
-                TransparentOutputFilter::CoinbaseOnly => {
+                CoinbaseFilter::CoinbaseOnly => {
                     tx.is_some_and(|tx| tx.tx_index().unwrap_or(1) == 0)
+                }
+                CoinbaseFilter::NonCoinbaseOnly => {
+                    !tx.is_some_and(|tx| tx.tx_index().unwrap_or(1) == 0)
                 }
             })
             .filter_map(|(outpoint, txo, tx)| {
                 txo.to_wallet_transparent_output(outpoint, tx.and_then(|tx| tx.mined_height()))
-                    .map(|out| {
-                        WalletUtxo::new(
-                            out,
-                            // FIXME: this needs to be updated to identify the transparent key
-                            // scope for derived addresses in the wallet.
-                            None,
-                        )
-                    })
             })
             .collect();
         Ok(txos)
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    #[allow(clippy::too_many_arguments)]
+    fn select_spendable_transparent_outputs(
+        &self,
+        account: Self::AccountId,
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+        output_filter: CoinbaseFilter,
+        address_allow_list: Option<&[TransparentAddress]>,
+        target_value: TargetValue,
+        max_inputs: usize,
+        fee_rule: &StandardFeeRule,
+    ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        let target_zat = match target_value {
+            TargetValue::AtLeast(value) => Some(u64::from(value)),
+            TargetValue::AllFunds(_) => None,
+        };
+
+        let mut eligible = self
+            .transparent_received_outputs
+            .iter()
+            .filter(|(_, output)| output.account_id == account)
+            .filter(|(_, output)| {
+                address_allow_list.is_none_or(|addresses| addresses.contains(&output.address))
+            })
+            .map(|(outpoint, output)| (outpoint, output, self.tx_table.get(&output.transaction_id)))
+            .filter(|(outpoint, _, _)| {
+                self.utxo_is_spendable(outpoint, target_height, confirmations_policy)
+                    .unwrap_or(false)
+            })
+            .filter(|(_, _, tx)| match output_filter {
+                CoinbaseFilter::AllTransparentOutputs => true,
+                CoinbaseFilter::CoinbaseOnly => {
+                    tx.is_some_and(|tx| tx.tx_index().unwrap_or(1) == 0)
+                }
+                CoinbaseFilter::NonCoinbaseOnly => {
+                    !tx.is_some_and(|tx| tx.tx_index().unwrap_or(1) == 0)
+                }
+            })
+            .filter(|(_, output, _)| output.txout.value() >= zip317::MARGINAL_FEE)
+            .filter_map(|(outpoint, output, tx)| {
+                output.to_wallet_transparent_output(outpoint, tx.and_then(|tx| tx.mined_height()))
+            })
+            .collect::<Vec<_>>();
+
+        eligible.sort_by(|a, b| {
+            b.value()
+                .cmp(&a.value())
+                .then_with(|| a.outpoint().cmp(b.outpoint()))
+        });
+
+        let mut selected = Vec::new();
+        let mut accumulated_value = 0u64;
+        let mut cumulative_input_size = 0usize;
+
+        for output in eligible {
+            if selected.len() >= max_inputs {
+                break;
+            }
+
+            if let Some(target) = target_zat {
+                let cumulative_fee = fee_rule
+                    .fee_required(
+                        &self.params,
+                        BlockHeight::from(target_height),
+                        [InputSize::Known(cumulative_input_size)],
+                        std::iter::empty::<usize>(),
+                        0,
+                        0,
+                        0,
+                        0,
+                    )
+                    .map_err(|error| Error::Other(format!("fee calculation failed: {error}")))?;
+                if accumulated_value.saturating_sub(u64::from(cumulative_fee)) >= target {
+                    break;
+                }
+            }
+
+            let input_size = match output.serialized_size() {
+                InputSize::Known(size) => size,
+                InputSize::Unknown(_) => zip317::P2PKH_STANDARD_INPUT_SIZE,
+            };
+            cumulative_input_size = cumulative_input_size.saturating_add(input_size);
+            accumulated_value = accumulated_value.saturating_add(u64::from(output.value()));
+            selected.push(output);
+        }
+
+        Ok(selected)
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -196,7 +311,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         &self,
         outpoint: &OutPoint,
         _target_height: TargetHeight,
-    ) -> Result<Option<WalletUtxo>, Self::Error> {
+    ) -> Result<Option<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         // FIXME: make use of `target_height` to check spendability.
         Ok(self
             .transparent_received_outputs
@@ -204,14 +319,6 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             .map(|txo| (txo, self.tx_table.get(&txo.transaction_id)))
             .and_then(|(txo, tx)| {
                 txo.to_wallet_transparent_output(outpoint, tx.and_then(|tx| tx.mined_height()))
-                    .map(|out| {
-                        WalletUtxo::new(
-                            out,
-                            // FIXME: this needs to be updated to identify the transparent key
-                            // scope for derived addresses in the wallet.
-                            None,
-                        )
-                    })
             }))
     }
 
@@ -229,7 +336,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         );
 
         let sapling_pool_meta = self.spendable_notes_meta(
-            ShieldedProtocol::Sapling,
+            ShieldedPool::Sapling,
             account_id,
             selector,
             target_height,
@@ -239,7 +346,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
 
         #[cfg(feature = "orchard")]
         let orchard_pool_meta = self.spendable_notes_meta(
-            ShieldedProtocol::Orchard,
+            ShieldedPool::Orchard,
             account_id,
             selector,
             target_height,
@@ -249,7 +356,23 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         #[cfg(not(feature = "orchard"))]
         let orchard_pool_meta = None;
 
-        Ok(AccountMeta::new(sapling_pool_meta, orchard_pool_meta))
+        #[cfg(feature = "orchard")]
+        let ironwood_pool_meta = self.spendable_notes_meta(
+            ShieldedPool::Ironwood,
+            account_id,
+            selector,
+            target_height,
+            confirmations_policy,
+            exclude,
+        )?;
+        #[cfg(not(feature = "orchard"))]
+        let ironwood_pool_meta = None;
+
+        Ok(AccountMeta::new(
+            sapling_pool_meta,
+            orchard_pool_meta,
+            ironwood_pool_meta,
+        ))
     }
 }
 
@@ -260,7 +383,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         &self,
         account: AccountId,
         target_value: TargetValue,
-        pool: &zcash_protocol::ShieldedProtocol,
+        pool: &ShieldedPool,
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         exclude: &[NoteId],
@@ -278,7 +401,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .received_notes
             .iter()
             .filter(|note| note.account_id == account)
-            .filter(|note| note.note.protocol() == *pool)
+            .filter(|note| note.note.pool() == *pool)
             .filter(|note| {
                 self.note_is_spendable(
                     note,
@@ -301,7 +424,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .take_while(|note| {
                 let take = match target_value {
                     TargetValue::AtLeast(target) => value_acc <= target,
-                    TargetValue::AllFunds(_) => unimplemented!(),
+                    TargetValue::AllFunds(_) => true,
                 };
                 value_acc = (value_acc + note.note.value()).expect("value overflow");
                 take
@@ -318,19 +441,66 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<bool, Error> {
-        let confirmed_height =
-            BlockHeight::from(target_height) - u32::from(confirmations_policy.trusted());
+        Ok(matches!(
+            self.transparent_output_status(outpoint, target_height, confirmations_policy)?,
+            TransparentOutputStatus::Spendable
+        ))
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) fn transparent_output_status(
+        &self,
+        outpoint: &OutPoint,
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<TransparentOutputStatus, Error> {
         let utxo = self
             .transparent_received_outputs
             .get(outpoint)
             .ok_or(Error::NoteNotFound)?;
+        if self.utxo_is_spent(outpoint, target_height)? {
+            return Ok(TransparentOutputStatus::Unavailable);
+        }
+
+        let required_confirmations =
+            self.transparent_required_confirmations(&utxo.transaction_id, confirmations_policy);
+        let confirmed_height = BlockHeight::from(target_height) - u32::from(required_confirmations);
         if let Some(tx) = self.tx_table.get(&utxo.transaction_id) {
-            Ok(
-                tx.is_mined_or_unexpired_at(confirmed_height) // tx that created it is mined
-                && !self.utxo_is_spent(outpoint, target_height)?, // not spent
-            )
+            if tx.is_mined_or_unexpired_at(confirmed_height) {
+                Ok(TransparentOutputStatus::Spendable)
+            } else if tx.is_mined_or_unexpired_at(BlockHeight::from(target_height)) {
+                Ok(TransparentOutputStatus::Pending)
+            } else {
+                Ok(TransparentOutputStatus::Unavailable)
+            }
         } else {
-            Ok(false)
+            Ok(TransparentOutputStatus::Unavailable)
+        }
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn transaction_is_wallet_created(&self, txid: &TxId) -> bool {
+        self.sent_notes.keys().any(|note_id| note_id.txid() == txid)
+            || self
+                .received_note_spends
+                .values()
+                .any(|spend_txid| spend_txid == txid)
+            || self
+                .transparent_received_output_spends
+                .values()
+                .any(|spend_txid| spend_txid == txid)
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn transparent_required_confirmations(
+        &self,
+        txid: &TxId,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> NonZeroU32 {
+        if self.transaction_is_wallet_created(txid) {
+            confirmations_policy.trusted()
+        } else {
+            confirmations_policy.untrusted()
         }
     }
 
@@ -367,7 +537,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
     fn spendable_notes_meta(
         &self,
-        protocol: ShieldedProtocol,
+        protocol: ShieldedPool,
         account: AccountId,
         filter: &NoteFilter,
         target_height: TargetHeight,
@@ -384,7 +554,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .received_notes
             .iter()
             .filter(|note| note.account_id == account)
-            .filter(|note| note.note.protocol() == protocol)
+            .filter(|note| note.note.pool() == protocol)
             .filter(|note| {
                 self.note_is_spendable(
                     note,
@@ -437,5 +607,36 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "transparent-inputs"))]
+mod tests {
+    use super::*;
+    use zcash_protocol::consensus::Network;
+
+    #[test]
+    fn distinguishes_wallet_created_and_external_transparent_outputs() {
+        let mut wallet = MemoryWalletDb::new(Network::TestNetwork, 100);
+        let external_txid = TxId::from_bytes([1; 32]);
+        let wallet_created_txid = TxId::from_bytes([2; 32]);
+        let funding_outpoint = OutPoint::new([3; 32], 0);
+        let policy = ConfirmationsPolicy::default();
+
+        assert!(!wallet.transaction_is_wallet_created(&external_txid));
+        assert_eq!(
+            u32::from(wallet.transparent_required_confirmations(&external_txid, policy)),
+            10
+        );
+
+        wallet
+            .transparent_received_output_spends
+            .insert(funding_outpoint, wallet_created_txid);
+
+        assert!(wallet.transaction_is_wallet_created(&wallet_created_txid));
+        assert_eq!(
+            u32::from(wallet.transparent_required_confirmations(&wallet_created_txid, policy)),
+            3
+        );
     }
 }

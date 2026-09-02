@@ -15,6 +15,7 @@ use crate::Pczt;
 
 mod orchard;
 pub use self::orchard::OrchardError;
+pub type IronwoodError = OrchardError;
 
 mod sapling;
 pub use self::sapling::SaplingError;
@@ -77,6 +78,7 @@ impl<'a> TransactionExtractor<'a> {
         } = self;
 
         let crate::ParsedPczt { tx_data, .. } = pczt.extract_tx_data::<Unbound, Error>(
+            crate::common::AnchorRequirement::Required,
             |t| {
                 t.extract()
                     .map_err(|e| Error::Transparent(TransparentError::Extract(e)))
@@ -88,6 +90,10 @@ impl<'a> TransactionExtractor<'a> {
             |o| {
                 o.extract()
                     .map_err(|e| Error::Orchard(OrchardError::Extract(e)))
+            },
+            |i| {
+                i.extract()
+                    .map_err(|e| Error::Ironwood(IronwoodError::Extract(e)))
             },
         )?;
 
@@ -112,11 +118,9 @@ impl<'a> TransactionExtractor<'a> {
                 })
                 .transpose()
             },
-            #[cfg(zcash_unstable = "zfuture")]
-            |_| unimplemented!("PCZT support for TZEs is not implemented."),
         )?;
 
-        let tx = tx_data.freeze().expect("v5 tx can't fail here");
+        let tx = tx_data.freeze().expect("txid construction can't fail here");
 
         // Now that we have a supposedly fully-authorized transaction, verify it.
         if let Some(bundle) = tx.sapling_bundle() {
@@ -129,6 +133,10 @@ impl<'a> TransactionExtractor<'a> {
             orchard::verify_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
                 .map_err(Error::Orchard)?;
         }
+        if let Some(bundle) = tx.ironwood_bundle() {
+            orchard::verify_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
+                .map_err(Error::Ironwood)?;
+        }
 
         Ok(tx)
     }
@@ -140,14 +148,13 @@ impl Authorization for Unbound {
     type TransparentAuth = ::transparent::pczt::Unbound;
     type SaplingAuth = ::sapling::pczt::Unbound;
     type OrchardAuth = ::orchard::pczt::Unbound;
-    #[cfg(zcash_unstable = "zfuture")]
-    type TzeAuth = core::convert::Infallible;
 }
 
 /// Errors that can occur while extracting a transaction from a PCZT.
 #[derive(Debug)]
 pub enum Error {
     Extract(crate::ExtractError),
+    Ironwood(IronwoodError),
     Orchard(OrchardError),
     Sapling(SaplingError),
     SaplingRequired,

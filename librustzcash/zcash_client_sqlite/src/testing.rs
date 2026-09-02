@@ -91,9 +91,10 @@ impl TestCache for BlockCache {
     fn truncate_to_height(&mut self, height: zcash_protocol::consensus::BlockHeight) {
         self.db_cache
             .0
-            .execute("DELETE FROM compactblocks WHERE height > ?", params![
-                u32::from(height)
-            ])
+            .execute(
+                "DELETE FROM compactblocks WHERE height > ?",
+                params![u32::from(height)],
+            )
             .unwrap();
     }
 }

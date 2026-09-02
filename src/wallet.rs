@@ -10,6 +10,7 @@ use sapling::ProofGenerationKey;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
@@ -22,17 +23,23 @@ use tonic::{
     codegen::{Body, Bytes, StdError},
 };
 use zcash_address::ZcashAddress;
-use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
+use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
+use zcash_client_backend::data_api::wallet::input_selection::{
+    GreedyInputSelector, SpendPolicy, TransparentSpendPolicy,
+};
 use zcash_client_backend::data_api::wallet::{
-    ConfirmationsPolicy, create_pczt_from_proposal, create_pczt_from_proposal_with_expiry_delta,
-    extract_and_store_transaction_from_pczt, propose_shielding, propose_transfer,
+    ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
+    propose_send_max_transfer, propose_send_max_transparent_transfer, propose_shielding,
+    propose_transfer,
 };
 use zcash_client_backend::data_api::{
-    Account, AccountBirthday, AccountPurpose, TransparentOutputFilter, WalletSummary,
-    Zip32Derivation,
+    Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, TransactionDataRequest,
+    WalletSummary, Zip32Derivation,
 };
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
-use zcash_client_backend::fees::{DustOutputPolicy, SplitPolicy, StandardFeeRule};
+use zcash_client_backend::fees::{
+    DustOutputPolicy, SplitPolicy, StandardFeeRule, TransparentChangePolicy,
+};
 use zcash_client_backend::sync::{run, run_next_batch};
 use zcash_client_backend::wallet::OvkPolicy;
 use zcash_client_backend::zip321::{Payment, TransactionRequest};
@@ -40,13 +47,13 @@ use zcash_client_backend::{
     data_api::{InputSource, WalletCommitmentTrees, WalletRead, WalletWrite},
     proto::service::{self, compact_tx_streamer_client::CompactTxStreamerClient},
 };
-use zcash_primitives::transaction::TxId;
 use zcash_primitives::transaction::fees::{FeeRule, zip317 as prim_zip317};
+use zcash_primitives::transaction::{TxId, TxVersion};
 use zcash_proofs::prover::LocalTxProver;
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
-use zcash_protocol::ShieldedProtocol;
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::ShieldedPool;
+use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkUpgrade, Parameters};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
@@ -86,6 +93,14 @@ fn validate_expiry_delta_blocks(expiry_delta_blocks: u32) -> Result<u32, Error> 
     }
 }
 
+fn transparent_transfer_policies() -> (SpendPolicy, TransparentChangePolicy) {
+    (
+        SpendPolicy::shielded_pools(std::iter::empty::<ShieldedPool>())
+            .with_transparent(TransparentSpendPolicy::any_account_addr()),
+        TransparentChangePolicy::TransparentChangeAllowed,
+    )
+}
+
 fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
     proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
 ) -> Result<u64, Error> {
@@ -100,6 +115,29 @@ fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
     Ok(fee.into())
 }
 
+fn proposal_payment_amount_zats<FeeRuleT, NoteRef>(
+    proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
+) -> Result<u64, Error> {
+    let amount = proposal.steps().iter().try_fold(
+        Zatoshis::ZERO,
+        |step_total, step| -> Result<Zatoshis, Error> {
+            step.transaction_request()
+                .payments()
+                .values()
+                .try_fold(step_total, |total, payment| {
+                    let payment_amount = payment.amount().ok_or_else(|| {
+                        Error::Generic("Max-transfer proposal omitted a payment amount".to_string())
+                    })?;
+                    (total + payment_amount)
+                        .ok_or(zcash_protocol::value::BalanceError::Overflow)
+                        .map_err(Error::from)
+                })
+        },
+    )?;
+
+    Ok(amount.into())
+}
+
 /// Global prover instance, initialized once on first use
 /// This avoids repeatedly loading the expensive Sapling parameters
 static PROVER: OnceLock<LocalTxProver> = OnceLock::new();
@@ -112,27 +150,101 @@ fn get_prover() -> &'static LocalTxProver {
     })
 }
 
-/// Global Orchard proving key instance, initialized once on first use
-/// This avoids repeatedly building the expensive Orchard proving key
-static ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
+/// Global Orchard proving key instances, initialized once on first use.
+/// This avoids repeatedly building the expensive Orchard proving keys.
+static ORCHARD_PROVING_KEY_INSECURE_PRE_NU6_2: OnceLock<orchard::circuit::ProvingKey> =
+    OnceLock::new();
+static ORCHARD_PROVING_KEY_FIXED_POST_NU6_2: OnceLock<orchard::circuit::ProvingKey> =
+    OnceLock::new();
+static ORCHARD_PROVING_KEY_POST_NU6_3: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
 
-/// Get or initialize the global Orchard proving key
-fn get_orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
-    ORCHARD_PROVING_KEY.get_or_init(|| {
-        tracing::info!("🔧 Initializing Orchard ProvingKey...");
-        orchard::circuit::ProvingKey::build()
+/// Global Orchard verifying key instances, initialized once on first use.
+/// This avoids repeatedly building the expensive Orchard verifying keys.
+static ORCHARD_VERIFYING_KEY_INSECURE_PRE_NU6_2: OnceLock<orchard::circuit::VerifyingKey> =
+    OnceLock::new();
+static ORCHARD_VERIFYING_KEY_FIXED_POST_NU6_2: OnceLock<orchard::circuit::VerifyingKey> =
+    OnceLock::new();
+static ORCHARD_VERIFYING_KEY_POST_NU6_3: OnceLock<orchard::circuit::VerifyingKey> = OnceLock::new();
+
+fn orchard_circuit_version_for_branch(
+    branch_id: BranchId,
+) -> orchard::circuit::OrchardCircuitVersion {
+    match branch_id {
+        BranchId::Nu6_3 => orchard::circuit::OrchardCircuitVersion::PostNu6_3,
+        BranchId::Nu6_2 => orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
+        // NU7 is still behind a cfg in librustzcash; if this crate is compiled with
+        // that cfg enabled, its placeholder branch ID uses the post-NU6.3 circuit.
+        branch_id if u32::from(branch_id) == 0xffff_ffff => {
+            orchard::circuit::OrchardCircuitVersion::PostNu6_3
+        }
+        _ => orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2,
+    }
+}
+
+fn orchard_circuit_version_for_pczt(
+    pczt: &Pczt,
+) -> Result<orchard::circuit::OrchardCircuitVersion, Error> {
+    let consensus_branch_id = *pczt.global().consensus_branch_id();
+    BranchId::try_from(consensus_branch_id)
+        .map(orchard_circuit_version_for_branch)
+        .map_err(|_| {
+            Error::Generic(format!(
+                "Unsupported consensus branch ID in PCZT: 0x{consensus_branch_id:08x}"
+            ))
+        })
+}
+
+fn orchard_proving_key_lock(
+    circuit_version: orchard::circuit::OrchardCircuitVersion,
+) -> &'static OnceLock<orchard::circuit::ProvingKey> {
+    match circuit_version {
+        orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2 => {
+            &ORCHARD_PROVING_KEY_INSECURE_PRE_NU6_2
+        }
+        orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2 => {
+            &ORCHARD_PROVING_KEY_FIXED_POST_NU6_2
+        }
+        orchard::circuit::OrchardCircuitVersion::PostNu6_3 => &ORCHARD_PROVING_KEY_POST_NU6_3,
+    }
+}
+
+fn orchard_verifying_key_lock(
+    circuit_version: orchard::circuit::OrchardCircuitVersion,
+) -> &'static OnceLock<orchard::circuit::VerifyingKey> {
+    match circuit_version {
+        orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2 => {
+            &ORCHARD_VERIFYING_KEY_INSECURE_PRE_NU6_2
+        }
+        orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2 => {
+            &ORCHARD_VERIFYING_KEY_FIXED_POST_NU6_2
+        }
+        orchard::circuit::OrchardCircuitVersion::PostNu6_3 => &ORCHARD_VERIFYING_KEY_POST_NU6_3,
+    }
+}
+
+/// Get or initialize the global Orchard proving key for the given circuit version.
+fn get_orchard_proving_key(
+    circuit_version: orchard::circuit::OrchardCircuitVersion,
+) -> &'static orchard::circuit::ProvingKey {
+    orchard_proving_key_lock(circuit_version).get_or_init(|| {
+        tracing::info!(
+            "🔧 Initializing Orchard ProvingKey for {:?}...",
+            circuit_version
+        );
+        orchard::circuit::ProvingKey::build(circuit_version)
     })
 }
 
-/// Global Orchard verifying key instance, initialized once on first use
-/// This avoids repeatedly building the expensive Orchard verifying key
-static ORCHARD_VERIFYING_KEY: OnceLock<orchard::circuit::VerifyingKey> = OnceLock::new();
-
-/// Get or initialize the global Orchard verifying key
-fn get_orchard_verifying_key() -> &'static orchard::circuit::VerifyingKey {
-    ORCHARD_VERIFYING_KEY.get_or_init(|| {
-        tracing::info!("🔧 Initializing Orchard VerifyingKey...");
-        orchard::circuit::VerifyingKey::build()
+/// Get or initialize the global Orchard verifying key for the given circuit version.
+fn get_orchard_verifying_key(
+    circuit_version: orchard::circuit::OrchardCircuitVersion,
+) -> &'static orchard::circuit::VerifyingKey {
+    orchard_verifying_key_lock(circuit_version).get_or_init(|| {
+        tracing::info!(
+            "🔧 Initializing Orchard VerifyingKey for {:?}...",
+            circuit_version
+        );
+        orchard::circuit::VerifyingKey::build(circuit_version)
     })
 }
 
@@ -164,6 +276,17 @@ impl<P, T> Wallet<MemoryWalletDb<P>, T>
 where
     P: Parameters,
 {
+    pub async fn spendability_diagnostics(
+        &self,
+        account_id: <MemoryWalletDb<P> as WalletRead>::AccountId,
+    ) -> Result<zcash_client_memory::SpendabilityDiagnostics, Error> {
+        Ok(self
+            .db
+            .read()
+            .await
+            .spendability_diagnostics(account_id, ConfirmationsPolicy::default())?)
+    }
+
     // Encodes the MemoryWallet into protobuf bytes
     pub async fn db_to_bytes(&self) -> Result<Vec<u8>, Error> {
         let mut memory_wallet_bytes = Vec::new();
@@ -227,8 +350,6 @@ where
 
     pub fn new(db: W, client: T, network: Network) -> Result<Self, Error> {
         get_prover();
-        get_orchard_proving_key();
-        get_orchard_verifying_key();
         Ok(Wallet {
             db: Arc::new(RwLock::new(db)),
             client: CompactTxStreamerClient::new(client),
@@ -429,7 +550,9 @@ where
             BATCH_SIZE,
         )
         .await
-        .map_err(Into::into)
+        .map_err(|error| -> Error { error.into() })?;
+        drop(db);
+        self.enhance_pending_transactions().await
     }
 
     /// Runs a single batch of the sync process without looping.
@@ -439,7 +562,7 @@ where
         let db_cache = MemBlockCache::new();
 
         let mut db = self.db.write().await;
-        run_next_batch(
+        let did_work = run_next_batch(
             &mut client,
             &self.network.clone(),
             &db_cache,
@@ -447,7 +570,10 @@ where
             batch_size.unwrap_or(BATCH_SIZE),
         )
         .await
-        .map_err(Into::into)
+        .map_err(|error| -> Error { error.into() })?;
+        drop(db);
+        self.enhance_pending_transactions().await?;
+        Ok(did_work)
     }
 
     pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error> {
@@ -455,7 +581,7 @@ where
         let db_cache = MemBlockCache::new();
 
         let mut db = self.db.write().await;
-        zcash_client_backend::sync::run_next_batch_optimized(
+        let did_work = zcash_client_backend::sync::run_next_batch_optimized(
             &mut client,
             &self.network.clone(),
             &db_cache,
@@ -463,7 +589,79 @@ where
             batch_size.unwrap_or(BATCH_SIZE),
         )
         .await
-        .map_err(Into::into)
+        .map_err(|error| -> Error { error.into() })?;
+        drop(db);
+        self.enhance_pending_transactions().await?;
+        Ok(did_work)
+    }
+
+    pub(crate) async fn enhance_pending_transactions(&self) -> Result<(), Error> {
+        let txids = {
+            let db = self.db.read().await;
+            db.transaction_data_requests()?
+                .into_iter()
+                .filter_map(|request| match request {
+                    TransactionDataRequest::Enhancement(txid) => Some(txid),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+
+        if txids.is_empty() {
+            return Ok(());
+        }
+
+        let mut client = self.client.clone();
+        for requested_txid in txids {
+            let raw = client
+                .get_transaction(service::TxFilter {
+                    block: None,
+                    index: 0,
+                    hash: requested_txid.as_ref().to_vec(),
+                })
+                .await?
+                .into_inner();
+
+            let mined_height = match raw.height {
+                0 | u64::MAX => None,
+                height => Some(BlockHeight::from_u32(u32::try_from(height).map_err(
+                    |_| {
+                        Error::Generic(format!(
+                            "Invalid mined height {height} for transaction {requested_txid}"
+                        ))
+                    },
+                )?)),
+            };
+            let parse_height = match mined_height {
+                Some(height) => height,
+                None => {
+                    let db = self.db.read().await;
+                    db.chain_height()?
+                        .map(|height| height + 1)
+                        .or_else(|| self.network.activation_height(NetworkUpgrade::Sapling))
+                        .ok_or_else(|| {
+                            Error::Generic(format!(
+                                "Unable to determine consensus branch for transaction {requested_txid}"
+                            ))
+                        })?
+                }
+            };
+            let tx = zcash_primitives::transaction::Transaction::read(
+                raw.data.as_slice(),
+                BranchId::for_height(&self.network, parse_height),
+            )?;
+            if tx.txid() != requested_txid {
+                return Err(Error::Generic(format!(
+                    "Transaction data mismatch: requested {requested_txid}, received {}",
+                    tx.txid()
+                )));
+            }
+
+            let mut db = self.db.write().await;
+            decrypt_and_store_transaction(&self.network, &mut *db, &tx, mined_height)?;
+        }
+
+        Ok(())
     }
 
     /// Benchmark helper: download a contiguous block range over gRPC-web and
@@ -575,8 +773,6 @@ where
         let mut client = self.client.clone();
         let mut db = self.db.write().await;
 
-        Self::do_update_subtree_roots(&mut client, &mut *db).await?;
-
         let tip_height: zcash_protocol::consensus::BlockHeight = client
             .get_latest_block(service::ChainSpec::default())
             .await
@@ -587,6 +783,9 @@ where
             .map_err(|_| Error::Generic("Invalid tip height".into()))?;
         db.update_chain_tip(tip_height)
             .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
+        self.do_update_subtree_roots(&mut client, &mut *db, tip_height)
+            .await?;
 
         self.refresh_transparent_utxos_for_all_accounts(&mut client, &mut *db)
             .await?;
@@ -631,7 +830,7 @@ where
         batch_size: Option<u32>,
         optimized: bool,
         refresh: bool,
-        mut timings: Option<&mut [f64; 4]>,
+        timings: Option<&mut [f64; 4]>,
     ) -> Result<Option<Vec<u8>>, Error> {
         use prost::Message;
         use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
@@ -646,27 +845,36 @@ where
 
         let t_stage0 = js_sys::Date::now();
 
+        let tip_height = if refresh {
+            Some(
+                client
+                    .get_latest_block(service::ChainSpec::default())
+                    .await
+                    .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+                    .get_ref()
+                    .height
+                    .try_into()
+                    .map_err(|_| Error::Generic("Invalid tip height".into()))?,
+            )
+        } else {
+            None
+        };
+        let t_after_tip = js_sys::Date::now();
+
         // Steps 1/2/2.5 are session-level state (subtree roots, chain tip,
         // transparent UTXOs) that do not change while replaying a bounded scan
         // window. When `refresh` is false the caller has run them once via
         // `sync_session_setup`, so we skip the per-batch network round-trips.
-        if refresh {
+        if let Some(tip_height) = tip_height {
             // 1. Update subtree roots
-            Self::do_update_subtree_roots(&mut client, &mut *db).await?;
+            self.do_update_subtree_roots(&mut client, &mut *db, tip_height)
+                .await?;
         }
 
         let t_sub = js_sys::Date::now();
 
-        if refresh {
+        if let Some(tip_height) = tip_height {
             // 2. Update chain tip
-            let tip_height: zcash_protocol::consensus::BlockHeight = client
-                .get_latest_block(service::ChainSpec::default())
-                .await
-                .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
-                .get_ref()
-                .height
-                .try_into()
-                .map_err(|_| Error::Generic("Invalid tip height".into()))?;
             db.update_chain_tip(tip_height)
                 .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
 
@@ -742,7 +950,11 @@ where
 
         let scan_range = match first_batch {
             Some(r) => r,
-            None => return Ok(None),
+            None => {
+                drop(db);
+                self.enhance_pending_transactions().await?;
+                return Ok(None);
+            }
         };
 
         // 5. Download compact blocks for the range
@@ -815,17 +1027,21 @@ where
             optimized,
         )?;
         if rewound {
+            drop(db);
+            self.enhance_pending_transactions().await?;
             return Ok(None);
         }
 
         let t_stage_scan = js_sys::Date::now();
-        if let Some(t) = timings.as_deref_mut() {
-            t[0] = t_sub - t_stage0; // subtree roots
-            t[1] = t_stage_setup - t_sub; // chain tip + UTXO refresh + verify
+        if let Some(t) = timings {
+            t[0] = t_sub - t_after_tip; // subtree roots
+            t[1] = (t_after_tip - t_stage0) + (t_stage_setup - t_sub); // chain tip + UTXO refresh + verify
             t[2] = t_stage_dl - t_stage_setup; // block + tree-state download
             t[3] = t_stage_scan - t_stage_dl; // scan + put_blocks
         }
 
+        drop(db);
+        self.enhance_pending_transactions().await?;
         Ok(Some(journal_data))
     }
 
@@ -902,6 +1118,8 @@ where
             .map_err(|e| Error::Generic(format!("{e}")))?;
         let has_more = remaining.iter().any(|r| !r.is_empty());
 
+        drop(db);
+        self.enhance_pending_transactions().await?;
         Ok(has_more)
     }
 
@@ -968,8 +1186,10 @@ where
 
     // Internal helper: update subtree roots from lightwalletd
     async fn do_update_subtree_roots(
+        &self,
         client: &mut CompactTxStreamerClient<T>,
         db: &mut W,
+        tip_height: BlockHeight,
     ) -> Result<(), Error> {
         use zcash_client_backend::data_api::chain::CommitmentTreeRoot;
         use zcash_client_backend::proto::service;
@@ -1018,6 +1238,28 @@ where
             .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
         db.put_orchard_subtree_roots(0, &orchard_roots)
             .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+
+        if self.network.is_nu_active(NetworkUpgrade::Nu6_3, tip_height) {
+            let mut request = service::GetSubtreeRootsArg::default();
+            request.set_shielded_protocol(service::ShieldedProtocol::Ironwood);
+            let ironwood_roots: Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>> = client
+                .get_subtree_roots(request)
+                .await
+                .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
+                .into_inner()
+                .and_then(|root| async move {
+                    let root_hash = orchard::tree::MerkleHashOrchard::read(&root.root_hash[..])?;
+                    Ok(CommitmentTreeRoot::from_parts(
+                        BlockHeight::from_u32(root.completing_block_height as u32),
+                        root_hash,
+                    ))
+                })
+                .try_collect()
+                .await
+                .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+            db.put_ironwood_subtree_roots(0, &ironwood_roots)
+                .map_err(|e| Error::Generic(format!("DB error: {e}")))?;
+        }
 
         Ok(())
     }
@@ -1083,12 +1325,11 @@ where
 
         // Find the account with matching name
         for account_id in account_ids {
-            if let Some(account) = db.get_account(account_id)? {
-                if let Some(name) = account.name() {
-                    if name == account_name {
-                        return Ok(account_id);
-                    }
-                }
+            if let Some(account) = db.get_account(account_id)?
+                && let Some(name) = account.name()
+                && name == account_name
+            {
+                return Ok(account_id);
             }
         }
 
@@ -1099,6 +1340,12 @@ where
         let db = self.db.read().await;
         let birthday_height = db.get_account_birthday(account_id)?;
         Ok(birthday_height.into())
+    }
+
+    pub fn ironwood_activation_height(&self) -> Option<u32> {
+        self.network
+            .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+            .map(Into::into)
     }
 
     /// Get the timestamp (Unix time) of a block at a given height
@@ -1223,7 +1470,7 @@ where
         let change_strategy = MultiOutputChangeStrategy::new(
             StandardFeeRule::Zip317,
             None,
-            ShieldedProtocol::Orchard,
+            ShieldedPool::Orchard,
             DustOutputPolicy::default(),
             SplitPolicy::with_min_output_value(
                 NonZeroUsize::new(self.target_note_count)
@@ -1269,9 +1516,9 @@ where
             &from_addrs,
             account_id,
             self.confirmations_policy(),
-            TransparentOutputFilter::All,
+            CoinbaseFilter::AllTransparentOutputs,
         )
-        .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
 
         let pczt = create_pczt_from_proposal::<
             _,
@@ -1286,8 +1533,10 @@ where
             account_id,
             OvkPolicy::Sender,
             &proposal,
+            None,
+            orchard::builder::BundleType::DEFAULT,
         )
-        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {e:?}")))?;
 
         Ok(pczt)
     }
@@ -1299,18 +1548,57 @@ where
         value: u64,
         memo: Option<Vec<u8>>,
     ) -> Result<Pczt, Error> {
-        // Create the PCZT.
+        self.pczt_create_with_policy(
+            account_id,
+            to_address,
+            value,
+            memo,
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
+        )
+        .await
+    }
+
+    pub async fn pczt_create_transparent(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+    ) -> Result<Pczt, Error> {
+        let (spend_policy, transparent_change_policy) = transparent_transfer_policies();
+        self.pczt_create_with_policy(
+            account_id,
+            to_address,
+            value,
+            memo,
+            spend_policy,
+            transparent_change_policy,
+        )
+        .await
+    }
+
+    async fn pczt_create_with_policy(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        spend_policy: SpendPolicy,
+        transparent_change_policy: TransparentChangePolicy,
+    ) -> Result<Pczt, Error> {
         let change_strategy = MultiOutputChangeStrategy::new(
             StandardFeeRule::Zip317,
             None,
-            ShieldedProtocol::Orchard,
+            ShieldedPool::Orchard,
             DustOutputPolicy::default(),
             SplitPolicy::with_min_output_value(
                 NonZeroUsize::new(self.target_note_count)
                     .ok_or(Error::FailedToCreateTransaction)?,
                 Zatoshis::from_u64(self.min_split_output_value)?,
             ),
-        );
+        )
+        .with_transparent_change_policy(transparent_change_policy);
 
         let input_selector = GreedyInputSelector::new();
         let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
@@ -1325,7 +1613,7 @@ where
         .map_err(|e| Error::Zip321(e.with_index(0)))?;
         let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
-        let proposal = propose_transfer::<_, _, _,_, <W as WalletCommitmentTrees>::Error>(
+        let proposal = propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
             &mut *db,
             &self.network,
             account_id,
@@ -1333,8 +1621,14 @@ where
             &change_strategy,
             request,
             self.confirmations_policy(),
+            &spend_policy,
+            None,
         )
-            .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {:?}", e)))?;
+        .map_err(|e| {
+            Error::Generic(format!(
+                "Failed to propose transfer. Possibly insufficient permitted funds: {e:?}"
+            ))
+        })?;
         let pczt = create_pczt_from_proposal::<
             _,
             _,
@@ -1348,8 +1642,10 @@ where
             account_id,
             OvkPolicy::Sender,
             &proposal,
+            None,
+            orchard::builder::BundleType::DEFAULT,
         )
-        .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {e:?}")))?;
         Ok(pczt)
     }
 
@@ -1383,7 +1679,7 @@ where
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
                 None,
-                ShieldedProtocol::Orchard,
+                ShieldedPool::Orchard,
                 DustOutputPolicy::default(),
                 SplitPolicy::with_min_output_value(
                     NonZeroUsize::new(self.target_note_count)
@@ -1433,12 +1729,12 @@ where
             &from_addrs,
             account_id,
             self.confirmations_policy(),
-            TransparentOutputFilter::All,
+            CoinbaseFilter::AllTransparentOutputs,
         )
-        .map_err(|e| Error::Generic(format!("Error when shielding: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
 
         let pczt = match expiry_delta_blocks {
-            Some(expiry_delta_blocks) => create_pczt_from_proposal_with_expiry_delta::<
+            Some(expiry_delta_blocks) => create_pczt_from_proposal::<
                 _,
                 _,
                 <MemoryWalletDb<Network> as InputSource>::Error,
@@ -1451,7 +1747,8 @@ where
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
-                expiry_delta_blocks,
+                Some(BlockHeight::from(proposal.min_target_height()) + expiry_delta_blocks),
+                orchard::builder::BundleType::DEFAULT,
             ),
             None => create_pczt_from_proposal::<
                 _,
@@ -1466,9 +1763,11 @@ where
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
+                None,
+                orchard::builder::BundleType::DEFAULT,
             ),
         }
-        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {e:?}")))?;
 
         Ok(pczt)
     }
@@ -1488,6 +1787,9 @@ where
             memo,
             marginal_fee_zats,
             None,
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
+            true,
         )
         .await
     }
@@ -1509,10 +1811,62 @@ where
             memo,
             marginal_fee_zats,
             Some(expiry_delta_blocks),
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
+            true,
         )
         .await
     }
 
+    pub async fn pczt_create_transparent_dynamic_fee(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<Pczt, Error> {
+        let (spend_policy, transparent_change_policy) = transparent_transfer_policies();
+        self.pczt_create_dynamic_fee_impl(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            None,
+            spend_policy,
+            transparent_change_policy,
+            false,
+        )
+        .await
+    }
+
+    pub async fn pczt_create_transparent_dynamic_fee_with_expiry_delta(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: u32,
+    ) -> Result<Pczt, Error> {
+        let expiry_delta_blocks = validate_expiry_delta_blocks(expiry_delta_blocks)?;
+        let (spend_policy, transparent_change_policy) = transparent_transfer_policies();
+        self.pczt_create_dynamic_fee_impl(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            Some(expiry_delta_blocks),
+            spend_policy,
+            transparent_change_policy,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn pczt_create_dynamic_fee_impl(
         &self,
         account_id: AccountId,
@@ -1521,26 +1875,30 @@ where
         memo: Option<Vec<u8>>,
         marginal_fee_zats: u64,
         expiry_delta_blocks: Option<u32>,
+        spend_policy: SpendPolicy,
+        transparent_change_policy: TransparentChangePolicy,
+        allow_send_max_fallback: bool,
     ) -> Result<Pczt, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
                 None,
-                ShieldedProtocol::Orchard,
+                ShieldedPool::Orchard,
                 DustOutputPolicy::default(),
                 SplitPolicy::with_min_output_value(
                     NonZeroUsize::new(self.target_note_count)
                         .ok_or(Error::FailedToCreateTransaction)?,
                     Zatoshis::from_u64(self.min_split_output_value)?,
                 ),
-            );
+            )
+            .with_transparent_change_policy(transparent_change_policy);
 
         let input_selector = GreedyInputSelector::new();
         let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
         let payment = Payment::new(
-            to_address,
+            to_address.clone(),
             Some(Zatoshis::from_u64(value)?),
-            memo,
+            memo.clone(),
             None,
             None,
             vec![],
@@ -1548,7 +1906,7 @@ where
         .map_err(|e| Error::Zip321(e.with_index(0)))?;
         let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
-        let proposal = propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+        let proposal = match propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
             &mut *db,
             &self.network,
             account_id,
@@ -1556,10 +1914,44 @@ where
             &change_strategy,
             request,
             self.confirmations_policy(),
-        )
-        .map_err(|e| Error::Generic(format!("something bad happened when calling propose transfer. Possibly insufficient balance... {:?}", e)))?;
+            &spend_policy,
+            None,
+        ) {
+            Ok(proposal) => proposal,
+            Err(transfer_error) => {
+                let max_proposal = if allow_send_max_fallback {
+                    propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+                        &mut *db,
+                        &self.network,
+                        account_id,
+                        &[
+                            ShieldedPool::Sapling,
+                            ShieldedPool::Orchard,
+                            ShieldedPool::Ironwood,
+                        ],
+                        &dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                        to_address,
+                        memo,
+                        MaxSpendMode::MaxSpendable,
+                        self.confirmations_policy(),
+                    )
+                    .ok()
+                } else {
+                    None
+                };
+
+                match max_proposal {
+                    Some(proposal) if proposal_payment_amount_zats(&proposal)? == value => proposal,
+                    _ => {
+                        return Err(Error::Generic(format!(
+                            "Failed to propose transfer. Possibly insufficient permitted funds: {transfer_error:?}"
+                        )));
+                    }
+                }
+            }
+        };
         let pczt = match expiry_delta_blocks {
-            Some(expiry_delta_blocks) => create_pczt_from_proposal_with_expiry_delta::<
+            Some(expiry_delta_blocks) => create_pczt_from_proposal::<
                 _,
                 _,
                 <MemoryWalletDb<Network> as InputSource>::Error,
@@ -1572,7 +1964,8 @@ where
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
-                expiry_delta_blocks,
+                Some(BlockHeight::from(proposal.min_target_height()) + expiry_delta_blocks),
+                orchard::builder::BundleType::DEFAULT,
             ),
             None => create_pczt_from_proposal::<
                 _,
@@ -1587,10 +1980,152 @@ where
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
+                None,
+                orchard::builder::BundleType::DEFAULT,
             ),
         }
-        .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {e:?}")))?;
         Ok(pczt)
+    }
+
+    /// Sweeps all currently spendable Orchard notes into the Ironwood pool.
+    ///
+    /// The destination must belong to the same wallet account. The proposal is restricted to
+    /// Orchard inputs and transaction V6; after NU6.3, its Orchard receiver is carried by the
+    /// Ironwood bundle.
+    pub async fn pczt_create_orchard_migration(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<Pczt, Error> {
+        let expiry_delta_blocks = expiry_delta_blocks
+            .map(validate_expiry_delta_blocks)
+            .transpose()?;
+        let wallet_address = zcash_client_backend::address::Address::try_from_zcash_address(
+            &self.network,
+            to_address.clone(),
+        )
+        .map_err(|e| Error::Generic(format!("Invalid migration address: {e:?}")))?;
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let fee_rule = dynamic_zip317_fee_rule(marginal_fee_zats)?;
+        let mut db = self.db.write().await;
+
+        let destination_account = db
+            .find_account_for_address(&self.network, &wallet_address)
+            .map_err(|e| Error::Generic(format!("Failed to validate migration address: {e:?}")))?;
+        if destination_account != Some(account_id) {
+            return Err(Error::Generic(
+                "Orchard migration destination must belong to the source account".into(),
+            ));
+        }
+
+        let target_height = db
+            .chain_height()?
+            .map(|height| height + 1)
+            .ok_or_else(|| Error::Generic("Wallet must be synced before migration".into()))?;
+        let activation_height = self
+            .network
+            .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+            .ok_or_else(|| Error::Generic("NU6.3 is not configured for this network".into()))?;
+        if target_height < activation_height {
+            return Err(Error::Generic(format!(
+                "Ironwood is not active until height {}",
+                u32::from(activation_height)
+            )));
+        }
+
+        let proposal = propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &[ShieldedPool::Orchard],
+            &fee_rule,
+            to_address,
+            memo,
+            MaxSpendMode::MaxSpendable,
+            self.confirmations_policy(),
+        )
+        .map_err(|e| Error::Generic(format!("Failed to propose Orchard migration: {e:?}")))?
+        .with_proposed_version(Some(TxVersion::V6));
+
+        create_pczt_from_proposal::<
+            _,
+            _,
+            <MemoryWalletDb<Network> as InputSource>::Error,
+            _,
+            <prim_zip317::FeeRule as FeeRule>::Error,
+            _,
+        >(
+            &mut *db,
+            &self.network,
+            account_id,
+            OvkPolicy::Sender,
+            &proposal,
+            expiry_delta_blocks
+                .map(|delta| BlockHeight::from(proposal.min_target_height()) + delta),
+            orchard::builder::BundleType::DEFAULT,
+        )
+        .map_err(|e| Error::Generic(format!("Failed to create migration PCZT: {e:?}")))
+    }
+
+    pub async fn estimate_orchard_migration_fee(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<u64, Error> {
+        let wallet_address = zcash_client_backend::address::Address::try_from_zcash_address(
+            &self.network,
+            to_address.clone(),
+        )
+        .map_err(|e| Error::Generic(format!("Invalid migration address: {e:?}")))?;
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let fee_rule = dynamic_zip317_fee_rule(marginal_fee_zats)?;
+        let mut db = self.db.write().await;
+
+        let destination_account = db
+            .find_account_for_address(&self.network, &wallet_address)
+            .map_err(|e| Error::Generic(format!("Failed to validate migration address: {e:?}")))?;
+        if destination_account != Some(account_id) {
+            return Err(Error::Generic(
+                "Orchard migration destination must belong to the source account".into(),
+            ));
+        }
+
+        let target_height = db
+            .chain_height()?
+            .map(|height| height + 1)
+            .ok_or_else(|| Error::Generic("Wallet must be synced before migration".into()))?;
+        let activation_height = self
+            .network
+            .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+            .ok_or_else(|| Error::Generic("NU6.3 is not configured for this network".into()))?;
+        if target_height < activation_height {
+            return Err(Error::Generic(format!(
+                "Ironwood is not active until height {}",
+                u32::from(activation_height)
+            )));
+        }
+
+        let proposal = propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &[ShieldedPool::Orchard],
+            &fee_rule,
+            to_address,
+            memo,
+            MaxSpendMode::MaxSpendable,
+            self.confirmations_policy(),
+        )
+        .map_err(|e| Error::Generic(format!("Failed to estimate Orchard migration: {e:?}")))?
+        .with_proposed_version(Some(TxVersion::V6));
+
+        proposal_fee_required_zats(&proposal)
     }
 
     pub async fn estimate_pczt_shield_fee(
@@ -1602,7 +2137,7 @@ where
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
                 None,
-                ShieldedProtocol::Orchard,
+                ShieldedPool::Orchard,
                 DustOutputPolicy::default(),
                 SplitPolicy::with_min_output_value(
                     NonZeroUsize::new(self.target_note_count)
@@ -1646,9 +2181,9 @@ where
             &from_addrs,
             account_id,
             self.confirmations_policy(),
-            TransparentOutputFilter::All,
+            CoinbaseFilter::AllTransparentOutputs,
         )
-        .map_err(|e| Error::Generic(format!("Error when estimating shielding fee: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Error when estimating shielding fee: {e:?}")))?;
 
         proposal_fee_required_zats(&proposal)
     }
@@ -1661,18 +2196,63 @@ where
         memo: Option<Vec<u8>>,
         marginal_fee_zats: u64,
     ) -> Result<u64, Error> {
+        self.estimate_pczt_transfer_fee_with_policy(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
+        )
+        .await
+    }
+
+    pub async fn estimate_pczt_transparent_transfer_fee(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<u64, Error> {
+        let (spend_policy, transparent_change_policy) = transparent_transfer_policies();
+        self.estimate_pczt_transfer_fee_with_policy(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            spend_policy,
+            transparent_change_policy,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn estimate_pczt_transfer_fee_with_policy(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+        spend_policy: SpendPolicy,
+        transparent_change_policy: TransparentChangePolicy,
+    ) -> Result<u64, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
                 dynamic_zip317_fee_rule(marginal_fee_zats)?,
                 None,
-                ShieldedProtocol::Orchard,
+                ShieldedPool::Orchard,
                 DustOutputPolicy::default(),
                 SplitPolicy::with_min_output_value(
                     NonZeroUsize::new(self.target_note_count)
                         .ok_or(Error::FailedToCreateTransaction)?,
                     Zatoshis::from_u64(self.min_split_output_value)?,
                 ),
-            );
+            )
+            .with_transparent_change_policy(transparent_change_policy);
 
         let input_selector = GreedyInputSelector::new();
         let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
@@ -1695,10 +2275,77 @@ where
             &change_strategy,
             request,
             self.confirmations_policy(),
+            &spend_policy,
+            None,
         )
-        .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {:?}", e)))?;
+        .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {e:?}")))?;
 
         proposal_fee_required_zats(&proposal)
+    }
+
+    pub async fn estimate_pczt_max_transfer(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<(u64, u64), Error> {
+        let fee_rule = dynamic_zip317_fee_rule(marginal_fee_zats)?;
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let mut db = self.db.write().await;
+        let proposal = propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &[
+                ShieldedPool::Sapling,
+                ShieldedPool::Orchard,
+                ShieldedPool::Ironwood,
+            ],
+            &fee_rule,
+            to_address,
+            memo,
+            MaxSpendMode::MaxSpendable,
+            self.confirmations_policy(),
+        )
+        .map_err(|e| Error::Generic(format!("Error when estimating max transfer: {e:?}")))?;
+
+        Ok((
+            proposal_payment_amount_zats(&proposal)?,
+            proposal_fee_required_zats(&proposal)?,
+        ))
+    }
+
+    pub async fn estimate_pczt_max_transparent_transfer(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<(u64, u64), Error> {
+        let fee_rule = dynamic_zip317_fee_rule(marginal_fee_zats)?;
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let mut db = self.db.write().await;
+        let proposal =
+            propose_send_max_transparent_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+                &mut *db,
+                &self.network,
+                account_id,
+                &fee_rule,
+                to_address,
+                memo,
+                self.confirmations_policy(),
+            )
+            .map_err(|e| {
+                Error::Generic(format!(
+                    "Error when estimating max transparent transfer: {e:?}"
+                ))
+            })?;
+
+        Ok((
+            proposal_payment_amount_zats(&proposal)?,
+            proposal_fee_required_zats(&proposal)?,
+        ))
     }
 
     pub async fn pczt_prove(
@@ -1739,10 +2386,7 @@ where
                     Ok(())
                 })
                 .map_err(|e| {
-                    Error::PcztProve(format!(
-                        "Failed to add Sapling proof generation key: {:?}",
-                        e
-                    ))
+                    Error::PcztProve(format!("Failed to add Sapling proof generation key: {e:?}"))
                 })?
                 .finish()
         } else {
@@ -1750,35 +2394,55 @@ where
         };
 
         let prover = get_prover();
-        let orchard_proving_key = get_orchard_proving_key();
+        let orchard_circuit_version = orchard_circuit_version_for_pczt(&pczt)?;
 
         let total_start = js_sys::Date::now();
         let mut prover_instance = Prover::new(pczt);
 
         // Time Orchard proof generation
-        tracing::info!("🔧 Starting Orchard proof generation...");
-        let orchard_start = js_sys::Date::now();
-        prover_instance = prover_instance
-            .create_orchard_proof(orchard_proving_key)
-            .map_err(|e| Error::PcztProve(format!("Failed to create Orchard proof: {:?}", e)))?;
-        let orchard_elapsed = (js_sys::Date::now() - orchard_start) / 1000.0;
-        tracing::info!("✅ Orchard proof completed in {:.2}s", orchard_elapsed);
+        let mut orchard_elapsed = 0.0;
+        if prover_instance.requires_orchard_proof() {
+            let orchard_proving_key = get_orchard_proving_key(orchard_circuit_version);
+
+            tracing::info!("🔧 Starting Orchard proof generation...");
+            let orchard_start = js_sys::Date::now();
+            prover_instance = prover_instance
+                .create_orchard_proof(orchard_proving_key)
+                .map_err(|e| Error::PcztProve(format!("Failed to create Orchard proof: {e:?}")))?;
+            orchard_elapsed = (js_sys::Date::now() - orchard_start) / 1000.0;
+            tracing::info!("✅ Orchard proof completed in {:.2}s", orchard_elapsed);
+        }
+
+        // Time Ironwood proof generation
+        let mut ironwood_elapsed = 0.0;
+        if prover_instance.requires_ironwood_proof() {
+            let orchard_proving_key = get_orchard_proving_key(orchard_circuit_version);
+
+            tracing::info!("🔧 Starting Ironwood proof generation...");
+            let ironwood_start = js_sys::Date::now();
+            prover_instance = prover_instance
+                .create_ironwood_proof(orchard_proving_key)
+                .map_err(|e| Error::PcztProve(format!("Failed to create Ironwood proof: {e:?}")))?;
+            ironwood_elapsed = (js_sys::Date::now() - ironwood_start) / 1000.0;
+            tracing::info!("✅ Ironwood proof completed in {:.2}s", ironwood_elapsed);
+        }
 
         // Time Sapling proof generation
         tracing::info!("🔧 Starting Sapling proofs generation...");
         let sapling_start = js_sys::Date::now();
         prover_instance = prover_instance
             .create_sapling_proofs(prover, prover)
-            .map_err(|e| Error::PcztProve(format!("Failed to create Sapling proofs: {:?}", e)))?;
+            .map_err(|e| Error::PcztProve(format!("Failed to create Sapling proofs: {e:?}")))?;
         let sapling_elapsed = (js_sys::Date::now() - sapling_start) / 1000.0;
         tracing::info!("✅ Sapling proofs completed in {:.2}s", sapling_elapsed);
 
         let pczt = prover_instance.finish();
         let total_elapsed = (js_sys::Date::now() - total_start) / 1000.0;
         tracing::info!(
-            "⏱️ Total proof generation: {:.2}s (Orchard: {:.2}s, Sapling: {:.2}s)",
+            "⏱️ Total proof generation: {:.2}s (Orchard: {:.2}s, Ironwood: {:.2}s, Sapling: {:.2}s)",
             total_elapsed,
             orchard_elapsed,
+            ironwood_elapsed,
             sapling_elapsed
         );
         Ok(pczt)
@@ -1787,9 +2451,10 @@ where
     pub async fn pczt_send(&self, pczt: Pczt) -> Result<String, Error> {
         let prover = get_prover();
         let (spend_vk, output_vk) = prover.verifying_keys();
+        let orchard_circuit_version = orchard_circuit_version_for_pczt(&pczt)?;
         let mut db = self.db.write().await;
 
-        let orchard_verifying_key = get_orchard_verifying_key();
+        let orchard_verifying_key = get_orchard_verifying_key(orchard_circuit_version);
         tracing::info!("📤 Extracting and storing transaction from PCZT...");
         let start_time = js_sys::Date::now();
         let txid = extract_and_store_transaction_from_pczt::<_, ()>(
@@ -1800,8 +2465,7 @@ where
         )
         .map_err(|e| {
             Error::PcztSend(format!(
-                "Failed to extract and store transaction from PCZT: {:?}",
-                e
+                "Failed to extract and store transaction from PCZT: {e:?}"
             ))
         })?;
         let end_time = js_sys::Date::now();
@@ -1843,8 +2507,32 @@ pub(crate) fn usk_from_seed_str(
 
 #[cfg(test)]
 mod tests {
-    use super::usk_from_seed_str;
+    use super::{transparent_transfer_policies, usk_from_seed_str};
     use crate::Network;
+    use zcash_client_backend::data_api::wallet::input_selection::{
+        CoinbasePolicy, TransparentSource,
+    };
+    use zcash_client_backend::fees::TransparentChangePolicy;
+    use zcash_protocol::ShieldedPool;
+
+    #[test]
+    fn transparent_transfer_policies_exclude_shielded_funds_and_allow_transparent_change() {
+        let (spend_policy, change_policy) = transparent_transfer_policies();
+
+        assert!(!spend_policy.permits_shielded(ShieldedPool::Sapling));
+        assert!(!spend_policy.permits_shielded(ShieldedPool::Orchard));
+        assert!(!spend_policy.permits_shielded(ShieldedPool::Ironwood));
+        let transparent = spend_policy.transparent().unwrap();
+        assert!(matches!(
+            transparent.source(),
+            TransparentSource::AnyAccountAddr
+        ));
+        assert_eq!(transparent.coinbase(), CoinbasePolicy::NonCoinbase);
+        assert_eq!(
+            change_policy,
+            TransparentChangePolicy::TransparentChangeAllowed
+        );
+    }
 
     #[test]
     fn usk_from_seed_str_uses_bip39_passphrase() {

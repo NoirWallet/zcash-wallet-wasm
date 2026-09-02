@@ -26,7 +26,7 @@ use zcash_client_backend::{
 use zcash_keys::{address::UnifiedAddress, keys::UnifiedIncomingViewingKey};
 use zcash_primitives::{
     block::BlockHash,
-    transaction::{Transaction, TransactionData, TxId},
+    transaction::{Transaction, TransactionData, TxId, fees::zip317},
 };
 use zcash_protocol::{
     PoolType,
@@ -37,6 +37,7 @@ use zip32::fingerprint::SeedFingerprint;
 
 #[cfg(feature = "transparent-inputs")]
 use {
+    crate::input_source::TransparentOutputStatus,
     transparent::{address::TransparentAddress, keys::NonHardenedChildIndex},
     zcash_client_backend::wallet::{Exposure, TransparentAddressMetadata},
     zip32::Scope,
@@ -221,15 +222,6 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             if self.note_is_spent(note, target_height)? {
                 continue;
             }
-            // don't count notes in unscanned ranges
-            let unscanned_ranges = self.unscanned_ranges();
-            for (_, _, start_position, end_position_exclusive) in unscanned_ranges {
-                if note.commitment_tree_position >= start_position
-                    && note.commitment_tree_position < end_position_exclusive
-                {
-                    continue; // note is in an unscanned range. Skip it
-                }
-            }
             // Don't count notes in unmined transactions that have expired.
             if let Some(note_tx) = self.tx_table.get_transaction(&note.txid) {
                 if note_tx.mined_height().is_none()
@@ -250,17 +242,26 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 .get_mut(&account_id)
                 .expect("Account balance should exist");
 
-            // Given a note update the balance for the account
-            // This includes determining if it is change, spendable, etc
+            let note_is_spendable = self.note_is_spendable(
+                note,
+                birthday_height,
+                target_height,
+                confirmations_policy,
+                &[],
+            )?;
+
+            // Keep the summary aligned with input selection: dust is uneconomic, while confirmed
+            // notes that still lack witness metadata remain pending until a rescan repairs them.
             let update_balance_with_note = |b: &mut Balance| -> Result<(), Error> {
-                match (
-                    self.note_is_pending(note, target_height, confirmations_policy)?,
-                    note.is_change,
-                ) {
-                    (true, true) => b.add_pending_change_value(note.note.value()),
-                    (true, false) => b.add_pending_spendable_value(note.note.value()),
-                    (false, _) => b.add_spendable_value(note.note.value()),
-                }?;
+                if note.note.value() <= zip317::MARGINAL_FEE {
+                    b.add_uneconomic_value(note.note.value())?;
+                } else {
+                    match (note_is_spendable, note.is_change) {
+                        (true, _) => b.add_spendable_value(note.note.value()),
+                        (false, true) => b.add_pending_change_value(note.note.value()),
+                        (false, false) => b.add_pending_spendable_value(note.note.value()),
+                    }?;
+                }
                 Ok(())
             };
 
@@ -270,6 +271,9 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 }
                 PoolType::ORCHARD => {
                     account_balance.with_orchard_balance_mut(update_balance_with_note)?;
+                }
+                PoolType::IRONWOOD => {
+                    account_balance.with_ironwood_balance_mut(update_balance_with_note)?;
                 }
                 _ => unimplemented!("Unknown pool type"),
             }
@@ -302,6 +306,14 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .map(|s| s.root_addr().index())
             .unwrap_or(0);
 
+        #[cfg(feature = "orchard")]
+        let next_ironwood_subtree_index = self
+            .ironwood_tree
+            .store()
+            .last_shard()?
+            .map(|s| s.root_addr().index())
+            .unwrap_or(0);
+
         // Treat Sapling and Orchard outputs as having the same cost to scan.
         let sapling_scan_progress =
             self.sapling_scan_progress(&birthday_height, &fully_scanned_height, &chain_tip_height)?;
@@ -311,16 +323,28 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         #[cfg(not(feature = "orchard"))]
         let orchard_scan_progress: Option<Ratio<u64>> = None;
 
-        let scan_progress = sapling_scan_progress
-            .zip(orchard_scan_progress)
-            .map(|(s, o)| {
-                Ratio::new(
-                    s.numerator() + o.numerator(),
-                    s.denominator() + o.denominator(),
-                )
-            })
-            .or(sapling_scan_progress)
-            .or(orchard_scan_progress);
+        #[cfg(feature = "orchard")]
+        let ironwood_scan_progress = self.ironwood_scan_progress(
+            &birthday_height,
+            &fully_scanned_height,
+            &chain_tip_height,
+        )?;
+        #[cfg(not(feature = "orchard"))]
+        let ironwood_scan_progress: Option<Ratio<u64>> = None;
+
+        let scan_progress = [
+            sapling_scan_progress,
+            orchard_scan_progress,
+            ironwood_scan_progress,
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|a, b| {
+            Ratio::new(
+                a.numerator() + b.numerator(),
+                a.denominator() + b.denominator(),
+            )
+        });
 
         let scan_progress = Progress::new(
             scan_progress.unwrap_or_else(|| Ratio::new(0, 1)),
@@ -335,6 +359,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             next_sapling_subtree_index,
             #[cfg(feature = "orchard")]
             next_orchard_subtree_index,
+            #[cfg(feature = "orchard")]
+            next_ironwood_subtree_index,
         );
         Ok(Some(summary))
     }
@@ -368,6 +394,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 sapling_commitment_tree_size,
                 #[cfg(feature = "orchard")]
                 orchard_commitment_tree_size,
+                #[cfg(feature = "orchard")]
+                ironwood_commitment_tree_size,
                 ..
             } = block;
             // TODO: Deal with legacy sapling trees
@@ -377,6 +405,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 *sapling_commitment_tree_size,
                 #[cfg(feature = "orchard")]
                 *orchard_commitment_tree_size,
+                #[cfg(feature = "orchard")]
+                *ironwood_commitment_tree_size,
             )
         }))
     }
@@ -549,22 +579,35 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
 
                 let expiry_height = tx_data.expiry_height();
                 if expiry_height > BlockHeight::from(0) {
-                    Ok(TransactionData::from_parts(
-                        tx_data.version(),
-                        BranchId::for_height(&self.params, expiry_height),
-                        tx_data.lock_time(),
-                        expiry_height,
-                        #[cfg(all(
-                            any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                            feature = "zip-233"
-                        ))]
-                        tx_data.zip233_amount(),
-                        tx_data.transparent_bundle().cloned(),
-                        tx_data.sprout_bundle().cloned(),
-                        tx_data.sapling_bundle().cloned(),
-                        tx_data.orchard_bundle().cloned(),
-                    )
+                    let branch_id = BranchId::for_height(&self.params, expiry_height);
+                    if tx_data.version() == zcash_primitives::transaction::TxVersion::V6 {
+                        Ok(TransactionData::from_parts_v6(
+                            branch_id,
+                            tx_data.lock_time(),
+                            expiry_height,
+                            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+                            tx_data.zip233_amount(),
+                            tx_data.transparent_bundle().cloned(),
+                            tx_data.sapling_bundle().cloned(),
+                            tx_data.orchard_bundle().cloned(),
+                            tx_data.ironwood_bundle().cloned(),
+                        )
                         .freeze()?)
+                    } else {
+                        Ok(TransactionData::from_parts(
+                            tx_data.version(),
+                            branch_id,
+                            tx_data.lock_time(),
+                            expiry_height,
+                            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+                            tx_data.zip233_amount(),
+                            tx_data.transparent_bundle().cloned(),
+                            tx_data.sprout_bundle().cloned(),
+                            tx_data.sapling_bundle().cloned(),
+                            tx_data.orchard_bundle().cloned(),
+                        )
+                        .freeze()?)
+                    }
                 } else {
                     Err(Self::Error::CorruptedData(
                         "Consensus branch ID not known, cannot parse this transaction until it is mined"
@@ -642,20 +685,54 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         })
     }
 
+    #[cfg(feature = "orchard")]
+    fn get_ironwood_nullifiers(
+        &self,
+        query: NullifierQuery,
+    ) -> Result<Vec<(Self::AccountId, orchard::note::Nullifier)>, Self::Error> {
+        tracing::debug!("get_ironwood_nullifiers");
+        let nullifiers = self.received_notes.get_ironwood_nullifiers();
+        Ok(match query {
+            NullifierQuery::All => nullifiers
+                .map(|(account_id, _, nf)| (account_id, nf))
+                .collect(),
+            NullifierQuery::Unspent => nullifiers
+                .filter_map(|(account_id, _, nf)| {
+                    if let Some((height, tx_index)) = self.nullifiers.get(&Nullifier::Ironwood(nf))
+                    {
+                        if let Some(spending_tx) =
+                            self.tx_table.get_by_height_and_index(*height, *tx_index)
+                        {
+                            if matches!(spending_tx.status(), TransactionStatus::Mined(_))
+                                || spending_tx.expiry_height().is_none()
+                            {
+                                None
+                            } else {
+                                Some((account_id, nf))
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        Some((account_id, nf))
+                    }
+                })
+                .collect(),
+        })
+    }
+
     #[cfg(feature = "transparent-inputs")]
     fn get_transparent_receivers(
         &self,
         account_id: Self::AccountId,
-        _include_change: bool,
+        include_change: bool,
         _include_standalone: bool,
     ) -> Result<HashMap<TransparentAddress, TransparentAddressMetadata>, Self::Error> {
         let account = self
             .get_account(account_id)?
             .ok_or(Error::AccountUnknown(account_id))?;
 
-        // This memory backend currently only tracks external derived transparent receivers.
-
-        let t_addresses = account
+        let mut t_addresses: HashMap<_, _> = account
             .addresses()
             .iter()
             .filter_map(|(diversifier_index, ua)| {
@@ -674,6 +751,12 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 })
             })
             .collect();
+
+        if include_change {
+            t_addresses
+                .extend(account.internal_addresses(self.first_internal_gap_index(account_id)?));
+        }
+
         Ok(t_addresses)
     }
 
@@ -700,6 +783,12 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 Exposure::Unknown,
                 None,
             )));
+        }
+
+        if let Some(metadata) = account
+            .metadata_for_internal_address(address, self.first_internal_gap_index(account_id)?)
+        {
+            return Ok(Some(metadata));
         }
 
         if let Some((_, metadata)) = account
@@ -750,16 +839,25 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 false
             }
         }) {
-            if self.utxo_is_spendable(outpoint, target_height, confirmations_policy)? {
-                let address = txo.address;
-                let key_origin = TransparentKeyOrigin::Derived {
-                    scope: txo.key_scope,
-                };
-                let entry = balances
-                    .entry(address)
-                    .or_insert((key_origin, Balance::ZERO));
+            let status =
+                self.transparent_output_status(outpoint, target_height, confirmations_policy)?;
+            if status != TransparentOutputStatus::Unavailable {
+                let entry = balances.entry(txo.address).or_insert((
+                    TransparentKeyOrigin::Derived {
+                        scope: txo.key_scope,
+                    },
+                    Balance::ZERO,
+                ));
 
-                entry.1.add_spendable_value(txo.txout.value())?;
+                match status {
+                    TransparentOutputStatus::Spendable => {
+                        entry.1.add_spendable_value(txo.txout.value())?
+                    }
+                    TransparentOutputStatus::Pending => {
+                        entry.1.add_pending_spendable_value(txo.txout.value())?
+                    }
+                    TransparentOutputStatus::Unavailable => unreachable!(),
+                }
             }
         }
 
@@ -768,11 +866,23 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
         tracing::debug!("transaction_data_requests");
-        Ok(self
+        let mut requests = self
             .transaction_data_request_queue
             .iter()
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+
+        for (txid, entry) in self.tx_table.iter() {
+            if entry.raw().is_none()
+                && !requests.iter().any(
+                    |request| matches!(request, TransactionDataRequest::Enhancement(id) if id == txid),
+                )
+            {
+                requests.push(TransactionDataRequest::Enhancement(*txid));
+            }
+        }
+
+        Ok(requests)
     }
 
     fn list_addresses(&self, account: Self::AccountId) -> Result<Vec<AddressInfo>, Self::Error> {
@@ -785,11 +895,14 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .addresses()
             .iter()
             .map(|(diversifier_index, ua)| {
-                AddressInfo::from_parts(ua.clone().into(), AddressSource::Derived {
-                    diversifier_index: *diversifier_index,
-                    #[cfg(feature = "transparent-inputs")]
-                    transparent_key_scope: None,
-                })
+                AddressInfo::from_parts(
+                    ua.clone().into(),
+                    AddressSource::Derived {
+                        diversifier_index: *diversifier_index,
+                        #[cfg(feature = "transparent-inputs")]
+                        transparent_key_scope: None,
+                    },
+                )
                 .ok_or_else(|| Error::CorruptedData("invalid address metadata".to_owned()))
             })
             .collect()

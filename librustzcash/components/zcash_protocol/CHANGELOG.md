@@ -10,6 +10,39 @@ workspace.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-09
+
+This release sets the NU6.3 mainnet activation height to 3428143.
+
+### Added
+- `zcash_protocol::consensus::OrchardProtocolRevision`
+- `zcash_protocol::consensus::BranchId::orchard_protocol_revision`
+- `zcash_protocol::consensus::BranchId::network_upgrade`
+- `zcash_protocol::consensus::NetworkUpgrade::branch_id` (previously private)
+
+### Changed
+- MSRV is now 1.88
+
+## [0.10.0-pre.0] - 2026-06-30
+
+This release sets the NU6.3 activation height to 4134000 on testnet.
+Mainnet activation will be set in the 0.10.0 final release.
+
+### Added
+- `zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID}`
+- `zcash_protocol::consensus::{NetworkUpgrade::Nu6_3, BranchId::Nu6_3}`
+- `zcash_protocol::local_consensus::LocalNetwork::nu6_3`.
+
+### Removed
+- All support for Transparent Zcash Extensions (TZEs), which was only ever
+  available behind the `--cfg zcash_unstable="zfuture"` development flag and has
+  been determined never to land. This removes the `zfuture` configuration and
+  everything it gated, including:
+  - `zcash_protocol::consensus::NetworkUpgrade::ZFuture` and
+    `zcash_protocol::consensus::BranchId::ZFuture`.
+  - `zcash_protocol::constants::{ZFUTURE_TX_VERSION, ZFUTURE_VERSION_GROUP_ID}`.
+  - `zcash_protocol::local_consensus::LocalNetwork::z_future`.
+
 ## [0.9.0] - 2026-06-02
 
 ### Changed
@@ -20,6 +53,11 @@ workspace.
   - `NetworkUpgrade` now has an additional `Nu6_2` variant.
 - `zcash_protocol::local_consensus`:
   - `LocalNetwork` has a new field `nu6_2`.
+
+### Fixed
+- Updated to crate versions that fix an Orchard soundness vulnerability
+  (GHSA-ww9q-8r59-xv46) and Orchard non-canonical proof size issue
+  (GHSA-2x4w-pxqw-58v9).
 
 ## [0.8.0] - 2026-04-23
 

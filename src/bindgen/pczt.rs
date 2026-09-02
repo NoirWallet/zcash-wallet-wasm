@@ -1,11 +1,9 @@
-use serde::{Deserialize, Serialize};
-
 use pczt::roles::{combiner::Combiner, redactor::Redactor};
 
 use crate::*;
 
 #[wasm_bindgen]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Pczt(pczt::Pczt);
 
 impl From<pczt::Pczt> for Pczt {
@@ -24,24 +22,28 @@ impl From<Pczt> for pczt::Pczt {
 impl Pczt {
     /// Returns a JSON object with the details of the Pczt.
     pub fn to_json(&self) -> Result<JsValue, Error> {
-        serde_wasm_bindgen::to_value(&self).map_err(Error::from)
+        serde_wasm_bindgen::to_value(&self.serialize()?).map_err(Error::from)
     }
 
     /// Returns a Pczt from a JSON object
     pub fn from_json(s: JsValue) -> Result<Pczt, Error> {
-        serde_wasm_bindgen::from_value(s).map_err(Error::from)
+        let bytes: Vec<u8> = serde_wasm_bindgen::from_value(s).map_err(Error::from)?;
+        Self::from_bytes(&bytes)
     }
 
     /// Returns the postcard serialization of the Pczt.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.0.serialize()
+    pub fn serialize(&self) -> Result<Vec<u8>, Error> {
+        self.0
+            .clone()
+            .serialize()
+            .map_err(|e| Error::Generic(format!("Failed to serialize PCZT: {e:?}")))
     }
 
     /// Deserialize to a Pczt from postcard bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Pczt, Error> {
         pczt::Pczt::parse(bytes)
             .map(Self)
-            .map_err(|e| Error::Generic(format!("Failed to parse PCZT bytes: {:?}", e)))
+            .map_err(|e| Error::Generic(format!("Failed to parse PCZT bytes: {e:?}")))
     }
 
     /// Strips prover-only data so the PCZT is small enough to transport to an
@@ -90,6 +92,6 @@ impl Pczt {
         Combiner::new(vec![self.0.clone(), other.0.clone()])
             .combine()
             .map(Pczt)
-            .map_err(|e| Error::Generic(format!("Failed to combine PCZTs: {:?}", e)))
+            .map_err(|e| Error::Generic(format!("Failed to combine PCZTs: {e:?}")))
     }
 }

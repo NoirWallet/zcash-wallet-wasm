@@ -76,6 +76,14 @@ pub enum Error {
     TxIdParse,
     #[error("Failed to create Pczt")]
     PcztCreate,
+    #[error(
+        "WALLET_SPENDABILITY_INCONSISTENT: account {account_id} has {note_count} confirmed note(s) with incomplete spendability metadata totaling {value_zats} zatoshis"
+    )]
+    SpendabilityMetadataIncomplete {
+        account_id: u32,
+        note_count: usize,
+        value_zats: u64,
+    },
     #[error("Failed to prove Pczt: {0}")]
     PcztProve(String),
     #[error("Failed to send Pczt: {0}")]

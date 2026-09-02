@@ -14,6 +14,25 @@ impl TransactionDataRequestQueue {
     pub fn queue_status_retrieval(&mut self, txid: &TxId) {
         self.0.push_back(TransactionDataRequest::GetStatus(*txid));
     }
+
+    pub fn queue_enhancement(&mut self, txid: &TxId) {
+        self.0.retain(
+            |request| !matches!(request, TransactionDataRequest::GetStatus(id) if id == txid),
+        );
+        if !self
+            .0
+            .iter()
+            .any(|request| matches!(request, TransactionDataRequest::Enhancement(id) if id == txid))
+        {
+            self.0.push_back(TransactionDataRequest::Enhancement(*txid));
+        }
+    }
+
+    pub fn remove_enhancement(&mut self, txid: &TxId) {
+        self.0.retain(
+            |request| !matches!(request, TransactionDataRequest::Enhancement(id) if id == txid),
+        );
+    }
 }
 
 impl Deref for TransactionDataRequestQueue {
@@ -96,5 +115,28 @@ mod serialization {
                 _ => panic!("invalid request type"),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enhancement_replaces_status_and_is_deduplicated() {
+        let txid = TxId::from_bytes([7; 32]);
+        let mut queue = TransactionDataRequestQueue::new();
+
+        queue.queue_status_retrieval(&txid);
+        queue.queue_enhancement(&txid);
+        queue.queue_enhancement(&txid);
+
+        assert_eq!(
+            queue.iter().collect::<Vec<_>>(),
+            vec![&TransactionDataRequest::Enhancement(txid)]
+        );
+
+        queue.remove_enhancement(&txid);
+        assert!(queue.is_empty());
     }
 }

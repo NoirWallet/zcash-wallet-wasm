@@ -72,7 +72,7 @@ impl TryFrom<(u32, &[u8])> for Fvk {
             Typecode::Unknown(_) => Ok(Fvk::Unknown { typecode, data }),
         }
         .map_err(|e| {
-            ParseError::InvalidEncoding(format!("Invalid fvk for typecode {}: {:?}", typecode, e))
+            ParseError::InvalidEncoding(format!("Invalid fvk for typecode {typecode}: {e:?}"))
         })
     }
 }
@@ -386,15 +386,18 @@ mod tests {
         ]);
 
         // `Ufvk::items` sorts the fvks in priority order.
-        assert_eq!(ufvk.items(), vec![
-            Fvk::Orchard([0; 96]),
-            Fvk::Sapling([0; 128]),
-            Fvk::P2pkh([0; 65]),
-            Fvk::Unknown {
-                typecode: 0xff,
-                data: vec![],
-            },
-        ])
+        assert_eq!(
+            ufvk.items(),
+            vec![
+                Fvk::Orchard([0; 96]),
+                Fvk::Sapling([0; 128]),
+                Fvk::P2pkh([0; 65]),
+                Fvk::Unknown {
+                    typecode: 0xff,
+                    data: vec![],
+                },
+            ]
+        )
     }
 
     #[test]
@@ -409,23 +412,29 @@ mod tests {
         );
         assert_eq!(format!("{:?}", Fvk::P2pkh([0; 65])), "Fvk::P2pkh(\"...\")");
         assert_eq!(
-            format!("{:?}", Fvk::Unknown {
-                typecode: 4242,
-                data: vec![1, 2, 3],
-            }),
+            format!(
+                "{:?}",
+                Fvk::Unknown {
+                    typecode: 4242,
+                    data: vec![1, 2, 3],
+                }
+            ),
             "Fvk::Unknown { typecode: 4242, data: \"...\" }"
         );
     }
 
     #[test]
     fn ufvk_debug_redaction() {
-        let ufvk = Ufvk(vec![Fvk::P2pkh([0; 65]), Fvk::Unknown {
-            typecode: 7,
-            data: vec![9, 9, 9],
-        }]);
+        let ufvk = Ufvk(vec![
+            Fvk::P2pkh([0; 65]),
+            Fvk::Unknown {
+                typecode: 7,
+                data: vec![9, 9, 9],
+            },
+        ]);
 
         assert_eq!(
-            format!("{:?}", ufvk),
+            format!("{ufvk:?}"),
             "Ufvk([Fvk::P2pkh(\"...\"), Fvk::Unknown { typecode: 7, data: \"...\" }])"
         );
     }

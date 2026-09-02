@@ -449,6 +449,11 @@ export class Pczt {
             wasm.pczt_serialize(retptr, this.__wbg_ptr);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
             var v1 = getArrayU8FromWasm0(r0, r1).slice();
             wasm.__wbindgen_export4(r0, r1 * 1, 1);
             return v1;
@@ -875,6 +880,7 @@ export class WalletSummary {
         return {
             chain_tip_height: this.chain_tip_height,
             fully_scanned_height: this.fully_scanned_height,
+            next_ironwood_subtree_index: this.next_ironwood_subtree_index,
             next_orchard_subtree_index: this.next_orchard_subtree_index,
             next_sapling_subtree_index: this.next_sapling_subtree_index,
             account_balances: this.account_balances,
@@ -910,6 +916,13 @@ export class WalletSummary {
     /**
      * @returns {bigint}
      */
+    get next_ironwood_subtree_index() {
+        const ret = wasm.__wbg_get_walletsummary_next_ironwood_subtree_index(this.__wbg_ptr);
+        return BigInt.asUintN(64, ret);
+    }
+    /**
+     * @returns {bigint}
+     */
     get next_orchard_subtree_index() {
         const ret = wasm.__wbg_get_walletsummary_next_orchard_subtree_index(this.__wbg_ptr);
         return BigInt.asUintN(64, ret);
@@ -932,6 +945,12 @@ export class WalletSummary {
      */
     set fully_scanned_height(arg0) {
         wasm.__wbg_set_walletsummary_fully_scanned_height(this.__wbg_ptr, arg0);
+    }
+    /**
+     * @param {bigint} arg0
+     */
+    set next_ironwood_subtree_index(arg0) {
+        wasm.__wbg_set_walletsummary_next_ironwood_subtree_index(this.__wbg_ptr, arg0);
     }
     /**
      * @param {bigint} arg0
@@ -1069,6 +1088,51 @@ export class WebWallet {
     }
     /**
      * @param {number} account_id
+     * @param {string} to_address
+     * @param {Uint8Array | null | undefined} memo
+     * @param {bigint} marginal_fee_zats
+     * @returns {Promise<bigint>}
+     */
+    estimate_orchard_migration_fee(account_id, to_address, memo, marginal_fee_zats) {
+        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_estimate_orchard_migration_fee(this.__wbg_ptr, account_id, ptr0, len0, ptr1, len1, marginal_fee_zats);
+        return takeObject(ret);
+    }
+    /**
+     * @param {number} account_id
+     * @param {string} to_address
+     * @param {Uint8Array | null | undefined} memo
+     * @param {bigint} marginal_fee_zats
+     * @returns {Promise<any>}
+     */
+    estimate_pczt_max_transfer(account_id, to_address, memo, marginal_fee_zats) {
+        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_estimate_pczt_max_transfer(this.__wbg_ptr, account_id, ptr0, len0, ptr1, len1, marginal_fee_zats);
+        return takeObject(ret);
+    }
+    /**
+     * @param {number} account_id
+     * @param {string} to_address
+     * @param {Uint8Array | null | undefined} memo
+     * @param {bigint} marginal_fee_zats
+     * @returns {Promise<any>}
+     */
+    estimate_pczt_max_transparent_transfer(account_id, to_address, memo, marginal_fee_zats) {
+        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_estimate_pczt_max_transparent_transfer(this.__wbg_ptr, account_id, ptr0, len0, ptr1, len1, marginal_fee_zats);
+        return takeObject(ret);
+    }
+    /**
+     * @param {number} account_id
      * @param {bigint} marginal_fee_zats
      * @returns {Promise<bigint>}
      */
@@ -1090,6 +1154,22 @@ export class WebWallet {
         var ptr1 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
         var len1 = WASM_VECTOR_LEN;
         const ret = wasm.webwallet_estimate_pczt_transfer_fee(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, len1, marginal_fee_zats);
+        return takeObject(ret);
+    }
+    /**
+     * @param {number} account_id
+     * @param {string} to_address
+     * @param {bigint} value
+     * @param {Uint8Array | null | undefined} memo
+     * @param {bigint} marginal_fee_zats
+     * @returns {Promise<bigint>}
+     */
+    estimate_pczt_transparent_transfer_fee(account_id, to_address, value, memo, marginal_fee_zats) {
+        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_estimate_pczt_transparent_transfer_fee(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, len1, marginal_fee_zats);
         return takeObject(ret);
     }
     /**
@@ -1224,6 +1304,14 @@ export class WebWallet {
         return takeObject(ret);
     }
     /**
+     * Returns the configured NU6.3 activation height for the selected network.
+     * @returns {number | undefined}
+     */
+    get_ironwood_activation_height() {
+        const ret = wasm.webwallet_get_ironwood_activation_height(this.__wbg_ptr);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
      * @returns {Promise<bigint>}
      */
     get_latest_block() {
@@ -1346,6 +1434,34 @@ export class WebWallet {
     }
     /**
      * @param {number} account_id
+     * @param {string} to_address
+     * @param {UnifiedSpendingKey} usk
+     * @param {SeedFingerprint} seed_fp
+     * @param {ProofGenerationKey | null | undefined} sapling_proof_gen_key
+     * @param {Uint8Array | null | undefined} memo
+     * @param {bigint} marginal_fee_zats
+     * @param {number | null} [expiry_delta_blocks]
+     * @returns {Promise<string>}
+     */
+    oneclick_pczt_orchard_migration(account_id, to_address, usk, seed_fp, sapling_proof_gen_key, memo, marginal_fee_zats, expiry_delta_blocks) {
+        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        _assertClass(usk, UnifiedSpendingKey);
+        var ptr1 = usk.__destroy_into_raw();
+        _assertClass(seed_fp, SeedFingerprint);
+        var ptr2 = seed_fp.__destroy_into_raw();
+        let ptr3 = 0;
+        if (!isLikeNone(sapling_proof_gen_key)) {
+            _assertClass(sapling_proof_gen_key, ProofGenerationKey);
+            ptr3 = sapling_proof_gen_key.__destroy_into_raw();
+        }
+        var ptr4 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
+        var len4 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_oneclick_pczt_orchard_migration(this.__wbg_ptr, account_id, ptr0, len0, ptr1, ptr2, ptr3, ptr4, len4, marginal_fee_zats, isLikeNone(expiry_delta_blocks) ? Number.MAX_SAFE_INTEGER : (expiry_delta_blocks) >>> 0);
+        return takeObject(ret);
+    }
+    /**
+     * @param {number} account_id
      * @param {UnifiedSpendingKey} usk
      * @param {SeedFingerprint} seed_fp
      * @param {ProofGenerationKey | null} [sapling_proof_gen_key]
@@ -1443,6 +1559,62 @@ export class WebWallet {
         return takeObject(ret);
     }
     /**
+     * @param {number} account_id
+     * @param {string} to_address
+     * @param {bigint} value
+     * @param {UnifiedSpendingKey} usk
+     * @param {SeedFingerprint} seed_fp
+     * @param {ProofGenerationKey | null} [sapling_proof_gen_key]
+     * @param {Uint8Array | null} [memo]
+     * @returns {Promise<string>}
+     */
+    oneclick_pczt_transparent_transfer(account_id, to_address, value, usk, seed_fp, sapling_proof_gen_key, memo) {
+        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        _assertClass(usk, UnifiedSpendingKey);
+        var ptr1 = usk.__destroy_into_raw();
+        _assertClass(seed_fp, SeedFingerprint);
+        var ptr2 = seed_fp.__destroy_into_raw();
+        let ptr3 = 0;
+        if (!isLikeNone(sapling_proof_gen_key)) {
+            _assertClass(sapling_proof_gen_key, ProofGenerationKey);
+            ptr3 = sapling_proof_gen_key.__destroy_into_raw();
+        }
+        var ptr4 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
+        var len4 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_oneclick_pczt_transparent_transfer(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, ptr2, ptr3, ptr4, len4);
+        return takeObject(ret);
+    }
+    /**
+     * @param {number} account_id
+     * @param {string} to_address
+     * @param {bigint} value
+     * @param {UnifiedSpendingKey} usk
+     * @param {SeedFingerprint} seed_fp
+     * @param {ProofGenerationKey | null | undefined} sapling_proof_gen_key
+     * @param {Uint8Array | null | undefined} memo
+     * @param {bigint} marginal_fee_zats
+     * @param {number | null} [expiry_delta_blocks]
+     * @returns {Promise<string>}
+     */
+    oneclick_pczt_transparent_transfer_dynamic_fee(account_id, to_address, value, usk, seed_fp, sapling_proof_gen_key, memo, marginal_fee_zats, expiry_delta_blocks) {
+        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        _assertClass(usk, UnifiedSpendingKey);
+        var ptr1 = usk.__destroy_into_raw();
+        _assertClass(seed_fp, SeedFingerprint);
+        var ptr2 = seed_fp.__destroy_into_raw();
+        let ptr3 = 0;
+        if (!isLikeNone(sapling_proof_gen_key)) {
+            _assertClass(sapling_proof_gen_key, ProofGenerationKey);
+            ptr3 = sapling_proof_gen_key.__destroy_into_raw();
+        }
+        var ptr4 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
+        var len4 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_oneclick_pczt_transparent_transfer_dynamic_fee(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, ptr2, ptr3, ptr4, len4, marginal_fee_zats, isLikeNone(expiry_delta_blocks) ? Number.MAX_SAFE_INTEGER : (expiry_delta_blocks) >>> 0);
+        return takeObject(ret);
+    }
+    /**
      * Create an unsigned, unproven PCZT for a transfer (hardware wallet flow).
      *
      * The returned PCZT carries ZIP-32 derivation metadata so an external signer
@@ -1462,6 +1634,23 @@ export class WebWallet {
         var ptr1 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
         var len1 = WASM_VECTOR_LEN;
         const ret = wasm.webwallet_pczt_create(this.__wbg_ptr, account_id, ptr0, len0, value, ptr1, len1, marginal_fee_zats);
+        return takeObject(ret);
+    }
+    /**
+     * Create a V6 PCZT that sweeps spendable Orchard funds to this account's Ironwood pool.
+     * @param {number} account_id
+     * @param {string} to_address
+     * @param {Uint8Array | null | undefined} memo
+     * @param {bigint} marginal_fee_zats
+     * @param {number | null} [expiry_delta_blocks]
+     * @returns {Promise<Pczt>}
+     */
+    pczt_orchard_migration_create(account_id, to_address, memo, marginal_fee_zats, expiry_delta_blocks) {
+        const ptr0 = passStringToWasm0(to_address, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(memo) ? 0 : passArray8ToWasm0(memo, wasm.__wbindgen_export);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.webwallet_pczt_orchard_migration_create(this.__wbg_ptr, account_id, ptr0, len0, ptr1, len1, marginal_fee_zats, isLikeNone(expiry_delta_blocks) ? Number.MAX_SAFE_INTEGER : (expiry_delta_blocks) >>> 0);
         return takeObject(ret);
     }
     /**
@@ -2081,12 +2270,6 @@ function __wbg_get_imports(memory) {
             const ret = Number(getObject(arg0));
             return ret;
         },
-        __wbg___wbindgen_bigint_get_as_i64_38130e98eecd467d: function(arg0, arg1) {
-            const v = getObject(arg1);
-            const ret = typeof(v) === 'bigint' ? v : undefined;
-            getDataViewMemory0().setBigInt64(arg0 + 8 * 1, isLikeNone(ret) ? BigInt(0) : ret, true);
-            getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
-        },
         __wbg___wbindgen_boolean_get_1a45e2c38d4d41b9: function(arg0) {
             const v = getObject(arg0);
             const ret = typeof(v) === 'boolean' ? v : undefined;
@@ -2098,14 +2281,6 @@ function __wbg_get_imports(memory) {
             const len1 = WASM_VECTOR_LEN;
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
-        },
-        __wbg___wbindgen_in_70a403a56e771704: function(arg0, arg1) {
-            const ret = getObject(arg0) in getObject(arg1);
-            return ret;
-        },
-        __wbg___wbindgen_is_bigint_6ffd6468a9bc44b9: function(arg0) {
-            const ret = typeof(getObject(arg0)) === 'bigint';
-            return ret;
         },
         __wbg___wbindgen_is_function_754e9f305ff6029e: function(arg0) {
             const ret = typeof(getObject(arg0)) === 'function';
@@ -2122,10 +2297,6 @@ function __wbg_get_imports(memory) {
         },
         __wbg___wbindgen_is_undefined_67b456be8673d3d7: function(arg0) {
             const ret = getObject(arg0) === undefined;
-            return ret;
-        },
-        __wbg___wbindgen_jsval_eq_1068e624fa87f6ab: function(arg0, arg1) {
-            const ret = getObject(arg0) === getObject(arg1);
             return ret;
         },
         __wbg___wbindgen_jsval_loose_eq_2c56564c75129511: function(arg0, arg1) {
@@ -2148,10 +2319,6 @@ function __wbg_get_imports(memory) {
         },
         __wbg___wbindgen_rethrow_c4d99b4b53265290: function(arg0) {
             throw takeObject(arg0);
-        },
-        __wbg___wbindgen_shr_b5893fce8492f5d9: function(arg0, arg1) {
-            const ret = getObject(arg0) >> getObject(arg1);
-            return addHeapObject(ret);
         },
         __wbg___wbindgen_string_get_72bdf95d3ae505b1: function(arg0, arg1) {
             const obj = getObject(arg1);
@@ -2255,10 +2422,6 @@ function __wbg_get_imports(memory) {
         __wbg_enqueue_09035479e2081625: function() { return handleError(function (arg0, arg1) {
             getObject(arg0).enqueue(getObject(arg1));
         }, arguments); },
-        __wbg_entries_04b37a02507f1713: function(arg0) {
-            const ret = Object.entries(getObject(arg0));
-            return addHeapObject(ret);
-        },
         __wbg_error_78ff5b3a29b770e0: function(arg0) {
             console.error(getObject(arg0));
         },
@@ -2313,10 +2476,6 @@ function __wbg_get_imports(memory) {
         },
         __wbg_get_value_c68fe2e1a76c69ca: function(arg0) {
             const ret = getObject(arg0).value;
-            return addHeapObject(ret);
-        },
-        __wbg_get_with_ref_key_6412cf3094599694: function(arg0, arg1) {
-            const ret = getObject(arg0)[getObject(arg1)];
             return addHeapObject(ret);
         },
         __wbg_has_73740b27f436fed3: function() { return handleError(function (arg0, arg1) {
@@ -2419,10 +2578,6 @@ function __wbg_get_imports(memory) {
             const ret = new Uint8Array(getObject(arg0));
             return addHeapObject(ret);
         },
-        __wbg_new_622fc80556be2e26: function() {
-            const ret = new Map();
-            return addHeapObject(ret);
-        },
         __wbg_new_b682b81e8eaaf027: function(arg0, arg1) {
             try {
                 var state0 = {a: arg0, b: arg1};
@@ -2430,7 +2585,7 @@ function __wbg_get_imports(memory) {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_7625(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_8053(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -2468,7 +2623,7 @@ function __wbg_get_imports(memory) {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_7625(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_8053(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -2578,10 +2733,6 @@ function __wbg_get_imports(memory) {
         }, arguments); },
         __wbg_set_29c99a8aac1c01e5: function(arg0, arg1, arg2) {
             getObject(arg0).set(getArrayU8FromWasm0(arg1, arg2));
-        },
-        __wbg_set_52b1e1eb5bed906a: function(arg0, arg1, arg2) {
-            const ret = getObject(arg0).set(getObject(arg1), getObject(arg2));
-            return addHeapObject(ret);
         },
         __wbg_set_6be42768c690e380: function(arg0, arg1, arg2) {
             getObject(arg0)[takeObject(arg1)] = takeObject(arg2);
@@ -2719,23 +2870,23 @@ function __wbg_get_imports(memory) {
             console.warn(getObject(arg0), getObject(arg1), getObject(arg2), getObject(arg3));
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1121, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3173);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1159, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3425);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2651, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7594);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2752, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_8021);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2654, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_7603);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2754, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_8025);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1092, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3108);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1130, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_3360);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000005: function(arg0) {
@@ -2744,31 +2895,21 @@ function __wbg_get_imports(memory) {
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000006: function(arg0, arg1) {
-            // Cast intrinsic for `I128 -> Externref`.
-            const ret = (BigInt.asUintN(64, arg0) | (arg1 << BigInt(64)));
-            return addHeapObject(ret);
-        },
-        __wbindgen_cast_0000000000000007: function(arg0) {
-            // Cast intrinsic for `I64 -> Externref`.
-            const ret = arg0;
-            return addHeapObject(ret);
-        },
-        __wbindgen_cast_0000000000000008: function(arg0, arg1) {
             // Cast intrinsic for `Ref(Slice(U8)) -> NamedExternref("Uint8Array")`.
             const ret = getArrayU8FromWasm0(arg0, arg1);
             return addHeapObject(ret);
         },
-        __wbindgen_cast_0000000000000009: function(arg0, arg1) {
+        __wbindgen_cast_0000000000000007: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
             return addHeapObject(ret);
         },
-        __wbindgen_cast_000000000000000a: function(arg0) {
+        __wbindgen_cast_0000000000000008: function(arg0) {
             // Cast intrinsic for `U64 -> Externref`.
             const ret = BigInt.asUintN(64, arg0);
             return addHeapObject(ret);
         },
-        __wbindgen_cast_000000000000000b: function(arg0, arg1) {
+        __wbindgen_cast_0000000000000009: function(arg0, arg1) {
             var v0 = getArrayU8FromWasm0(arg0, arg1).slice();
             wasm.__wbindgen_export4(arg0, arg1 * 1, 1);
             // Cast intrinsic for `Vector(U8) -> Externref`.
@@ -2804,22 +2945,22 @@ function __wbg_get_imports(memory) {
     };
 }
 
-function __wasm_bindgen_func_elem_3108(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_3108(arg0, arg1);
+function __wasm_bindgen_func_elem_3360(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_3360(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_3173(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_3173(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_3425(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_3425(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7594(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_7594(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_8021(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_8021(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_7603(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_8025(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_7603(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_8025(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -2830,8 +2971,8 @@ function __wasm_bindgen_func_elem_7603(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_7625(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_7625(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_8053(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_8053(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 

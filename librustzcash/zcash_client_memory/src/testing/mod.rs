@@ -12,7 +12,7 @@ use zcash_client_backend::{
 };
 use zcash_keys::address::Address;
 use zcash_protocol::{
-    ShieldedProtocol, TxId,
+    ShieldedPool, TxId,
     consensus::BlockHeight,
     local_consensus::LocalNetwork,
     value::{ZatBalance, Zatoshis},
@@ -150,7 +150,14 @@ where
                             )),
                         )
                     }
-                    Recipient::InternalAccount { .. } => OutputOfSentTx::from_parts(
+                    Recipient::InternalShielded { .. } => OutputOfSentTx::from_parts(
+                        note.value,
+                        None,
+                        #[cfg(feature = "transparent-inputs")]
+                        None,
+                    ),
+                    #[cfg(feature = "transparent-inputs")]
+                    Recipient::InternalTransparent { .. } => OutputOfSentTx::from_parts(
                         note.value,
                         None,
                         #[cfg(feature = "transparent-inputs")]
@@ -171,7 +178,7 @@ where
         &self,
         outpoint: &::transparent::bundle::OutPoint,
         _spendable_as_of: Option<TargetHeight>,
-    ) -> Result<Option<WalletTransparentOutput>, <Self as InputSource>::Error> {
+    ) -> Result<Option<WalletTransparentOutput<AccountId>>, <Self as InputSource>::Error> {
         // FIXME: perform spendability check according to `_spendable_as_of`
         Ok(self
             .transparent_received_outputs
@@ -182,14 +189,11 @@ where
             }))
     }
 
-    fn get_notes(
-        &self,
-        protocol: zcash_protocol::ShieldedProtocol,
-    ) -> Result<Vec<ReceivedNote<NoteId, Note>>, Error> {
+    fn get_notes(&self, protocol: ShieldedPool) -> Result<Vec<ReceivedNote<NoteId, Note>>, Error> {
         Ok(self
             .received_notes
             .iter()
-            .filter(|rn| rn.note.protocol() == protocol)
+            .filter(|rn| rn.note.pool() == protocol)
             .cloned()
             .map(Into::into)
             .collect())
@@ -197,11 +201,7 @@ where
 
     /// Returns the note IDs for shielded notes sent by the wallet in a particular
     /// transaction.
-    fn get_sent_note_ids(
-        &self,
-        txid: &TxId,
-        protocol: ShieldedProtocol,
-    ) -> Result<Vec<NoteId>, Error> {
+    fn get_sent_note_ids(&self, txid: &TxId, protocol: ShieldedPool) -> Result<Vec<NoteId>, Error> {
         Ok(self
             .get_sent_notes()
             .keys()
@@ -365,12 +365,12 @@ where
 
     fn get_checkpoint_history(
         &self,
-        protocol: &ShieldedProtocol,
+        protocol: &ShieldedPool,
     ) -> Result<Vec<(BlockHeight, Option<incrementalmerkletree::Position>)>, Error> {
         let mut checkpoints = Vec::new();
 
         match protocol {
-            ShieldedProtocol::Sapling => {
+            ShieldedPool::Sapling => {
                 self.sapling_tree
                     .store()
                     .for_each_checkpoint(usize::MAX, |id, cp| {
@@ -379,8 +379,17 @@ where
                     })?;
             }
             #[cfg(feature = "orchard")]
-            ShieldedProtocol::Orchard => {
+            ShieldedPool::Orchard => {
                 self.orchard_tree
+                    .store()
+                    .for_each_checkpoint(usize::MAX, |id, cp| {
+                        checkpoints.push((*id, cp.position()));
+                        Ok(())
+                    })?;
+            }
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Ironwood => {
+                self.ironwood_tree
                     .store()
                     .for_each_checkpoint(usize::MAX, |id, cp| {
                         checkpoints.push((*id, cp.position()));

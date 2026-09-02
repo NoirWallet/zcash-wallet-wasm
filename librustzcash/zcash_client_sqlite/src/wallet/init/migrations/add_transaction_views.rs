@@ -406,10 +406,10 @@ mod tests {
             WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
         WalletMigrator::new()
             .ignore_seed_relevance()
-            .init_or_migrate_to(&mut db_data, &[
-                utxos_table::MIGRATION_ID,
-                ufvk_support::MIGRATION_ID,
-            ])
+            .init_or_migrate_to(
+                &mut db_data,
+                &[utxos_table::MIGRATION_ID, ufvk_support::MIGRATION_ID],
+            )
             .unwrap();
 
         // create a UTXO to spend
@@ -418,10 +418,7 @@ mod tests {
             BranchId::Canopy,
             0,
             BlockHeight::from(3),
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
+            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
             Zatoshis::ZERO,
             Some(transparent::Bundle {
                 vin: vec![TxIn::from_parts(OutPoint::fake(), Script::default(), 0)],
