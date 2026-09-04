@@ -30,9 +30,10 @@ use zcash_client_backend::data_api::wallet::input_selection::{
     GreedyInputSelector, SpendPolicy, TransparentSpendPolicy,
 };
 use zcash_client_backend::data_api::wallet::{
-    ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
-    propose_send_max_transfer, propose_send_max_transparent_transfer, propose_shielding,
-    propose_transfer,
+    ConfirmationsPolicy, SpendingKeys, TargetHeight, create_pczt_from_proposal,
+    create_proposed_transactions, create_proposed_transactions_with_expiry_height,
+    extract_and_store_transaction_from_pczt, propose_send_max_transfer,
+    propose_send_max_transparent_transfer, propose_shielding, propose_transfer,
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, TransactionDataRequest,
@@ -93,6 +94,16 @@ fn validate_expiry_delta_blocks(expiry_delta_blocks: u32) -> Result<u32, Error> 
     } else {
         Ok(expiry_delta_blocks)
     }
+}
+
+fn transfer_expiry_height(
+    min_target_height: TargetHeight,
+    expiry_delta_blocks: Option<u32>,
+) -> Result<Option<BlockHeight>, Error> {
+    expiry_delta_blocks
+        .map(validate_expiry_delta_blocks)
+        .transpose()
+        .map(|delta| delta.map(|delta| BlockHeight::from(min_target_height) + delta))
 }
 
 fn transparent_transfer_policies() -> (SpendPolicy, TransparentChangePolicy) {
@@ -344,6 +355,64 @@ fn get_prover() -> &'static LocalTxProver {
     PROVER.get_or_init(|| {
         tracing::info!("🔧 Initializing LocalTxProver (loading Sapling parameters)...");
         LocalTxProver::bundled()
+    })
+}
+
+fn create_and_store_transfer<W, FeeRuleT>(
+    db: &mut W,
+    network: &Network,
+    usk: UnifiedSpendingKey,
+    proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, <W as InputSource>::NoteRef>,
+    target_expiry_height: Option<BlockHeight>,
+) -> Result<NonEmpty<TxId>, Error>
+where
+    W: WalletWrite + WalletCommitmentTrees + InputSource,
+    FeeRuleT: FeeRule,
+    FeeRuleT::Error: Debug,
+    <W as WalletRead>::Error: Debug,
+    <W as WalletCommitmentTrees>::Error: Debug,
+    <W as InputSource>::NoteRef: Debug,
+{
+    let prover = get_prover();
+    let spending_keys = SpendingKeys::from_unified_spending_key(usk);
+    let result = match target_expiry_height {
+        Some(target_expiry_height) => create_proposed_transactions_with_expiry_height::<
+            _,
+            _,
+            <MemoryWalletDb<Network> as InputSource>::Error,
+            _,
+            <FeeRuleT as FeeRule>::Error,
+            _,
+        >(
+            db,
+            network,
+            prover,
+            prover,
+            &spending_keys,
+            OvkPolicy::Sender,
+            proposal,
+            target_expiry_height,
+        ),
+        None => create_proposed_transactions::<
+            _,
+            _,
+            <MemoryWalletDb<Network> as InputSource>::Error,
+            _,
+            <FeeRuleT as FeeRule>::Error,
+            _,
+        >(
+            db,
+            network,
+            prover,
+            prover,
+            &spending_keys,
+            OvkPolicy::Sender,
+            proposal,
+        ),
+    };
+
+    result.map_err(|error| {
+        Error::Generic(format!("Failed to create transfer transactions: {error:?}"))
     })
 }
 
@@ -1841,6 +1910,70 @@ where
         }
     }
 
+    async fn execute_unified_transfer<FeeRuleT>(
+        &self,
+        usk: UnifiedSpendingKey,
+        proposal: zcash_client_backend::proposal::Proposal<FeeRuleT, <W as InputSource>::NoteRef>,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<TransferResult, Error>
+    where
+        FeeRuleT: FeeRule,
+        FeeRuleT::Error: Debug,
+    {
+        let expiry = transfer_expiry_height(proposal.min_target_height(), expiry_delta_blocks)?;
+        let txids = {
+            let mut db = self.db.write().await;
+            create_and_store_transfer(&mut *db, &self.network, usk, &proposal, expiry)?
+        };
+        self.submit_stored_transfer_transactions(&txids).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn oneclick_transfer(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        usk: UnifiedSpendingKey,
+        funding_source: TransferFundingSource,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: Option<u64>,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<TransferResult, Error> {
+        match marginal_fee_zats {
+            Some(marginal_fee_zats) => {
+                let proposal = self
+                    .propose_unified_transfer(
+                        account_id,
+                        to_address,
+                        value,
+                        memo,
+                        dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                        funding_source,
+                        allow_exact_send_max_fallback(funding_source, true),
+                    )
+                    .await?;
+                self.execute_unified_transfer(usk, proposal, expiry_delta_blocks)
+                    .await
+            }
+            None => {
+                let proposal = self
+                    .propose_unified_transfer(
+                        account_id,
+                        to_address,
+                        value,
+                        memo,
+                        StandardFeeRule::Zip317,
+                        funding_source,
+                        false,
+                    )
+                    .await?;
+                self.execute_unified_transfer(usk, proposal, expiry_delta_blocks)
+                    .await
+            }
+        }
+    }
+
     pub async fn pczt_shield(&self, account_id: AccountId) -> Result<Pczt, Error> {
         let change_strategy = MultiOutputChangeStrategy::new(
             StandardFeeRule::Zip317,
@@ -2885,11 +3018,12 @@ mod tests {
     use super::{
         TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
         allow_exact_send_max_fallback, dynamic_zip317_fee_rule, submit_transfer_transactions_with,
-        transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
+        transfer_expiry_height, transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
     };
     use crate::Network;
     use nonempty::NonEmpty;
     use std::collections::VecDeque;
+    use zcash_client_backend::data_api::wallet::TargetHeight;
     use zcash_client_backend::data_api::wallet::input_selection::{
         CoinbasePolicy, TransparentSource,
     };
@@ -2897,6 +3031,7 @@ mod tests {
     use zcash_client_backend::proto::service;
     use zcash_primitives::transaction::TxId;
     use zcash_protocol::ShieldedPool;
+    use zcash_protocol::consensus::BlockHeight;
     use zcash_protocol::value::Zatoshis;
 
     fn txid(value: u8) -> TxId {
@@ -3047,6 +3182,16 @@ mod tests {
         assert!(dynamic_zip317_fee_rule(5_000).is_ok());
         assert!(validate_expiry_delta_blocks(0).is_err());
         assert_eq!(validate_expiry_delta_blocks(12).unwrap(), 12);
+    }
+
+    #[test]
+    fn transfer_expiry_uses_the_proposal_target() {
+        let min_target = TargetHeight::from(BlockHeight::from_u32(2_000_000));
+        assert_eq!(
+            transfer_expiry_height(min_target, Some(12)).unwrap(),
+            Some(BlockHeight::from_u32(2_000_012)),
+        );
+        assert_eq!(transfer_expiry_height(min_target, None).unwrap(), None);
     }
 
     #[test]
