@@ -209,6 +209,14 @@ fn propose_t2t_with_transparent_change() {
 }
 
 #[test]
+fn propose_t2tex_with_transparent_funding() {
+    zcash_client_backend::data_api::testing::transparent::propose_t2tex_with_transparent_funding(
+        TestMemDbFactory::new(),
+        MemBlockCache::new(),
+    );
+}
+
+#[test]
 fn propose_t2shielded_requires_transparent_regather() {
     zcash_client_backend::data_api::testing::transparent::propose_t2shielded_requires_transparent_regather(
         TestMemDbFactory::new(),
