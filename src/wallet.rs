@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
+use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
@@ -155,6 +156,89 @@ pub(crate) struct TransferResult {
     tx_ids: Vec<String>,
     final_tx_id: String,
     transactions: Vec<TransferTransactionResult>,
+}
+
+impl TransferResult {
+    fn from_transactions(transactions: Vec<TransferTransactionResult>) -> Self {
+        let final_tx_id = transactions
+            .last()
+            .expect("transfer transactions must be non-empty")
+            .tx_id
+            .clone();
+        let tx_ids = transactions.iter().map(|tx| tx.tx_id.clone()).collect();
+        let submitted = transactions
+            .iter()
+            .filter(|tx| tx.status == TransferSubmissionStatus::Submitted)
+            .count();
+        let status = if submitted == transactions.len() {
+            TransferOverallStatus::Success
+        } else if submitted > 0 {
+            TransferOverallStatus::Partial
+        } else {
+            TransferOverallStatus::Failed
+        };
+
+        Self {
+            status,
+            tx_ids,
+            final_tx_id,
+            transactions,
+        }
+    }
+}
+
+async fn submit_transfer_transactions_with<F, Fut>(
+    transactions: NonEmpty<(TxId, service::RawTransaction)>,
+    mut submit: F,
+) -> TransferResult
+where
+    F: FnMut(service::RawTransaction) -> Fut,
+    Fut: Future<Output = Result<service::SendResponse, tonic::Status>>,
+{
+    let mut stopped = false;
+    let mut results = Vec::with_capacity(transactions.len());
+
+    for (txid, raw_tx) in transactions {
+        let tx_id = txid.to_string();
+        let result = if stopped {
+            TransferTransactionResult {
+                tx_id,
+                status: TransferSubmissionStatus::NotAttempted,
+                error_code: None,
+                error_message: None,
+            }
+        } else {
+            match submit(raw_tx).await {
+                Ok(response) if response.error_code == 0 => TransferTransactionResult {
+                    tx_id,
+                    status: TransferSubmissionStatus::Submitted,
+                    error_code: None,
+                    error_message: None,
+                },
+                Ok(response) => {
+                    stopped = true;
+                    TransferTransactionResult {
+                        tx_id,
+                        status: TransferSubmissionStatus::Rejected,
+                        error_code: Some(response.error_code),
+                        error_message: Some(response.error_message),
+                    }
+                }
+                Err(status) => {
+                    stopped = true;
+                    TransferTransactionResult {
+                        tx_id,
+                        status: TransferSubmissionStatus::Unknown,
+                        error_code: None,
+                        error_message: Some(status.to_string()),
+                    }
+                }
+            }
+        };
+        results.push(result);
+    }
+
+    TransferResult::from_transactions(results)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1550,6 +1634,44 @@ where
         Ok(start)
     }
 
+    async fn load_stored_transfer_transactions(
+        &self,
+        txids: &NonEmpty<TxId>,
+    ) -> Result<NonEmpty<(TxId, service::RawTransaction)>, Error> {
+        let db = self.db.read().await;
+        let mut transactions = Vec::with_capacity(txids.len());
+        for requested_txid in txids {
+            let tx = db
+                .get_transaction(*requested_txid)?
+                .ok_or(Error::TransactionNotFound(*requested_txid))?;
+            let mut raw_tx = service::RawTransaction::default();
+            tx.write(&mut raw_tx.data)?;
+            transactions.push((tx.txid(), raw_tx));
+        }
+        Ok(NonEmpty::from_vec(transactions).expect("txids is non-empty"))
+    }
+
+    async fn submit_stored_transfer_transactions(
+        &self,
+        txids: &NonEmpty<TxId>,
+    ) -> Result<TransferResult, Error> {
+        let transactions = self.load_stored_transfer_transactions(txids).await?;
+        let client = self.client.clone();
+
+        Ok(
+            submit_transfer_transactions_with(transactions, move |raw_tx| {
+                let mut client = client.clone();
+                async move {
+                    client
+                        .send_transaction(raw_tx)
+                        .await
+                        .map(tonic::Response::into_inner)
+                }
+            })
+            .await,
+        )
+    }
+
     pub async fn send_authorized_transactions(&self, txids: &NonEmpty<TxId>) -> Result<(), Error> {
         let mut client = self.client.clone();
         for txid in txids.iter() {
@@ -2761,17 +2883,163 @@ pub(crate) fn usk_from_seed_str(
 #[cfg(test)]
 mod tests {
     use super::{
-        TransferEstimate, TransferFundingSource, allow_exact_send_max_fallback,
-        dynamic_zip317_fee_rule, transfer_policies, usk_from_seed_str,
-        validate_expiry_delta_blocks,
+        TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
+        allow_exact_send_max_fallback, dynamic_zip317_fee_rule, submit_transfer_transactions_with,
+        transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
     };
     use crate::Network;
+    use nonempty::NonEmpty;
+    use std::collections::VecDeque;
     use zcash_client_backend::data_api::wallet::input_selection::{
         CoinbasePolicy, TransparentSource,
     };
     use zcash_client_backend::fees::TransparentChangePolicy;
+    use zcash_client_backend::proto::service;
+    use zcash_primitives::transaction::TxId;
     use zcash_protocol::ShieldedPool;
     use zcash_protocol::value::Zatoshis;
+
+    fn txid(value: u8) -> TxId {
+        TxId::from_bytes([value; 32])
+    }
+
+    fn two_raw_transactions() -> NonEmpty<(TxId, service::RawTransaction)> {
+        NonEmpty {
+            head: (
+                txid(1),
+                service::RawTransaction {
+                    data: vec![1],
+                    ..Default::default()
+                },
+            ),
+            tail: vec![(
+                txid(2),
+                service::RawTransaction {
+                    data: vec![2],
+                    ..Default::default()
+                },
+            )],
+        }
+    }
+
+    #[tokio::test]
+    async fn transfer_submission_reports_all_successes_in_order() {
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| async {
+            Ok(service::SendResponse::default())
+        })
+        .await;
+
+        assert_eq!(result.status, TransferOverallStatus::Success);
+        assert_eq!(
+            result.tx_ids,
+            vec![txid(1).to_string(), txid(2).to_string()]
+        );
+        assert_eq!(result.final_tx_id, txid(2).to_string());
+        assert!(
+            result
+                .transactions
+                .iter()
+                .all(|tx| tx.status == TransferSubmissionStatus::Submitted)
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_submission_stops_after_first_rejection() {
+        let mut responses = VecDeque::from([
+            Ok(service::SendResponse {
+                error_code: -25,
+                error_message: "rejected by server".to_string(),
+            }),
+            Ok(service::SendResponse::default()),
+        ]);
+
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| {
+            let response = responses.pop_front().unwrap();
+            async move { response }
+        })
+        .await;
+
+        assert_eq!(result.status, TransferOverallStatus::Failed);
+        assert_eq!(
+            result.transactions[0].status,
+            TransferSubmissionStatus::Rejected
+        );
+        assert_eq!(result.transactions[0].error_code, Some(-25));
+        assert_eq!(
+            result.transactions[0].error_message.as_deref(),
+            Some("rejected by server")
+        );
+        assert_eq!(
+            result.transactions[1].status,
+            TransferSubmissionStatus::NotAttempted
+        );
+        assert_eq!(responses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn transfer_submission_reports_partial_after_later_rejection() {
+        let mut responses = VecDeque::from([
+            Ok(service::SendResponse::default()),
+            Ok(service::SendResponse {
+                error_code: -26,
+                error_message: "later transaction rejected".to_string(),
+            }),
+        ]);
+
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| {
+            let response = responses.pop_front().unwrap();
+            async move { response }
+        })
+        .await;
+
+        assert_eq!(result.status, TransferOverallStatus::Partial);
+        assert_eq!(
+            result.transactions[0].status,
+            TransferSubmissionStatus::Submitted
+        );
+        assert_eq!(
+            result.transactions[1].status,
+            TransferSubmissionStatus::Rejected
+        );
+        assert_eq!(result.transactions[1].error_code, Some(-26));
+        assert_eq!(
+            result.transactions[1].error_message.as_deref(),
+            Some("later transaction rejected")
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_submission_stops_after_transport_uncertainty() {
+        let mut responses = VecDeque::from([
+            Err(tonic::Status::unavailable("offline")),
+            Ok(service::SendResponse::default()),
+        ]);
+
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| {
+            let response = responses.pop_front().unwrap();
+            async move { response }
+        })
+        .await;
+
+        assert_eq!(result.status, TransferOverallStatus::Failed);
+        assert_eq!(
+            result.transactions[0].status,
+            TransferSubmissionStatus::Unknown
+        );
+        assert_eq!(result.transactions[0].error_code, None);
+        assert!(
+            result.transactions[0]
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("offline")
+        );
+        assert_eq!(
+            result.transactions[1].status,
+            TransferSubmissionStatus::NotAttempted
+        );
+        assert_eq!(responses.len(), 1);
+    }
 
     #[test]
     fn unified_transfer_optional_values_use_existing_validation() {
