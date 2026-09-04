@@ -198,6 +198,10 @@ fn transfer_policies(source: TransferFundingSource) -> (SpendPolicy, Transparent
     }
 }
 
+fn allow_exact_send_max_fallback(source: TransferFundingSource, has_dynamic_fee: bool) -> bool {
+    source == TransferFundingSource::Shielded && has_dynamic_fee
+}
+
 fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
     proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
 ) -> Result<u64, Error> {
@@ -1575,6 +1579,146 @@ where
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn propose_unified_transfer<FeeRuleT>(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        fee_rule: FeeRuleT,
+        funding_source: TransferFundingSource,
+        allow_send_max_fallback: bool,
+    ) -> Result<
+        zcash_client_backend::proposal::Proposal<FeeRuleT, <W as InputSource>::NoteRef>,
+        Error,
+    >
+    where
+        FeeRuleT: FeeRule + Clone + zcash_client_backend::fees::zip317::Zip317FeeRule,
+        FeeRuleT::Error: Debug + From<zcash_protocol::value::BalanceError>,
+    {
+        let (spend_policy, transparent_change_policy) = transfer_policies(funding_source);
+        let change_strategy =
+            zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
+                fee_rule.clone(),
+                None,
+                ShieldedPool::Orchard,
+                DustOutputPolicy::default(),
+                SplitPolicy::with_min_output_value(
+                    NonZeroUsize::new(self.target_note_count)
+                        .ok_or(Error::FailedToCreateTransaction)?,
+                    Zatoshis::from_u64(self.min_split_output_value)?,
+                ),
+            )
+            .with_transparent_change_policy(transparent_change_policy);
+
+        let input_selector = GreedyInputSelector::new();
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let payment = Payment::new(
+            to_address.clone(),
+            Some(Zatoshis::from_u64(value)?),
+            memo.clone(),
+            None,
+            None,
+            vec![],
+        )
+        .map_err(|e| Error::Zip321(e.with_index(0)))?;
+        let request = TransactionRequest::new(vec![payment])?;
+        let mut db = self.db.write().await;
+
+        match propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &input_selector,
+            &change_strategy,
+            request,
+            self.confirmations_policy(),
+            &spend_policy,
+            None,
+        ) {
+            Ok(proposal) => Ok(proposal),
+            Err(transfer_error) => {
+                if allow_send_max_fallback {
+                    let max_proposal =
+                        propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+                            &mut *db,
+                            &self.network,
+                            account_id,
+                            &[
+                                ShieldedPool::Sapling,
+                                ShieldedPool::Orchard,
+                                ShieldedPool::Ironwood,
+                            ],
+                            &fee_rule,
+                            to_address,
+                            memo,
+                            MaxSpendMode::MaxSpendable,
+                            self.confirmations_policy(),
+                        )
+                        .ok();
+
+                    if let Some(proposal) = max_proposal
+                        && proposal_payment_amount_zats(&proposal)? == value
+                    {
+                        return Ok(proposal);
+                    }
+                }
+
+                Err(Error::Generic(format!(
+                    "Failed to propose transfer. Possibly insufficient permitted funds: {transfer_error:?}"
+                )))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn estimate_transfer(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        funding_source: TransferFundingSource,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: Option<u64>,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<TransferEstimate, Error> {
+        expiry_delta_blocks
+            .map(validate_expiry_delta_blocks)
+            .transpose()?;
+
+        match marginal_fee_zats {
+            Some(marginal_fee_zats) => {
+                let proposal = self
+                    .propose_unified_transfer(
+                        account_id,
+                        to_address,
+                        value,
+                        memo,
+                        dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                        funding_source,
+                        allow_exact_send_max_fallback(funding_source, true),
+                    )
+                    .await?;
+                transfer_estimate_from_proposal(&proposal)
+            }
+            None => {
+                let proposal = self
+                    .propose_unified_transfer(
+                        account_id,
+                        to_address,
+                        value,
+                        memo,
+                        StandardFeeRule::Zip317,
+                        funding_source,
+                        false,
+                    )
+                    .await?;
+                transfer_estimate_from_proposal(&proposal)
+            }
+        }
+    }
+
     pub async fn pczt_shield(&self, account_id: AccountId) -> Result<Pczt, Error> {
         let change_strategy = MultiOutputChangeStrategy::new(
             StandardFeeRule::Zip317,
@@ -2616,7 +2760,11 @@ pub(crate) fn usk_from_seed_str(
 
 #[cfg(test)]
 mod tests {
-    use super::{TransferEstimate, TransferFundingSource, transfer_policies, usk_from_seed_str};
+    use super::{
+        TransferEstimate, TransferFundingSource, allow_exact_send_max_fallback,
+        dynamic_zip317_fee_rule, transfer_policies, usk_from_seed_str,
+        validate_expiry_delta_blocks,
+    };
     use crate::Network;
     use zcash_client_backend::data_api::wallet::input_selection::{
         CoinbasePolicy, TransparentSource,
@@ -2624,6 +2772,30 @@ mod tests {
     use zcash_client_backend::fees::TransparentChangePolicy;
     use zcash_protocol::ShieldedPool;
     use zcash_protocol::value::Zatoshis;
+
+    #[test]
+    fn unified_transfer_optional_values_use_existing_validation() {
+        assert!(dynamic_zip317_fee_rule(0).is_err());
+        assert!(dynamic_zip317_fee_rule(5_000).is_ok());
+        assert!(validate_expiry_delta_blocks(0).is_err());
+        assert_eq!(validate_expiry_delta_blocks(12).unwrap(), 12);
+    }
+
+    #[test]
+    fn send_max_fallback_is_only_enabled_for_dynamic_shielded_transfers() {
+        assert!(!allow_exact_send_max_fallback(
+            TransferFundingSource::Shielded,
+            false,
+        ));
+        assert!(allow_exact_send_max_fallback(
+            TransferFundingSource::Shielded,
+            true,
+        ));
+        assert!(!allow_exact_send_max_fallback(
+            TransferFundingSource::Transparent,
+            true,
+        ));
+    }
 
     #[test]
     fn transparent_transfer_policies_exclude_shielded_funds_and_allow_transparent_change() {
