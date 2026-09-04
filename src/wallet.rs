@@ -938,10 +938,14 @@ where
         use zcash_client_backend::proto::service;
 
         let mut client = self.client.clone();
-        let mut start_id = service::BlockId::default();
-        start_id.height = start_height as u64;
-        let mut end_id = service::BlockId::default();
-        end_id.height = (start_height + count - 1) as u64;
+        let start_id = service::BlockId {
+            height: start_height as u64,
+            ..Default::default()
+        };
+        let end_id = service::BlockId {
+            height: (start_height + count - 1) as u64,
+            ..Default::default()
+        };
 
         let blocks: Vec<CompactBlock> = client
             .get_block_range(service::BlockRange {
@@ -1224,10 +1228,14 @@ where
         };
 
         // 5. Download compact blocks for the range
-        let mut start_id = service::BlockId::default();
-        start_id.height = scan_range.block_range().start.into();
-        let mut end_id = service::BlockId::default();
-        end_id.height = (scan_range.block_range().end - 1).into();
+        let start_id = service::BlockId {
+            height: scan_range.block_range().start.into(),
+            ..Default::default()
+        };
+        let end_id = service::BlockId {
+            height: (scan_range.block_range().end - 1).into(),
+            ..Default::default()
+        };
         let compact_blocks: Vec<CompactBlock> = client
             .get_block_range(service::BlockRange {
                 start: Some(start_id),
