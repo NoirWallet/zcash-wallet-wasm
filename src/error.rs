@@ -29,6 +29,8 @@ pub enum Error {
     KeyDecoding(String),
     #[error("Invalid network string given: {0}")]
     InvalidNetwork(String),
+    #[error("Invalid transfer funding source: {0}. Expected 'shielded' or 'transparent'")]
+    InvalidTransferFundingSource(String),
     #[error("Error returned from GRPC server: {0}")]
     Grpc(#[from] tonic::Status),
     #[error("Error handling wallet birthday")]

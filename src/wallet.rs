@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use subtle::ConditionallySelectable;
@@ -101,6 +102,102 @@ fn transparent_transfer_policies() -> (SpendPolicy, TransparentChangePolicy) {
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransferFundingSource {
+    Shielded,
+    Transparent,
+}
+
+impl FromStr for TransferFundingSource {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "shielded" => Ok(Self::Shielded),
+            "transparent" => Ok(Self::Transparent),
+            other => Err(Error::InvalidTransferFundingSource(other.to_owned())),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TransferOverallStatus {
+    Success,
+    Partial,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TransferSubmissionStatus {
+    Submitted,
+    Rejected,
+    Unknown,
+    NotAttempted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransferTransactionResult {
+    tx_id: String,
+    status: TransferSubmissionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransferResult {
+    status: TransferOverallStatus,
+    tx_ids: Vec<String>,
+    final_tx_id: String,
+    transactions: Vec<TransferTransactionResult>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransferEstimate {
+    amount_zats: String,
+    fee_zats: String,
+    transaction_count: usize,
+    step_fees_zats: Vec<String>,
+}
+
+impl TransferEstimate {
+    fn from_amount_and_step_fees(
+        amount: Zatoshis,
+        step_fees: impl IntoIterator<Item = Zatoshis>,
+    ) -> Result<Self, Error> {
+        let mut fee = Zatoshis::ZERO;
+        let mut step_fees_zats = vec![];
+
+        for step_fee in step_fees {
+            fee = (fee + step_fee).ok_or(zcash_protocol::value::BalanceError::Overflow)?;
+            step_fees_zats.push(u64::from(step_fee).to_string());
+        }
+
+        Ok(Self {
+            amount_zats: u64::from(amount).to_string(),
+            fee_zats: u64::from(fee).to_string(),
+            transaction_count: step_fees_zats.len(),
+            step_fees_zats,
+        })
+    }
+}
+
+fn transfer_policies(source: TransferFundingSource) -> (SpendPolicy, TransparentChangePolicy) {
+    match source {
+        TransferFundingSource::Shielded => (
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
+        ),
+        TransferFundingSource::Transparent => transparent_transfer_policies(),
+    }
+}
+
 fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
     proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
 ) -> Result<u64, Error> {
@@ -136,6 +233,18 @@ fn proposal_payment_amount_zats<FeeRuleT, NoteRef>(
     )?;
 
     Ok(amount.into())
+}
+
+fn transfer_estimate_from_proposal<FeeRuleT, NoteRef>(
+    proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
+) -> Result<TransferEstimate, Error> {
+    TransferEstimate::from_amount_and_step_fees(
+        Zatoshis::from_u64(proposal_payment_amount_zats(proposal)?)?,
+        proposal
+            .steps()
+            .iter()
+            .map(|step| step.balance().fee_required()),
+    )
 }
 
 /// Global prover instance, initialized once on first use
@@ -2507,17 +2616,18 @@ pub(crate) fn usk_from_seed_str(
 
 #[cfg(test)]
 mod tests {
-    use super::{transparent_transfer_policies, usk_from_seed_str};
+    use super::{TransferEstimate, TransferFundingSource, transfer_policies, usk_from_seed_str};
     use crate::Network;
     use zcash_client_backend::data_api::wallet::input_selection::{
         CoinbasePolicy, TransparentSource,
     };
     use zcash_client_backend::fees::TransparentChangePolicy;
     use zcash_protocol::ShieldedPool;
+    use zcash_protocol::value::Zatoshis;
 
     #[test]
     fn transparent_transfer_policies_exclude_shielded_funds_and_allow_transparent_change() {
-        let (spend_policy, change_policy) = transparent_transfer_policies();
+        let (spend_policy, change_policy) = transfer_policies(TransferFundingSource::Transparent);
 
         assert!(!spend_policy.permits_shielded(ShieldedPool::Sapling));
         assert!(!spend_policy.permits_shielded(ShieldedPool::Orchard));
@@ -2532,6 +2642,46 @@ mod tests {
             change_policy,
             TransparentChangePolicy::TransparentChangeAllowed
         );
+    }
+
+    #[test]
+    fn transfer_funding_source_accepts_only_documented_values() {
+        assert_eq!(
+            "shielded".parse::<TransferFundingSource>().unwrap(),
+            TransferFundingSource::Shielded
+        );
+        assert_eq!(
+            "transparent".parse::<TransferFundingSource>().unwrap(),
+            TransferFundingSource::Transparent
+        );
+        assert!("mixed".parse::<TransferFundingSource>().is_err());
+        assert!("Shielded".parse::<TransferFundingSource>().is_err());
+    }
+
+    #[test]
+    fn shielded_transfer_policy_excludes_transparent_inputs() {
+        let (spend, change) = transfer_policies(TransferFundingSource::Shielded);
+        assert!(spend.permits_shielded(ShieldedPool::Sapling));
+        assert!(spend.permits_shielded(ShieldedPool::Orchard));
+        assert!(spend.permits_shielded(ShieldedPool::Ironwood));
+        assert!(spend.transparent().is_none());
+        assert_eq!(change, TransparentChangePolicy::ShieldChange);
+    }
+
+    #[test]
+    fn transfer_estimate_preserves_step_fee_order_and_total() {
+        let estimate = TransferEstimate::from_amount_and_step_fees(
+            Zatoshis::const_from_u64(50_000),
+            [
+                Zatoshis::const_from_u64(15_000),
+                Zatoshis::const_from_u64(10_000),
+            ],
+        )
+        .unwrap();
+        assert_eq!(estimate.amount_zats, "50000");
+        assert_eq!(estimate.fee_zats, "25000");
+        assert_eq!(estimate.transaction_count, 2);
+        assert_eq!(estimate.step_fees_zats, ["15000", "10000"]);
     }
 
     #[test]
