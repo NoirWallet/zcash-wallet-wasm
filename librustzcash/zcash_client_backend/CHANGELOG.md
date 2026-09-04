@@ -10,6 +10,9 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_client_backend::data_api::wallet::create_proposed_transactions_with_expiry_height`, which constructs, proves, signs, and atomically stores every proposal step with one caller-selected transaction expiry height.
+
 ## [0.24.0-rc.1] - 2026-07-12
 
 ### Added
