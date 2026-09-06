@@ -10,7 +10,7 @@ use sapling::ProofGenerationKey;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
@@ -37,7 +37,7 @@ use zcash_client_backend::data_api::wallet::{
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, TransactionDataRequest,
-    WalletSummary, Zip32Derivation,
+    TransactionStatus, WalletSummary, Zip32Derivation,
 };
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
 use zcash_client_backend::fees::{
@@ -69,6 +69,22 @@ const BATCH_SIZE: u32 = 10000;
 /// constant that signals what's the minimum transparent balance for proposing a
 /// shielding transaction
 const SHIELDING_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(100000);
+
+fn transaction_status_from_raw_height(
+    txid: TxId,
+    raw_height: u64,
+) -> Result<TransactionStatus, Error> {
+    match raw_height {
+        0 | u64::MAX => Ok(TransactionStatus::NotInMainChain),
+        height => Ok(TransactionStatus::Mined(BlockHeight::from_u32(
+            u32::try_from(height).map_err(|_| {
+                Error::Generic(format!(
+                    "Invalid mined height {height} for transaction {txid}"
+                ))
+            })?,
+        ))),
+    }
+}
 
 fn dynamic_zip317_fee_rule(marginal_fee_zats: u64) -> Result<prim_zip317::FeeRule, Error> {
     if marginal_fee_zats == 0 {
@@ -818,7 +834,7 @@ where
         .await
         .map_err(|error| -> Error { error.into() })?;
         drop(db);
-        self.enhance_pending_transactions().await
+        self.process_pending_transaction_requests().await
     }
 
     /// Runs a single batch of the sync process without looping.
@@ -838,7 +854,7 @@ where
         .await
         .map_err(|error| -> Error { error.into() })?;
         drop(db);
-        self.enhance_pending_transactions().await?;
+        self.process_pending_transaction_requests().await?;
         Ok(did_work)
     }
 
@@ -857,46 +873,67 @@ where
         .await
         .map_err(|error| -> Error { error.into() })?;
         drop(db);
-        self.enhance_pending_transactions().await?;
+        self.process_pending_transaction_requests().await?;
         Ok(did_work)
     }
 
-    pub(crate) async fn enhance_pending_transactions(&self) -> Result<(), Error> {
-        let txids = {
+    pub(crate) async fn process_pending_transaction_requests(&self) -> Result<(), Error> {
+        let requests = {
             let db = self.db.read().await;
-            db.transaction_data_requests()?
-                .into_iter()
-                .filter_map(|request| match request {
-                    TransactionDataRequest::Enhancement(txid) => Some(txid),
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>()
+            db.transaction_data_requests()?.into_iter().fold(
+                BTreeMap::new(),
+                |mut requests, request| {
+                    match request {
+                        TransactionDataRequest::GetStatus(txid) => {
+                            requests.entry(txid).or_insert(false);
+                        }
+                        TransactionDataRequest::Enhancement(txid) => {
+                            requests.insert(txid, true);
+                        }
+                        _ => {}
+                    }
+                    requests
+                },
+            )
         };
 
-        if txids.is_empty() {
+        if requests.is_empty() {
             return Ok(());
         }
 
         let mut client = self.client.clone();
-        for requested_txid in txids {
-            let raw = client
+        for (requested_txid, needs_enhancement) in requests {
+            let raw = match client
                 .get_transaction(service::TxFilter {
                     block: None,
                     index: 0,
                     hash: requested_txid.as_ref().to_vec(),
                 })
-                .await?
-                .into_inner();
+                .await
+            {
+                Ok(response) => response.into_inner(),
+                Err(status) if !needs_enhancement && status.code() == tonic::Code::NotFound => {
+                    let mut db = self.db.write().await;
+                    db.set_transaction_status(
+                        requested_txid,
+                        TransactionStatus::TxidNotRecognized,
+                    )?;
+                    continue;
+                }
+                Err(status) => return Err(status.into()),
+            };
 
-            let mined_height = match raw.height {
-                0 | u64::MAX => None,
-                height => Some(BlockHeight::from_u32(u32::try_from(height).map_err(
-                    |_| {
-                        Error::Generic(format!(
-                            "Invalid mined height {height} for transaction {requested_txid}"
-                        ))
-                    },
-                )?)),
+            let status = transaction_status_from_raw_height(requested_txid, raw.height)?;
+            if !needs_enhancement {
+                let mut db = self.db.write().await;
+                db.set_transaction_status(requested_txid, status)?;
+                continue;
+            }
+
+            let mined_height = match status {
+                TransactionStatus::Mined(height) => Some(height),
+                TransactionStatus::NotInMainChain => None,
+                TransactionStatus::TxidNotRecognized => unreachable!(),
             };
             let parse_height = match mined_height {
                 Some(height) => height,
@@ -1222,7 +1259,7 @@ where
             Some(r) => r,
             None => {
                 drop(db);
-                self.enhance_pending_transactions().await?;
+                self.process_pending_transaction_requests().await?;
                 return Ok(None);
             }
         };
@@ -1302,7 +1339,7 @@ where
         )?;
         if rewound {
             drop(db);
-            self.enhance_pending_transactions().await?;
+            self.process_pending_transaction_requests().await?;
             return Ok(None);
         }
 
@@ -1315,7 +1352,7 @@ where
         }
 
         drop(db);
-        self.enhance_pending_transactions().await?;
+        self.process_pending_transaction_requests().await?;
         Ok(Some(journal_data))
     }
 
@@ -1393,7 +1430,7 @@ where
         let has_more = remaining.iter().any(|r| !r.is_empty());
 
         drop(db);
-        self.enhance_pending_transactions().await?;
+        self.process_pending_transaction_requests().await?;
         Ok(has_more)
     }
 
@@ -3026,15 +3063,16 @@ mod tests {
     use super::{
         TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
         allow_exact_send_max_fallback, dynamic_zip317_fee_rule, submit_transfer_transactions_with,
-        transfer_expiry_height, transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
+        transaction_status_from_raw_height, transfer_expiry_height, transfer_policies,
+        usk_from_seed_str, validate_expiry_delta_blocks,
     };
     use crate::Network;
     use nonempty::NonEmpty;
     use std::collections::VecDeque;
-    use zcash_client_backend::data_api::wallet::TargetHeight;
     use zcash_client_backend::data_api::wallet::input_selection::{
         CoinbasePolicy, TransparentSource,
     };
+    use zcash_client_backend::data_api::{TransactionStatus, wallet::TargetHeight};
     use zcash_client_backend::fees::TransparentChangePolicy;
     use zcash_client_backend::proto::service;
     use zcash_primitives::transaction::TxId;
@@ -3044,6 +3082,25 @@ mod tests {
 
     fn txid(value: u8) -> TxId {
         TxId::from_bytes([value; 32])
+    }
+
+    #[test]
+    fn raw_transaction_height_maps_to_wallet_status() {
+        let txid = txid(9);
+
+        assert_eq!(
+            transaction_status_from_raw_height(txid, 0).unwrap(),
+            TransactionStatus::NotInMainChain
+        );
+        assert_eq!(
+            transaction_status_from_raw_height(txid, u64::MAX).unwrap(),
+            TransactionStatus::NotInMainChain
+        );
+        assert_eq!(
+            transaction_status_from_raw_height(txid, 3_472_762).unwrap(),
+            TransactionStatus::Mined(BlockHeight::from_u32(3_472_762))
+        );
+        assert!(transaction_status_from_raw_height(txid, u64::from(u32::MAX) + 1).is_err());
     }
 
     fn two_raw_transactions() -> NonEmpty<(TxId, service::RawTransaction)> {

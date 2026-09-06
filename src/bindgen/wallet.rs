@@ -286,7 +286,7 @@ impl WebWallet {
     }
 
     pub async fn get_transaction_history(&self, account_id: u32) -> Result<JsValue, Error> {
-        if let Err(error) = self.inner.enhance_pending_transactions().await {
+        if let Err(error) = self.inner.process_pending_transaction_requests().await {
             tracing::warn!("Unable to enhance transaction history: {error}");
         }
         let db = self.inner.db.read().await;

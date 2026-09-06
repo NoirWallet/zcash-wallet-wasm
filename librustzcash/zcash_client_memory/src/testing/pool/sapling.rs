@@ -10,6 +10,12 @@ fn send_single_step_proposed_transfer() {
 }
 
 #[test]
+#[cfg(feature = "transparent-inputs")]
+fn confirmed_tex_spend_stays_spent_after_expiry() {
+    testing::pool::spend_everything_multi_step_single_note_proposed_transfer::<SaplingPoolTester>()
+}
+
+#[test]
 #[ignore] //FIXME
 #[cfg(feature = "transparent-inputs")]
 fn send_multi_step_proposed_transfer() {

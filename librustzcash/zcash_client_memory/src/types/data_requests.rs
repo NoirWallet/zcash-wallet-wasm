@@ -33,6 +33,12 @@ impl TransactionDataRequestQueue {
             |request| !matches!(request, TransactionDataRequest::Enhancement(id) if id == txid),
         );
     }
+
+    pub fn remove_status_retrieval(&mut self, txid: &TxId) {
+        self.0.retain(
+            |request| !matches!(request, TransactionDataRequest::GetStatus(id) if id == txid),
+        );
+    }
 }
 
 impl Deref for TransactionDataRequestQueue {

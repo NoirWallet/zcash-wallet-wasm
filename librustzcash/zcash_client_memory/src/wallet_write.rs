@@ -1444,7 +1444,24 @@ Instead derive the ufvk in the calling code and import it using `import_account_
         status: TransactionStatus,
     ) -> Result<(), Self::Error> {
         tracing::debug!("set_transaction_status");
-        self.tx_table.set_transaction_status(&txid, status)
+        self.tx_table.set_transaction_status(&txid, status)?;
+        let request_resolved = match status {
+            TransactionStatus::Mined(_) => true,
+            TransactionStatus::TxidNotRecognized | TransactionStatus::NotInMainChain => {
+                match (
+                    self.tx_table.get(&txid).and_then(|tx| tx.expiry_height()),
+                    self.chain_height()?,
+                ) {
+                    (Some(expiry_height), Some(chain_height)) => chain_height > expiry_height,
+                    _ => false,
+                }
+            }
+        };
+        if request_resolved {
+            self.transaction_data_request_queue
+                .remove_status_retrieval(&txid);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "transparent-inputs")]
