@@ -153,6 +153,9 @@ impl VotingDb {
 
     /// Opens an account- and network-bound, in-memory database from owned bytes.
     /// The input slice can be changed or dropped immediately after this returns.
+    /// Use snapshots from `serialize_bytes`, including for file-backed sources.
+    /// Raw WAL-format images require normalized export; copying a main database
+    /// file alone can also omit committed content still in its WAL sidecar.
     pub fn open_browser(
         wallet_id: &str,
         network: Network,
@@ -165,6 +168,15 @@ impl VotingDb {
         }
         let mut conn = Connection::open_in_memory().map_err(browser_storage_error)?;
         if let Some(bytes) = bytes.filter(|bytes| !bytes.is_empty()) {
+            if bytes.starts_with(b"SQLite format 3\0")
+                && bytes
+                    .get(18..20)
+                    .is_some_and(|versions| versions.contains(&2))
+            {
+                return Err(VotingError::InvalidInput {
+                    message: "WAL snapshot requires normalized export with serialize_bytes".into(),
+                });
+            }
             conn.deserialize_read_exact(
                 rusqlite::MAIN_DB,
                 std::io::Cursor::new(bytes),
@@ -190,9 +202,15 @@ impl VotingDb {
     }
 
     /// Returns an independent snapshot of all durable voting state.
+    /// File-backed WAL databases are copied through SQLite's online backup API
+    /// so committed WAL pages are included without changing the source journal.
     pub fn serialize_bytes(&self) -> Result<Vec<u8>, VotingError> {
-        self.conn()
-            .serialize(rusqlite::MAIN_DB)
+        let conn = self.conn();
+        #[cfg(not(target_arch = "wasm32"))]
+        let normalized = normalized_wal_snapshot(&conn)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let conn = normalized.as_ref().unwrap_or(&conn);
+        conn.serialize(rusqlite::MAIN_DB)
             .map(|bytes| bytes.to_vec())
             .map_err(|e| VotingError::Internal {
                 message: format!("failed to serialize voting database: {e}"),
@@ -246,6 +264,39 @@ impl VotingDb {
         }
         Ok(())
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn normalized_wal_snapshot(conn: &Connection) -> Result<Option<Connection>, VotingError> {
+    let mode: String = conn
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(browser_storage_error)?;
+    if mode != "wal" {
+        return Ok(None);
+    }
+    let mut snapshot = Connection::open_in_memory().map_err(browser_storage_error)?;
+    let page_size: u32 = conn
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .map_err(browser_storage_error)?;
+    // In-memory backup destinations must match the source page size.
+    snapshot
+        .pragma_update(None, "page_size", page_size)
+        .map_err(browser_storage_error)?;
+    let result = rusqlite::backup::Backup::new(conn, &mut snapshot)
+        .map_err(browser_storage_error)?
+        .step(-1)
+        .map_err(browser_storage_error)?;
+    if result != rusqlite::backup::StepResult::Done {
+        return Err(VotingError::Internal {
+            message: format!("voting database snapshot did not complete: {result:?}"),
+        });
+    }
+    // Backup copies page-one's WAL format marker as well. VACUUM rebuilds only
+    // this private in-memory copy using SQLite's rollback-format writer.
+    snapshot
+        .execute_batch("VACUUM")
+        .map_err(browser_storage_error)?;
+    Ok(Some(snapshot))
 }
 
 fn browser_storage_error(error: rusqlite::Error) -> VotingError {

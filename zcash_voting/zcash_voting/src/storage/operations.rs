@@ -934,6 +934,7 @@ impl VotingDb {
         network: Network,
         pir_client: &pir_client::PirClientBlocking,
     ) -> Result<PirCachePrecomputeResult, VotingError> {
+        self.validate_network(network)?;
         let notes = crate::note_bundling::notes_for_pir_proof_cache(notes, bundle_policy)?;
         {
             let conn = self.conn();
@@ -3781,6 +3782,42 @@ mod tests {
         assert_eq!(result.fetched_count, 0);
         assert_eq!(result.served_root, imt.root().to_repr().to_vec());
         assert_eq!(transport.query_post_count(), 0);
+    }
+
+    #[test]
+    fn browser_cache_public_warmup_rejects_network_before_pruning_or_fetching() {
+        use voting_circuits::delegation::ImtProvider;
+        let db = VotingDb::open_browser(W, Network::Testnet, None).unwrap();
+        let imt = voting_circuits::delegation::SpacedLeafImtProvider::new();
+        let note = identity_note_with_position(0);
+        seed_pir_cache(&db, &imt, std::slice::from_ref(&note.nullifier));
+        db.conn()
+            .execute("UPDATE pir_proof_cache SET created_at = 0", [])
+            .unwrap();
+        let before = db.serialize_bytes().unwrap();
+        let transport = std::sync::Arc::new(ConfigurableRootPirTransport::new(imt.root()));
+        let client = pir_client::PirClientBlocking::with_transport(
+            "https://pir.test",
+            pir_types::COMPILED_PIR_LAYOUT,
+            transport.clone(),
+        )
+        .unwrap();
+
+        for network in [Network::Mainnet, Network::Regtest] {
+            let error = db
+                .precompute_pir_proof_cache(
+                    std::slice::from_ref(&note),
+                    BundlePolicy::default(),
+                    network,
+                    &client,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("network mismatch"), "{error}");
+            assert_eq!(transport.query_post_count(), 0);
+            assert_eq!(pir_cache_row_count(&db), 1);
+            assert_eq!(db.serialize_bytes().unwrap(), before);
+            VotingDb::open_browser(W, Network::Testnet, Some(&before)).unwrap();
+        }
     }
 
     #[test]

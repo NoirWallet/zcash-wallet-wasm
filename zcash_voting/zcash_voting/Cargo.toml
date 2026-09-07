@@ -83,7 +83,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 tonic = { version = "0.14", features = ["channel", "tls-webpki-roots", "tls-ring"] }
 zakura-wallet-lib = { version = "=0.1.0-rc4", default-features = false }
-rusqlite = { version = "=0.37.0", features = ["bundled", "serialize"] }
+rusqlite = { version = "=0.37.0", features = ["bundled", "serialize", "backup"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
