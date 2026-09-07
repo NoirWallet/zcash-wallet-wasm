@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use crate::bindgen::sign::pczt_sign_inner;
 use crate::bindgen::{Pczt as WasmPczt, ProofGenerationKey, SeedFingerprint};
+use crate::wallet::TransferFundingSource;
 use crate::{Error, Network, PRUNING_DEPTH, Wallet};
 
 use nonempty::NonEmpty;
@@ -21,6 +22,37 @@ use zcash_primitives::transaction::TxId;
 pub type MemoryWallet<T> = Wallet<MemoryWalletDb<Network>, T>;
 pub type AccountId = <MemoryWalletDb<Network> as WalletRead>::AccountId;
 pub type NoteRef = <MemoryWalletDb<Network> as InputSource>::NoteRef;
+
+#[wasm_bindgen(typescript_custom_section)]
+const TRANSFER_TYPES: &str = r#"
+export type TransferOverallStatus = "success" | "partial" | "failed";
+export type TransferSubmissionStatus =
+    | "submitted"
+    | "rejected"
+    | "unknown"
+    | "not_attempted";
+
+export interface TransferTransactionResult {
+    txId: string;
+    status: TransferSubmissionStatus;
+    errorCode?: number;
+    errorMessage?: string;
+}
+
+export interface TransferResult {
+    status: TransferOverallStatus;
+    txIds: string[];
+    finalTxId: string;
+    transactions: TransferTransactionResult[];
+}
+
+export interface TransferEstimate {
+    amountZats: string;
+    feeZats: string;
+    transactionCount: number;
+    stepFeesZats: string[];
+}
+"#;
 
 #[wasm_bindgen]
 #[derive(Clone)]
@@ -254,7 +286,7 @@ impl WebWallet {
     }
 
     pub async fn get_transaction_history(&self, account_id: u32) -> Result<JsValue, Error> {
-        if let Err(error) = self.inner.enhance_pending_transactions().await {
+        if let Err(error) = self.inner.process_pending_transaction_requests().await {
             tracing::warn!("Unable to enhance transaction history: {error}");
         }
         let db = self.inner.db.read().await;
@@ -594,6 +626,41 @@ impl WebWallet {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(unchecked_return_type = "TransferResult")]
+    pub async fn oneclick_transfer(
+        &self,
+        account_id: u32,
+        to_address: String,
+        value: u64,
+        usk: super::UnifiedSpendingKey,
+        #[wasm_bindgen(unchecked_param_type = "\"shielded\" | \"transparent\"")]
+        funding_source: String,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: Option<u64>,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<JsValue, Error> {
+        let account_id = AccountId::from(account_id);
+        let funding_source = funding_source.parse::<TransferFundingSource>()?;
+        if funding_source == TransferFundingSource::Shielded {
+            self.ensure_spendability_consistent(account_id).await?;
+        }
+        let result = self
+            .inner
+            .oneclick_transfer(
+                account_id,
+                ZcashAddress::try_from_encoded(&to_address)?,
+                value,
+                usk.into(),
+                funding_source,
+                memo,
+                marginal_fee_zats,
+                expiry_delta_blocks,
+            )
+            .await?;
+        Ok(serde_wasm_bindgen::to_value(&result)?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn oneclick_pczt_transparent_transfer(
         &self,
         account_id: u32,
@@ -896,6 +963,39 @@ impl WebWallet {
 
         self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
             .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(unchecked_return_type = "TransferEstimate")]
+    pub async fn estimate_transfer(
+        &self,
+        account_id: u32,
+        to_address: String,
+        value: u64,
+        #[wasm_bindgen(unchecked_param_type = "\"shielded\" | \"transparent\"")]
+        funding_source: String,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: Option<u64>,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<JsValue, Error> {
+        let account_id = AccountId::from(account_id);
+        let funding_source = funding_source.parse::<TransferFundingSource>()?;
+        if funding_source == TransferFundingSource::Shielded {
+            self.ensure_spendability_consistent(account_id).await?;
+        }
+        let estimate = self
+            .inner
+            .estimate_transfer(
+                account_id,
+                ZcashAddress::try_from_encoded(&to_address)?,
+                value,
+                funding_source,
+                memo,
+                marginal_fee_zats,
+                expiry_delta_blocks,
+            )
+            .await?;
+        Ok(serde_wasm_bindgen::to_value(&estimate)?)
     }
 
     #[allow(clippy::too_many_arguments)]

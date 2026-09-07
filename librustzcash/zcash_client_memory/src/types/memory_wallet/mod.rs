@@ -511,8 +511,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     .ok_or(Error::TransactionNotFound(*txid))?;
                 match spending_tx.status() {
                     TransactionStatus::Mined(_height) => true,
-                    TransactionStatus::TxidNotRecognized => unreachable!(),
-                    TransactionStatus::NotInMainChain => {
+                    TransactionStatus::TxidNotRecognized | TransactionStatus::NotInMainChain => {
                         // transaction either never expires, or expires in the future.
                         spending_tx
                             .expiry_height()
