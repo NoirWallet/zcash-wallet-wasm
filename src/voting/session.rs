@@ -41,6 +41,375 @@ pub(crate) fn now_secs() -> Result<u64, VotingApiError> {
 }
 
 impl VotingSessionInner {
+    fn validate_delegation_round(
+        &self,
+        id: &str,
+        round: &TrustedRound,
+        now: u64,
+    ) -> Result<(), VotingApiError> {
+        if round.summary.round_id != id
+            || !self.db.has_round(id).map_err(conflict)?
+            || self
+                .selected_round_id
+                .borrow()
+                .as_ref()
+                .is_some_and(|selected| selected != id)
+        {
+            return Err(conflict(()));
+        }
+        if now >= round.summary.ends_at.parse::<u64>().map_err(conflict)? {
+            return Err(VotingApiError::new(VotingErrorCode::RoundExpired));
+        }
+        self.validate_saved_identity(round)?;
+        *self.selected_round_id.borrow_mut() = Some(id.into());
+        Ok(())
+    }
+    fn delegation_progress(
+        &self,
+        id: &str,
+        now: u64,
+    ) -> Result<VotingActionResult, VotingApiError> {
+        let status = self.round_status_at(id, now)?;
+        Ok(VotingActionResult {
+            round_id: status.round_id,
+            phase: status.phase,
+            completed_bundles: status.completed_bundles,
+            total_bundles: status.total_bundles,
+            next_action: status.next_action,
+        })
+    }
+
+    pub(crate) async fn submit_delegation_with<A, B, C>(
+        &self,
+        id: &str,
+        usk: zcash_keys::keys::UnifiedSpendingKey,
+        fingerprint: zip32::fingerprint::SeedFingerprint,
+        transport: &impl zcash_voting::platform::HttpTransport,
+        authenticate: impl Fn() -> A,
+        mut build: impl FnMut(TrustedRound, u32) -> B,
+        checkpoint: impl Fn() -> C,
+        now: impl Fn() -> Result<u64, VotingApiError>,
+    ) -> Result<VotingActionResult, VotingApiError>
+    where
+        A: Future<Output = Result<TrustedRound, VotingApiError>>,
+        B: Future<
+            Output = Result<
+                zcash_voting::delegation_submission::CanonicalDelegation,
+                VotingApiError,
+            >,
+        >,
+        C: Future<Output = Result<(), VotingApiError>>,
+    {
+        use zcash_voting::delegation_submission::*;
+        let _guard = self.mutation_guard()?;
+        self.validate_delegation_key(&usk, fingerprint)?;
+        drop(usk);
+        let id = config::normalize_round_id(id)?;
+        let round = authenticate().await?;
+        self.validate_delegation_round(&id, &round, now()?)?;
+        let roster = round
+            .proposals
+            .iter()
+            .map(|p| p.proposal_id)
+            .collect::<Vec<_>>();
+        loop {
+            let steps = zcash_voting::session::delegation_resume_steps(&self.db, &id, &roster)
+                .map_err(conflict)?;
+            let Some(step) = steps.first() else {
+                checkpoint()
+                    .await
+                    .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                return self.delegation_progress(&id, now()?);
+            };
+            let bundle = match step {
+                NextStep::Delegate { bundle_index } | NextStep::PollDelegation { bundle_index } => {
+                    *bundle_index
+                }
+                _ => unreachable!(),
+            };
+            let mut attempt = self
+                .db
+                .delegation_submission(&id, bundle)
+                .map_err(conflict)?;
+            if attempt.is_none() {
+                if matches!(step, NextStep::PollDelegation { .. }) {
+                    return Err(conflict(()));
+                }
+                let round = authenticate().await?;
+                self.validate_delegation_round(&id, &round, now()?)?;
+                let canonical = build(round, bundle).await?;
+                self.db
+                    .prepare_delegation_submission(&id, bundle, &canonical)
+                    .map_err(conflict)?;
+                attempt = self
+                    .db
+                    .delegation_submission(&id, bundle)
+                    .map_err(conflict)?;
+            }
+            let attempt = attempt.ok_or_else(|| conflict(()))?;
+            let canonical = attempt.canonical;
+            if attempt.outcome == DelegationOutcome::Rejected {
+                checkpoint()
+                    .await
+                    .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                return Err(VotingApiError::new(VotingErrorCode::SubmissionRejected));
+            }
+            if attempt.outcome == DelegationOutcome::Prepared {
+                checkpoint().await?;
+                let round = authenticate().await?;
+                self.validate_delegation_round(&id, &round, now()?)?;
+                let base = round.vote_server_urls.first().ok_or_else(|| conflict(()))?;
+                self.db
+                    .mark_delegation_dispatching(&id, bundle)
+                    .map_err(conflict)?;
+                // From this checkpoint onward cancellation can only recover by lookup.
+                checkpoint()
+                    .await
+                    .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                self.validate_delegation_round(&id, &round, now()?)?;
+                // The request and its future are deliberately created after checkpoint resolution.
+                let outcome = transport
+                    .execute(delegation_request(base, &canonical))
+                    .await
+                    .and_then(|r| parse_delegation_result(r, &canonical));
+                let recorded = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(zcash_voting::platform::TransportError::Definite) => {
+                        DelegationOutcome::Rejected
+                    }
+                    Err(_) => DelegationOutcome::Ambiguous,
+                };
+                self.db
+                    .record_delegation_outcome(&id, bundle, recorded)
+                    .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                checkpoint()
+                    .await
+                    .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                match recorded {
+                    DelegationOutcome::Ambiguous => {
+                        return Err(VotingApiError::new(VotingErrorCode::SubmissionUnknown));
+                    }
+                    DelegationOutcome::Rejected => {
+                        return Err(VotingApiError::new(VotingErrorCode::SubmissionRejected));
+                    }
+                    _ => continue,
+                }
+            }
+            // Flush the authoritative in-memory state after a failed result checkpoint.
+            checkpoint()
+                .await
+                .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+            let round = authenticate().await?;
+            self.validate_delegation_round(&id, &round, now()?)?;
+            let mut confirmed = false;
+            for base in &round.vote_server_urls {
+                self.validate_delegation_round(&id, &round, now()?)?;
+                let response = match transport
+                    .execute(delegation_status_request(base, &canonical))
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(zcash_voting::platform::TransportError::Definite) => continue,
+                    Err(_) => return Err(conflict(())),
+                };
+                match parse_delegation_status(response).map_err(conflict)? {
+                    DelegationStatus::Pending => continue,
+                    DelegationStatus::Rejected => {
+                        self.db
+                            .record_delegation_outcome(&id, bundle, DelegationOutcome::Rejected)
+                            .map_err(conflict)?;
+                        checkpoint()
+                            .await
+                            .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                        return Err(VotingApiError::new(VotingErrorCode::SubmissionRejected));
+                    }
+                    DelegationStatus::Confirmed(events) => {
+                        self.validate_delegation_round(&id, &round, now()?)?;
+                        self.db
+                            .confirm_journaled_delegation(&id, bundle, canonical.tx_hash(), &events)
+                            .map_err(conflict)?;
+                        checkpoint()
+                            .await
+                            .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                        confirmed = true;
+                        break;
+                    }
+                }
+            }
+            if !confirmed {
+                return self.delegation_progress(&id, now()?);
+            }
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn submit_delegation(
+        &self,
+        id: &str,
+        usk: zcash_keys::keys::UnifiedSpendingKey,
+        fingerprint: zip32::fingerprint::SeedFingerprint,
+    ) -> Result<VotingActionResult, VotingApiError> {
+        self.submit_delegation_with(
+            id,
+            usk.clone(),
+            fingerprint,
+            &self.transport,
+            || self.ensure_trusted_round(id),
+            |round, bundle| self.build_delegation(round, bundle, usk.clone(), fingerprint),
+            || self.persistence.checkpoint(&self.db),
+            now_secs,
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn build_delegation(
+        &self,
+        round: TrustedRound,
+        bundle: u32,
+        usk: zcash_keys::keys::UnifiedSpendingKey,
+        fingerprint: zip32::fingerprint::SeedFingerprint,
+    ) -> Result<zcash_voting::delegation_submission::CanonicalDelegation, VotingApiError> {
+        use zcash_voting::{delegate, proof_executor::ProofExecutor};
+        let id = &round.summary.round_id;
+        let account = self.validate_delegation_key(&usk, fingerprint)?;
+        let input = super::wallet_adapter::gather_eligibility_inputs(
+            &self.wallet,
+            self.account_id,
+            zcash_voting::Network::Testnet,
+            round.params.snapshot_height,
+        )
+        .await?;
+        let trusted = self.ensure_trusted_round(id).await?;
+        self.validate_delegation_round(id, &trusted, now_secs()?)?;
+        let hotkey = self
+            .db
+            .load_voting_hotkey(id)
+            .map_err(conflict)?
+            .ok_or_else(|| conflict(()))?;
+        let keys = delegate::DelegationKeys::with_voting_hotkey(
+            account.orchard_fvk_bytes.to_vec(),
+            &hotkey,
+            account.seed_fingerprint,
+            account.account_index,
+            round.summary.name.clone(),
+        )
+        .map_err(conflict)?;
+        let policy = self
+            .db
+            .effective_bundle_policy(id, zcash_voting::BundlePolicy::default())
+            .map_err(conflict)?;
+        self.db
+            .ensure_bundles_with_policy(id, &input.notes, policy)
+            .map_err(conflict)?;
+        let notes = zcash_voting::round::note_bundles_with_policy(&input.notes, policy)
+            .map_err(conflict)?
+            .into_iter()
+            .nth(bundle as usize)
+            .ok_or_else(|| conflict(()))?;
+        if !self
+            .db
+            .has_complete_witnesses(id, bundle, &notes)
+            .map_err(conflict)?
+        {
+            return Err(conflict(()));
+        }
+        let setup = self
+            .db
+            .build_governance_pczt(
+                id,
+                bundle,
+                &notes,
+                &keys,
+                delegate::branch_id_for_height(
+                    zcash_voting::Network::Testnet,
+                    round.params.snapshot_height,
+                )
+                .map_err(conflict)?,
+            )
+            .map_err(conflict)?;
+        let signed = crate::bindgen::sign::sign_delegation_owned(
+            pczt::Pczt::parse(&setup.pczt_bytes).map_err(conflict)?,
+            usk,
+            account,
+            fingerprint,
+            setup.action_index,
+        )?;
+        let signature =
+            delegate::spend_auth_signature(&signed, setup.action_index).map_err(conflict)?;
+        let sighash = delegate::pczt_sighash(&signed).map_err(conflict)?;
+        drop(signed);
+        let job = self
+            .db
+            .delegation_proof_job(id, bundle, notes, keys)
+            .map_err(conflict)?;
+        self.ensure_trusted_round(id).await?;
+        #[cfg(feature = "wasm-parallel")]
+        let executor = super::proof_executor::RayonProofExecutor;
+        #[cfg(not(feature = "wasm-parallel"))]
+        let executor = zcash_voting::proof_executor::SequentialProofExecutor;
+        let result = executor
+            .prove(job, |job| job(&zcash_voting::types::NoopProgressReporter))
+            .await
+            .map_err(|_| VotingApiError::new(VotingErrorCode::ProofFailed))?;
+        let trusted = self.ensure_trusted_round(id).await?;
+        self.validate_delegation_round(id, &trusted, now_secs()?)?;
+        self.db
+            .store_delegation_proof(id, bundle, &result)
+            .map_err(conflict)?;
+        let submission = delegate::submission(
+            &self.db,
+            id,
+            bundle,
+            delegate::DelegationSigner::signature(signature, sighash),
+        )
+        .map_err(conflict)?;
+        zcash_voting::delegation_submission::CanonicalDelegation::from_submission(&submission)
+            .map_err(conflict)
+    }
+
+    pub(crate) fn validate_delegation_key(
+        &self,
+        usk: &zcash_keys::keys::UnifiedSpendingKey,
+        fingerprint: zip32::fingerprint::SeedFingerprint,
+    ) -> Result<zcash_voting::delegate::DelegationAccountKeys, VotingApiError> {
+        let db = self
+            .wallet
+            .db
+            .try_read()
+            .map_err(|_| VotingApiError::new(VotingErrorCode::OperationInProgress))?;
+        let account = db
+            .get_account(self.account_id)
+            .map_err(conflict)?
+            .ok_or_else(|| conflict(()))?;
+        let derivation = account
+            .source()
+            .key_derivation()
+            .ok_or_else(|| conflict(()))?;
+        let ufvk = account.ufvk().ok_or_else(|| conflict(()))?;
+        if self.wallet.network.network_type() != NetworkType::Test
+            || db.params().network_type() != NetworkType::Test
+            || *derivation.seed_fingerprint() != fingerprint
+            || ufvk.encode(&self.wallet.network)
+                != usk
+                    .to_unified_full_viewing_key()
+                    .encode(&self.wallet.network)
+        {
+            return Err(conflict(()));
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"zcash-wallet-wasm/voting-wallet-id/v1");
+        digest.update(b"testnet");
+        let encoding = SecretString::new(ufvk.encode(&self.wallet.network));
+        digest.update(encoding.expose_secret().as_bytes());
+        if hex::encode(digest.finalize()) != self.wallet_id {
+            return Err(conflict(()));
+        }
+        Ok(zcash_voting::delegate::DelegationAccountKeys {
+            account_index: derivation.account_index().into(),
+            seed_fingerprint: fingerprint.to_bytes(),
+            orchard_fvk_bytes: ufvk.orchard().ok_or_else(|| conflict(()))?.to_bytes(),
+        })
+    }
     pub(crate) fn open(
         wallet: MemoryWallet<Client>,
         account_id: AccountId,
@@ -666,6 +1035,10 @@ impl Drop for MutationGuard {
 }
 
 #[cfg(test)]
+#[path = "../../zcash_voting/zcash_voting/tests/support/delegation_fixture.rs"]
+mod delegation_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use futures_util::{future::pending, poll};
@@ -674,6 +1047,432 @@ mod tests {
     };
     use zcash_protocol::consensus::BlockHeight;
     const ID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[tokio::test]
+    async fn delegation_signing_rejects_wrong_fingerprint_and_account_before_work() {
+        let (session, _) = session().await;
+        let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&[17; 32]).unwrap();
+        let usk = |index| {
+            zcash_keys::keys::UnifiedSpendingKey::from_seed(
+                &crate::Network::TestNetwork,
+                &[17; 32],
+                zip32::AccountId::try_from(index).unwrap(),
+            )
+            .unwrap()
+        };
+        let wrong = zip32::fingerprint::SeedFingerprint::from_seed(&[18; 32]).unwrap();
+        assert_eq!(
+            session
+                .validate_delegation_key(&usk(0), wrong)
+                .unwrap_err()
+                .code,
+            VotingErrorCode::RecoveryConflict
+        );
+        assert_eq!(
+            session
+                .validate_delegation_key(&usk(1), fingerprint)
+                .unwrap_err()
+                .code,
+            VotingErrorCode::RecoveryConflict
+        );
+        assert_eq!(
+            session
+                .validate_delegation_key(&usk(0), fingerprint)
+                .unwrap()
+                .account_index,
+            0
+        );
+        assert!(session.wallet.db.try_write().is_ok());
+    }
+
+    #[tokio::test]
+    async fn delegation_checkpoint_failure_has_no_post_and_ambiguity_resumes_by_polling() {
+        use std::sync::Mutex;
+        use zcash_voting::platform::{
+            HttpTransport, OwnedHttpRequest, OwnedHttpResponse, TransportError, TransportFuture,
+        };
+        struct Transport(Mutex<Vec<OwnedHttpRequest>>);
+        impl HttpTransport for Transport {
+            fn execute(&self, request: OwnedHttpRequest) -> TransportFuture {
+                let post = request.method == "POST";
+                self.0.lock().unwrap().push(request);
+                Box::pin(async move {
+                    if post {
+                        Err(TransportError::Ambiguous)
+                    } else {
+                        Ok(OwnedHttpResponse {
+                            status: 404,
+                            body: vec![],
+                        })
+                    }
+                })
+            }
+        }
+        let (session, mut round) = session().await;
+        round.params.snapshot_height = delegation_fixture::height();
+        round.summary.snapshot_height = round.params.snapshot_height;
+        session
+            .trusted_rounds
+            .borrow_mut()
+            .insert(ID.into(), round.clone());
+        let envelope = serde_json::to_string(&VotingSessionEnvelope {
+            version: 1,
+            authenticated_round: round.identity(),
+        })
+        .unwrap();
+        session
+            .db
+            .init_round(
+                zcash_voting::Network::Testnet,
+                &round.params,
+                Some(&envelope),
+            )
+            .unwrap();
+        let canonical = delegation_fixture::prepare(&session.db, &round.params, 17);
+        let builds = Cell::new(0);
+        let transport = Transport(Mutex::new(vec![]));
+        let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            &crate::Network::TestNetwork,
+            &[17; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap();
+        let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&[17; 32]).unwrap();
+        let authenticate = || std::future::ready(Ok(round.clone()));
+        let build = |_, _| {
+            builds.set(builds.get() + 1);
+            std::future::ready(Ok(canonical.clone()))
+        };
+        let error = session
+            .submit_delegation_with(
+                ID,
+                usk.clone(),
+                fingerprint,
+                &transport,
+                authenticate,
+                build,
+                || std::future::ready(Err(VotingApiError::new(VotingErrorCode::PersistenceFailed))),
+                || Ok(1500),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, VotingErrorCode::PersistenceFailed);
+        assert!(transport.0.lock().unwrap().is_empty());
+        let prepared_bytes = session.export_state().unwrap();
+        struct RejectedTransport;
+        impl HttpTransport for RejectedTransport {
+            fn execute(&self, _: OwnedHttpRequest) -> TransportFuture {
+                Box::pin(std::future::ready(Err(TransportError::Definite)))
+            }
+        }
+        let rejected = open(
+            session.wallet.clone(),
+            session.account_id,
+            Some(&prepared_bytes),
+        )
+        .unwrap();
+        let checkpoints = Cell::new(0);
+        let fail_result = || {
+            checkpoints.set(checkpoints.get() + 1);
+            std::future::ready(if checkpoints.get() == 3 {
+                Err(VotingApiError::new(VotingErrorCode::PersistenceFailed))
+            } else {
+                Ok(())
+            })
+        };
+        assert_eq!(
+            rejected
+                .submit_delegation_with(
+                    ID,
+                    usk.clone(),
+                    fingerprint,
+                    &RejectedTransport,
+                    authenticate,
+                    build,
+                    fail_result,
+                    || Ok(1500)
+                )
+                .await
+                .unwrap_err()
+                .code,
+            VotingErrorCode::SubmissionUnknown
+        );
+        assert_eq!(
+            rejected
+                .submit_delegation_with(
+                    ID,
+                    usk.clone(),
+                    fingerprint,
+                    &RejectedTransport,
+                    authenticate,
+                    build,
+                    fail_result,
+                    || Ok(1500)
+                )
+                .await
+                .unwrap_err()
+                .code,
+            VotingErrorCode::SubmissionRejected
+        );
+        assert_eq!(checkpoints.get(), 4);
+        struct PendingPost(Mutex<Vec<String>>);
+        impl HttpTransport for PendingPost {
+            fn execute(&self, request: OwnedHttpRequest) -> TransportFuture {
+                let post = request.method == "POST";
+                self.0.lock().unwrap().push(request.method);
+                Box::pin(async move {
+                    if post {
+                        pending::<()>().await;
+                    }
+                    Ok(OwnedHttpResponse {
+                        status: 404,
+                        body: vec![],
+                    })
+                })
+            }
+        }
+        let pending_post = PendingPost(Mutex::new(vec![]));
+        let cancelled = open(
+            session.wallet.clone(),
+            session.account_id,
+            Some(&prepared_bytes),
+        )
+        .unwrap();
+        let mut operation = Box::pin(cancelled.submit_delegation_with(
+            ID,
+            usk.clone(),
+            fingerprint,
+            &pending_post,
+            authenticate,
+            build,
+            || std::future::ready(Ok(())),
+            || Ok(1500),
+        ));
+        assert!(poll!(operation.as_mut()).is_pending());
+        assert!(cancelled.mutation_guard().is_err());
+        drop(operation);
+        assert!(cancelled.mutation_guard().is_ok());
+        let restored = open(
+            session.wallet.clone(),
+            session.account_id,
+            Some(&cancelled.export_state().unwrap()),
+        )
+        .unwrap();
+        restored
+            .submit_delegation_with(
+                ID,
+                usk.clone(),
+                fingerprint,
+                &pending_post,
+                authenticate,
+                build,
+                || std::future::ready(Ok(())),
+                || Ok(1500),
+            )
+            .await
+            .unwrap();
+        assert_eq!(*pending_post.0.lock().unwrap(), ["POST", "GET"]);
+        for cancel_at in [1, 2, 3] {
+            let cancelled = open(
+                session.wallet.clone(),
+                session.account_id,
+                Some(&prepared_bytes),
+            )
+            .unwrap();
+            let checkpoints = Cell::new(0);
+            let checkpoint = || async {
+                checkpoints.set(checkpoints.get() + 1);
+                if checkpoints.get() == cancel_at {
+                    pending::<()>().await;
+                }
+                Ok(())
+            };
+            let mut operation = Box::pin(cancelled.submit_delegation_with(
+                ID,
+                usk.clone(),
+                fingerprint,
+                &transport,
+                authenticate,
+                build,
+                checkpoint,
+                || Ok(1500),
+            ));
+            assert!(poll!(operation.as_mut()).is_pending());
+            assert!(cancelled.mutation_guard().is_err());
+            drop(operation);
+            assert!(cancelled.mutation_guard().is_ok());
+            assert_eq!(
+                transport.0.lock().unwrap().len(),
+                usize::from(cancel_at == 3)
+            );
+            if cancel_at >= 2 {
+                cancelled
+                    .submit_delegation_with(
+                        ID,
+                        usk.clone(),
+                        fingerprint,
+                        &transport,
+                        authenticate,
+                        build,
+                        || std::future::ready(Ok(())),
+                        || Ok(1500),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    transport.0.lock().unwrap().len(),
+                    1 + usize::from(cancel_at == 3)
+                );
+                assert_eq!(transport.0.lock().unwrap().last().unwrap().method, "GET");
+                transport.0.lock().unwrap().clear();
+            }
+        }
+        let failed_result = open(
+            session.wallet.clone(),
+            session.account_id,
+            Some(&prepared_bytes),
+        )
+        .unwrap();
+        let checkpoints = Cell::new(0);
+        let error = failed_result
+            .submit_delegation_with(
+                ID,
+                usk.clone(),
+                fingerprint,
+                &transport,
+                authenticate,
+                build,
+                || {
+                    checkpoints.set(checkpoints.get() + 1);
+                    std::future::ready(if checkpoints.get() == 3 {
+                        Err(VotingApiError::new(VotingErrorCode::PersistenceFailed))
+                    } else {
+                        Ok(())
+                    })
+                },
+                || Ok(1500),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, VotingErrorCode::SubmissionUnknown);
+        failed_result
+            .submit_delegation_with(
+                ID,
+                usk.clone(),
+                fingerprint,
+                &transport,
+                authenticate,
+                build,
+                || std::future::ready(Ok(())),
+                || Ok(1500),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            transport
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.method.as_str())
+                .collect::<Vec<_>>(),
+            ["POST", "GET"]
+        );
+        transport.0.lock().unwrap().clear();
+        let error = session
+            .submit_delegation_with(
+                ID,
+                usk.clone(),
+                fingerprint,
+                &transport,
+                authenticate,
+                build,
+                || std::future::ready(Ok(())),
+                || Ok(1500),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, VotingErrorCode::SubmissionUnknown);
+        assert_eq!(builds.get(), 1);
+        let reopened = open(
+            session.wallet.clone(),
+            session.account_id,
+            Some(&session.export_state().unwrap()),
+        )
+        .unwrap();
+        let progress = reopened
+            .submit_delegation_with(
+                ID,
+                usk.clone(),
+                fingerprint,
+                &transport,
+                authenticate,
+                build,
+                || std::future::ready(Ok(())),
+                || Ok(1500),
+            )
+            .await
+            .unwrap();
+        assert_eq!(progress.completed_bundles, 0);
+        assert_eq!(builds.get(), 1);
+        let calls = transport.0.lock().unwrap();
+        assert_eq!(
+            calls.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(),
+            ["POST", "GET"]
+        );
+        assert_eq!(calls[0].body, canonical.json_bytes());
+        assert!(calls.iter().all(|r| {
+            r.url
+                .starts_with("https://vote.example.com/shielded-vote/v1/")
+        }));
+        assert!(calls[1].url.ends_with(canonical.tx_hash()));
+        assert!(!session.mutation_active.get());
+        drop(calls);
+        struct ConfirmedTransport(Mutex<Vec<String>>, String);
+        impl HttpTransport for ConfirmedTransport {
+            fn execute(&self, request: OwnedHttpRequest) -> TransportFuture {
+                let post = request.method == "POST";
+                self.0.lock().unwrap().push(request.method);
+                let body = if post {
+                    serde_json::json!({"code":0,"tx_hash":self.1})
+                } else {
+                    serde_json::json!({"height":"42","code":0,"events":[{"type":"delegate_vote","attributes":[{"key":"vote_round_id","value":ID},{"key":"leaf_index","value":"42"}]}]})
+                };
+                Box::pin(async move {
+                    Ok(OwnedHttpResponse {
+                        status: 200,
+                        body: serde_json::to_vec(&body).unwrap(),
+                    })
+                })
+            }
+        }
+        let confirmed = open(
+            session.wallet.clone(),
+            session.account_id,
+            Some(&prepared_bytes),
+        )
+        .unwrap();
+        let chain = ConfirmedTransport(Mutex::new(vec![]), canonical.tx_hash().into());
+        for _ in 0..2 {
+            let result = confirmed
+                .submit_delegation_with(
+                    ID,
+                    usk.clone(),
+                    fingerprint,
+                    &chain,
+                    authenticate,
+                    build,
+                    || std::future::ready(Ok(())),
+                    || Ok(1500),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.completed_bundles, 1);
+            assert_eq!(result.phase, VotingRoundPhase::DelegationConfirmed);
+        }
+        assert_eq!(*chain.0.lock().unwrap(), ["POST", "GET"]);
+        assert_eq!(builds.get(), 1);
+    }
 
     #[tokio::test]
     async fn prepare_round_rejects_before_work_and_clears_predurable_selection() {

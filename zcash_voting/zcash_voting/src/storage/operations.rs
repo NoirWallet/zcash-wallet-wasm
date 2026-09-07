@@ -1298,6 +1298,137 @@ impl VotingDb {
         })
     }
 
+    /// Loads a proof job entirely from prepared state. No DB owner crosses the executor.
+    pub fn delegation_proof_job(
+        &self,
+        round_id: &str,
+        bundle_index: u32,
+        notes: Vec<NoteInfo>,
+        keys: DelegationKeys,
+    ) -> Result<
+        impl FnOnce(&dyn DelegationProgressReporter) -> Result<DelegationProofResult, VotingError>
+            + Send
+            + 'static,
+        VotingError,
+    > {
+        let conn = self.conn();
+        let wallet_id = self.wallet_id();
+        let (params, network) =
+            queries::load_round_params_with_network(&conn, round_id, &wallet_id)?;
+        validate_delegation_keys_for_round(&params, network, &keys)?;
+        queries::require_bundle_notes(&conn, round_id, &wallet_id, bundle_index, &notes)?;
+        let alpha = queries::load_alpha(&conn, round_id, &wallet_id, bundle_index)?;
+        let van_rand = queries::load_van_comm_rand(&conn, round_id, &wallet_id, bundle_index)?;
+        let witnesses = queries::load_witnesses(&conn, round_id, &wallet_id, bundle_index)?;
+        validate_witnesses_for_round(&witnesses, &params)?;
+        let rseed_signed = queries::load_rseed_signed(&conn, round_id, &wallet_id, bundle_index)?;
+        let rseed_output = queries::load_rseed_output(&conn, round_id, &wallet_id, bundle_index)?;
+        let padded = queries::load_padded_note_secrets(&conn, round_id, &wallet_id, bundle_index)?;
+        let padded_nullifiers = padded_nullifiers_for_circuit(&notes, &padded, network)?;
+        let mut by_commitment = HashMap::new();
+        for witness in witnesses {
+            if by_commitment
+                .insert(witness.note_commitment.clone(), witness)
+                .is_some()
+            {
+                return Err(VotingError::InvalidInput {
+                    message: "duplicate delegation witness".into(),
+                });
+            }
+        }
+        let witnesses = notes
+            .iter()
+            .map(|note| {
+                by_commitment
+                    .remove(&note.commitment)
+                    .ok_or_else(|| VotingError::InvalidInput {
+                        message: "missing delegation witness".into(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !by_commitment.is_empty() {
+            return Err(VotingError::InvalidInput {
+                message: "unexpected delegation witness".into(),
+            });
+        }
+        let expected_root = nullifier_imt_root_to_base(&params.nullifier_imt_root)?;
+        let load = |bytes: &[u8; 32], nf| {
+            let proof = queries::load_pir_cache_proof(
+                &conn,
+                &wallet_id,
+                network,
+                &params.nullifier_imt_root,
+                bytes,
+            )?
+            .ok_or_else(|| VotingError::InvalidInput {
+                message: "missing prepared delegation PIR proof".into(),
+            })?;
+            crate::zkp1::validate_and_convert_pir_proof(proof, nf, expected_root)
+        };
+        let imt = delegation_nullifier_targets(&notes, &[])?
+            .into_iter()
+            .map(|(bytes, nf)| load(&bytes, nf))
+            .collect::<Result<Vec<_>, _>>()?;
+        let extra = delegation_nullifier_targets(&[], &padded_nullifiers)?
+            .into_iter()
+            .map(|(bytes, nf)| Ok((bytes, load(&bytes, nf)?)))
+            .collect::<Result<Vec<_>, VotingError>>()?;
+        let randomness = precomputed_randomness_from_stored(
+            notes.len(),
+            &padded,
+            &rseed_signed,
+            &rseed_output,
+            bundle_index,
+        )?;
+        let round = hex::decode(&params.vote_round_id).map_err(|_| VotingError::InvalidInput {
+            message: "invalid delegation round".into(),
+        })?;
+        Ok(move |stages: &dyn DelegationProgressReporter| {
+            crate::zkp1::build_and_prove_delegation(
+                &notes,
+                &keys.hotkey_raw_address,
+                &alpha,
+                &van_rand,
+                &round,
+                &witnesses,
+                &imt,
+                &extra,
+                network,
+                stages,
+                Some(&randomness),
+            )
+        })
+    }
+
+    pub fn store_delegation_proof(
+        &self,
+        round_id: &str,
+        bundle_index: u32,
+        result: &DelegationProofResult,
+    ) -> Result<(), VotingError> {
+        let mut conn = self.conn();
+        let wallet_id = self.wallet_id();
+        let tx = conn.transaction().map_err(|_| VotingError::Internal {
+            message: "could not begin delegation proof storage".into(),
+        })?;
+        queries::store_proof(&tx, round_id, &wallet_id, bundle_index, &result.proof)?;
+        queries::store_proof_result_fields_with_van_comm(
+            &tx,
+            round_id,
+            &wallet_id,
+            bundle_index,
+            &result.rk,
+            &result.gov_nullifiers,
+            &result.nf_signed,
+            &result.cmx_new,
+            &result.van_comm,
+        )?;
+        queries::advance_round_phase(&tx, round_id, &wallet_id, RoundPhase::DelegationProved)?;
+        tx.commit().map_err(|_| VotingError::Internal {
+            message: "could not commit delegation proof".into(),
+        })
+    }
+
     /// Build and prove the real delegation ZKP (#1). Long-running.
     ///
     /// Loads all required data from the voting DB:
@@ -1322,210 +1453,20 @@ impl VotingDb {
         pir_client: &pir_client::PirClientBlocking,
         stages: &dyn DelegationProgressReporter,
     ) -> Result<DelegationProofResult, VotingError> {
-        let total_start = std::time::Instant::now();
-
-        // Phase 1: DB queries
-        let db_start = std::time::Instant::now();
-        let conn = self.conn();
-        let wallet_id = self.wallet_id();
-        let (params, stored_network) =
-            queries::load_round_params_with_network(&conn, round_id, &wallet_id)?;
-        validate_delegation_keys_for_round(&params, stored_network, keys)?;
-        queries::require_bundle_notes(&conn, round_id, &wallet_id, bundle_index, notes)?;
-        let alpha = queries::load_alpha(&conn, round_id, &wallet_id, bundle_index)?;
-        let van_comm_rand = queries::load_van_comm_rand(&conn, round_id, &wallet_id, bundle_index)?;
-        let witnesses = queries::load_witnesses(&conn, round_id, &wallet_id, bundle_index)?;
-        validate_witnesses_for_round(&witnesses, &params)?;
-
-        // Load Phase 1 randomness for ZCA-74 fix: ensures Phase 2 produces
-        // the same nf_signed/cmx_new that Phase 1 committed to in the PCZT.
-        let rseed_signed = queries::load_rseed_signed(&conn, round_id, &wallet_id, bundle_index)?;
-        let rseed_output = queries::load_rseed_output(&conn, round_id, &wallet_id, bundle_index)?;
-        let padded_secrets =
-            queries::load_padded_note_secrets(&conn, round_id, &wallet_id, bundle_index)?;
-        // These are the zero-value circuit-side padded nullifiers derived
-        // from the Phase 1 padded-note rho/rseed pairs.
-        let padded_nullifiers =
-            padded_nullifiers_for_circuit(notes, &padded_secrets, stored_network)?;
-
-        // Align witnesses (keyed by commitment) to notes order
-        let witness_count = witnesses.len();
-        if witness_count != notes.len() {
-            return Err(VotingError::Internal {
-                message: format!(
-                    "witness count ({}) does not match note count ({}) for round {} bundle {}",
-                    witness_count,
-                    notes.len(),
-                    round_id,
-                    bundle_index,
-                ),
-            });
+        let (params, network) = self.round_params_with_network(round_id)?;
+        validate_delegation_keys_for_round(&params, network, keys)?;
+        {
+            let conn = self.conn();
+            queries::require_bundle_notes(&conn, round_id, &self.wallet_id(), bundle_index, notes)?;
+            let witnesses =
+                queries::load_witnesses(&conn, round_id, &self.wallet_id(), bundle_index)?;
+            validate_witnesses_for_round(&witnesses, &params)?;
         }
-
-        let mut witnesses_by_commitment: HashMap<Vec<u8>, WitnessData> =
-            HashMap::with_capacity(witness_count);
-        for w in witnesses {
-            if witnesses_by_commitment
-                .insert(w.note_commitment.clone(), w)
-                .is_some()
-            {
-                return Err(VotingError::Internal {
-                    message: "duplicate witness note_commitment in cache".to_string(),
-                });
-            }
-        }
-
-        let mut ordered_witnesses = Vec::with_capacity(notes.len());
-        for (i, n) in notes.iter().enumerate() {
-            let w = witnesses_by_commitment
-                .remove(&n.commitment)
-                .ok_or_else(|| VotingError::Internal {
-                    message: format!(
-                        "missing witness for note[{i}] commitment {}",
-                        hex::encode(&n.commitment)
-                    ),
-                })?;
-            ordered_witnesses.push(w);
-        }
-        if !witnesses_by_commitment.is_empty() {
-            return Err(VotingError::Internal {
-                message: "extra cached witnesses not matched to selected notes".to_string(),
-            });
-        }
-
-        let db_elapsed = db_start.elapsed();
-        eprintln!(
-            "[ZKP1] DB queries: {:.2}s ({} notes, {} witnesses)",
-            db_elapsed.as_secs_f64(),
-            notes.len(),
-            witness_count
-        );
-        drop(conn);
-
-        // Phase 2: Load/fetch IMT exclusion proofs via PIR.
-        let pir_start = std::time::Instant::now();
-        let precompute = self.precompute_delegation_pir(
-            round_id,
-            bundle_index,
-            notes,
-            pir_client,
-            keys.network,
-        )?;
-
-        // Proofs come from the bundle-independent `pir_proof_cache` keyed by
-        // the round's root; `validate_and_convert_pir_proof` re-verifies each
-        // one out-of-circuit so a corrupt cache row fails here, not in Halo2.
-        let expected_nf_imt_root = nullifier_imt_root_to_base(&params.nullifier_imt_root)?;
-        let conn = self.conn();
-        let real_targets = delegation_nullifier_targets(notes, &[])?;
-        let dummy_targets = delegation_nullifier_targets(&[], &padded_nullifiers)?;
-        let load_cached_proof = |nf_bytes: &[u8; 32], nf: pallas::Base, what: &str| {
-            let proof = queries::load_pir_cache_proof(
-                &conn,
-                &wallet_id,
-                stored_network,
-                &params.nullifier_imt_root,
-                nf_bytes,
-            )?
-            .ok_or_else(|| VotingError::Internal {
-                message: format!("missing cached {what} PIR proof after precompute"),
-            })?;
-            crate::zkp1::validate_and_convert_pir_proof(proof, nf, expected_nf_imt_root)
-        };
-        let mut imt_proofs = Vec::with_capacity(real_targets.len());
-        for (nf_bytes, nf) in &real_targets {
-            imt_proofs.push(load_cached_proof(nf_bytes, *nf, "note")?);
-        }
-
-        let mut extra_imt_proofs = Vec::with_capacity(dummy_targets.len());
-        for (nf_bytes, nf) in &dummy_targets {
-            extra_imt_proofs.push((*nf_bytes, load_cached_proof(nf_bytes, *nf, "padded-note")?));
-        }
-        drop(conn);
-
-        let pir_elapsed = pir_start.elapsed();
-        eprintln!(
-            "[ZKP1] PIR prep total: {:.2}s ({} cached, {} fetched)",
-            pir_elapsed.as_secs_f64(),
-            precompute.cached_count,
-            precompute.fetched_count
-        );
-
-        // Phase 3: Proof generation
-        let prove_start = std::time::Instant::now();
-        eprintln!("[ZKP1] Starting proof generation...");
-
-        // Parse vote_round_id from hex string to 32-byte field element
-        let vote_round_id_bytes =
-            hex::decode(&params.vote_round_id).map_err(|e| VotingError::Internal {
-                message: format!("invalid vote_round_id hex '{}': {e}", params.vote_round_id),
-            })?;
-
-        // Proof generation must reproduce the values already signed in the PCZT
-        // instead of sampling new randomness when persisted data is incomplete.
-        let precomputed = precomputed_randomness_from_stored(
-            notes.len(),
-            &padded_secrets,
-            &rseed_signed,
-            &rseed_output,
-            bundle_index,
-        )?;
-
-        let result = crate::zkp1::build_and_prove_delegation(
-            &notes,
-            &keys.hotkey_raw_address,
-            &alpha,
-            &van_comm_rand,
-            &vote_round_id_bytes,
-            &ordered_witnesses,
-            &imt_proofs,
-            &extra_imt_proofs,
-            keys.network,
-            stages,
-            Some(&precomputed),
-        )?;
-        let prove_elapsed = prove_start.elapsed();
-        eprintln!(
-            "[ZKP1] Proof generation: {:.2}s",
-            prove_elapsed.as_secs_f64()
-        );
-
-        // Persist proof bytes, public inputs, and phase together. The public
-        // inputs are checked against the PCZT fields before any partial proof
-        // success state is committed.
-        let mut conn = self.conn();
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| VotingError::Internal {
-                message: format!("failed to begin proof result transaction: {e}"),
-            })?;
-        queries::store_proof(&tx, round_id, &wallet_id, bundle_index, &result.proof)?;
-        queries::store_proof_result_fields_with_van_comm(
-            &tx,
-            round_id,
-            &wallet_id,
-            bundle_index,
-            &result.rk,
-            &result.gov_nullifiers,
-            &result.nf_signed,
-            &result.cmx_new,
-            &result.van_comm,
-        )?;
-        queries::advance_round_phase(&tx, round_id, &wallet_id, RoundPhase::DelegationProved)?;
-        tx.commit().map_err(|e| VotingError::Internal {
-            message: format!("failed to commit proof result transaction: {e}"),
-        })?;
-
-        let total_elapsed = total_start.elapsed();
-        eprintln!(
-            "[ZKP1] TOTAL: {:.2}s (DB: {:.2}s, PIR: {:.2}s, Prove: {:.2}s) — proof {} bytes",
-            total_elapsed.as_secs_f64(),
-            db_elapsed.as_secs_f64(),
-            pir_elapsed.as_secs_f64(),
-            prove_elapsed.as_secs_f64(),
-            result.proof.len(),
-        );
-
+        self.precompute_delegation_pir(round_id, bundle_index, notes, pir_client, keys.network)?;
+        let job =
+            self.delegation_proof_job(round_id, bundle_index, notes.to_vec(), keys.clone())?;
+        let result = job(stages)?;
+        self.store_delegation_proof(round_id, bundle_index, &result)?;
         Ok(result)
     }
 

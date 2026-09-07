@@ -2,6 +2,205 @@
 
 #[path = "support/browser_storage_cases.rs"]
 mod browser_storage_cases;
+#[path = "support/delegation_fixture.rs"]
+mod delegation_fixture;
+
+#[test]
+fn delegation_planner_orders_mixed_durable_bundles_without_ballot_intent() {
+    use zcash_voting::{
+        session::{delegation_resume_steps, NextStep},
+        storage::VotingDb,
+        Network, VotingRoundParams,
+    };
+    let db = VotingDb::open_browser("owner", Network::Testnet, None).unwrap();
+    let id = "01".repeat(32);
+    db.init_round(
+        Network::Testnet,
+        &VotingRoundParams {
+            vote_round_id: id.clone(),
+            snapshot_height: 100,
+            ea_pk: vec![0; 32],
+            nc_root: vec![0; 32],
+            nullifier_imt_root: vec![0; 32],
+        },
+        None,
+    )
+    .unwrap();
+    assert!(delegation_resume_steps(&db, &id, &[1]).is_err());
+    let notes = (0..3)
+        .map(|i| zcash_voting::NoteInfo {
+            commitment: vec![i as u8; 32],
+            nullifier: vec![i as u8; 32],
+            value: 100_000_000,
+            position: i,
+            diversifier: vec![0; 11],
+            rho: vec![3; 32],
+            rseed: vec![4; 32],
+            scope: 0,
+            ufvk_str: "fixture".into(),
+        })
+        .collect::<Vec<_>>();
+    db.ensure_bundles_with_policy(&id, &notes, zcash_voting::BundlePolicy::new(1).unwrap())
+        .unwrap();
+    db.mark_delegation_submitted(&id, 1, "pending").unwrap();
+    db.mark_delegation_submitted(&id, 2, "confirmed").unwrap();
+    db.store_van_position(&id, 2, 42).unwrap();
+    let expected = vec![
+        NextStep::Delegate { bundle_index: 0 },
+        NextStep::PollDelegation { bundle_index: 1 },
+    ];
+    assert_eq!(delegation_resume_steps(&db, &id, &[1]).unwrap(), expected);
+    assert!(db.ballot_intents(&id).unwrap().is_empty());
+    let restored = VotingDb::open_browser(
+        "owner",
+        Network::Testnet,
+        Some(&db.serialize_bytes().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        delegation_resume_steps(&restored, &id, &[1]).unwrap(),
+        expected
+    );
+    restored
+        .mark_delegation_submitted(&id, 0, "dispatching")
+        .unwrap();
+    assert!(delegation_resume_steps(&restored, &id, &[1])
+        .unwrap()
+        .iter()
+        .all(|s| matches!(s, NextStep::PollDelegation { .. })));
+}
+
+#[test]
+fn delegation_journal_binds_confirmation_and_survives_reload() {
+    use zcash_voting::{
+        confirmation::{TxEvent, TxEventAttribute},
+        delegation_submission::DelegationOutcome,
+        storage::VotingDb,
+        Network, VotingRoundParams,
+    };
+    let id = "01".repeat(32);
+    let db = VotingDb::open_browser("owner", Network::Testnet, None).unwrap();
+    db.init_round(
+        Network::Testnet,
+        &VotingRoundParams {
+            vote_round_id: id.clone(),
+            snapshot_height: delegation_fixture::height(),
+            ea_pk: vec![0; 32],
+            nc_root: vec![0; 32],
+            nullifier_imt_root: vec![0; 32],
+        },
+        None,
+    )
+    .unwrap();
+    let canonical =
+        delegation_fixture::prepare(&db, &db.round_params_with_network(&id).unwrap().0, 17);
+    db.prepare_delegation_submission(&id, 0, &canonical)
+        .unwrap();
+    db.mark_delegation_dispatching(&id, 0).unwrap();
+    db.record_delegation_outcome(&id, 0, DelegationOutcome::Ambiguous)
+        .unwrap();
+    let mut tampered = rusqlite::Connection::open_in_memory().unwrap();
+    let bytes = db.serialize_bytes().unwrap();
+    tampered
+        .deserialize_read_exact(
+            rusqlite::MAIN_DB,
+            std::io::Cursor::new(&bytes),
+            bytes.len(),
+            false,
+        )
+        .unwrap();
+    tampered
+        .execute("UPDATE proofs SET proof=x'02'", [])
+        .unwrap();
+    let tampered = VotingDb::open_browser(
+        "owner",
+        Network::Testnet,
+        Some(&tampered.serialize(rusqlite::MAIN_DB).unwrap()),
+    )
+    .unwrap();
+    assert!(tampered.delegation_submission(&id, 0).is_err());
+    let restored = VotingDb::open_browser(
+        "owner",
+        Network::Testnet,
+        Some(&db.serialize_bytes().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .delegation_submission(&id, 0)
+            .unwrap()
+            .unwrap()
+            .canonical
+            .json_bytes(),
+        canonical.json_bytes()
+    );
+    let event = |round: &str, position: &str| TxEvent {
+        event_type: "delegate_vote".into(),
+        attributes: vec![
+            TxEventAttribute {
+                key: "vote_round_id".into(),
+                value: round.into(),
+            },
+            TxEventAttribute {
+                key: "leaf_index".into(),
+                value: position.into(),
+            },
+        ],
+    };
+    for (bundle, hash, events) in [
+        (1, canonical.tx_hash(), vec![event(&id, "42")]),
+        (0, "wrong", vec![event(&id, "42")]),
+        (0, canonical.tx_hash(), vec![event(&"02".repeat(32), "42")]),
+        (0, canonical.tx_hash(), vec![event(&id, "-1")]),
+        (
+            0,
+            canonical.tx_hash(),
+            vec![event(&id, "42"), event(&id, "43")],
+        ),
+        (
+            0,
+            canonical.tx_hash(),
+            vec![{
+                let mut conflicting = event(&id, "42");
+                conflicting.attributes.push(TxEventAttribute {
+                    key: "leaf_index".into(),
+                    value: "43".into(),
+                });
+                conflicting
+            }],
+        ),
+        (
+            0,
+            canonical.tx_hash(),
+            vec![{
+                let mut conflicting = event(&id, "42");
+                conflicting.attributes.push(TxEventAttribute {
+                    key: "round_id".into(),
+                    value: "02".repeat(32),
+                });
+                conflicting
+            }],
+        ),
+    ] {
+        assert!(restored
+            .confirm_journaled_delegation(&id, bundle, hash, &events)
+            .is_err());
+        assert_ne!(
+            restored.delegation_phase(&id, 0).unwrap(),
+            zcash_voting::phases::DelegationPhase::Confirmed
+        );
+    }
+    restored
+        .confirm_journaled_delegation(&id, 0, canonical.tx_hash(), &[event(&id, "42")])
+        .unwrap();
+    assert_eq!(
+        restored.delegation_phase(&id, 0).unwrap(),
+        zcash_voting::phases::DelegationPhase::Confirmed
+    );
+    assert!(restored
+        .confirm_journaled_delegation(&id, 0, canonical.tx_hash(), &[event(&id, "43")])
+        .is_err());
+}
 
 #[test]
 fn pir_preparation_hotkey_is_round_wallet_scoped_and_survives_reload() {
@@ -525,6 +724,79 @@ mod wallet_inputs {
     }
 
     #[tokio::test]
+    #[ignore = "real Halo2 delegation proof"]
+    async fn delegation_owned_proof_job_survives_database_drop() {
+        use voting_circuits::delegation::{ImtProvider, SpacedLeafImtProvider};
+        use zcash_voting::{
+            backend::pasta_curves::group::ff::PrimeField,
+            proof_executor::{ProofExecutor, SequentialProofExecutor},
+        };
+        let (note, account, tree, witness) = fixture();
+        let id = "01".repeat(32);
+        let imt = SpacedLeafImtProvider::new();
+        let db = VotingDb::open_browser("owner", Network::Regtest, None).unwrap();
+        let params = VotingRoundParams {
+            vote_round_id: id.clone(),
+            snapshot_height: HEIGHT,
+            ea_pk: vec![7; 32],
+            nc_root: witness.root.clone(),
+            nullifier_imt_root: imt.root().to_repr().to_vec(),
+        };
+        db.init_round(Network::Regtest, &params, None).unwrap();
+        let hotkey = db.ensure_voting_hotkey(&id).unwrap();
+        let keys = zcash_voting::delegate::DelegationKeys::with_voting_hotkey(
+            account.orchard_fvk_bytes.to_vec(),
+            &hotkey,
+            account.seed_fingerprint,
+            account.account_index,
+            "fixture".into(),
+        )
+        .unwrap();
+        let notes = vec![note];
+        db.ensure_bundles(&id, &notes).unwrap();
+        db.ensure_padded_secrets(&id, 0, &notes).unwrap();
+        store_tree_state_and_witnesses(&db, &id, 0, &tree.encode_to_vec(), &notes, &[witness])
+            .unwrap();
+        db.precompute_delegation_pir_async(&id, 0, &notes, Network::Regtest, |nullifiers| async {
+            Ok(nullifiers
+                .into_iter()
+                .map(|nf| {
+                    let p = imt.non_membership_proof(nf).unwrap();
+                    zcash_voting::pir::ImtProofData {
+                        root: p.root,
+                        nf_bounds: p.nf_bounds,
+                        leaf_pos: p.leaf_pos,
+                        path: p.path,
+                    }
+                })
+                .collect())
+        })
+        .await
+        .unwrap();
+        db.build_governance_pczt(
+            &id,
+            0,
+            &notes,
+            &keys,
+            zcash_voting::delegate::branch_id_for_height(Network::Regtest, HEIGHT).unwrap(),
+        )
+        .unwrap();
+        let job = db.delegation_proof_job(&id, 0, notes, keys).unwrap();
+        let bytes = db.serialize_bytes().unwrap();
+        drop(db);
+        let result = SequentialProofExecutor
+            .prove(job, |job| job(&zcash_voting::types::NoopProgressReporter))
+            .await
+            .unwrap();
+        let restored = VotingDb::open_browser("owner", Network::Regtest, Some(&bytes)).unwrap();
+        restored.store_delegation_proof(&id, 0, &result).unwrap();
+        assert_eq!(
+            restored.delegation_phase(&id, 0).unwrap(),
+            zcash_voting::phases::DelegationPhase::Proved
+        );
+    }
+
+    #[tokio::test]
     async fn pir_preparation_persists_witnesses_padding_cache_and_resume_plan() {
         use voting_circuits::delegation::{ImtProvider, SpacedLeafImtProvider};
         use zcash_voting::backend::pasta_curves::group::ff::PrimeField;
@@ -961,7 +1233,7 @@ fn browser_db_file_backed_wal_snapshot_preserves_pending_rows() {
         source.set_wallet_id("wallet-a");
         let observer = Connection::open(&files.0).unwrap();
         // Exercise a v17 file and leave all subsequent round data in its WAL.
-        observer.execute_batch("ALTER TABLE rounds DROP COLUMN voting_hotkey_secret; DROP TABLE wallet_metadata; PRAGMA user_version=17; PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        observer.execute_batch("DROP TABLE delegation_attempts; ALTER TABLE rounds DROP COLUMN voting_hotkey_secret; DROP TABLE wallet_metadata; PRAGMA user_version=17; PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
         let params = RoundParams {
             vote_round_id: "0101010101010101010101010101010101010101010101010101010101010101"
                 .into(),

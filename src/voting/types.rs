@@ -109,6 +109,16 @@ pub(crate) struct HelperEndpoint {
     pub public_key: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VotingActionResult {
+    pub round_id: String,
+    pub phase: VotingRoundPhase,
+    pub completed_bundles: u32,
+    pub total_bundles: u32,
+    pub next_action: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VotingRoundPhase {

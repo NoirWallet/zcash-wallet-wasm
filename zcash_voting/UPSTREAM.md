@@ -68,6 +68,33 @@ upstream decoding; query encoding and proof verification remain unchanged.
 Owned proof inputs may run sequentially or on the host's initialized Rayon pool;
 native large-stack proof behavior remains target-gated and unchanged.
 
+Delegation adds schema v20's owner/round/bundle-scoped canonical submission
+journal. Canonical signed payloads and proof recovery material live only in the
+sensitive voting SQLite export; seed material and wallet spending keys are never
+stored. An owned proof job separates synchronous database reads and writes from
+executor work. The explicit delegation planner covers prepared bundles without
+creating ballot choices or changing the ordinary ballot/helper resume planner.
+
+The pinned voting library has no vote-chain HTTP client. The local
+`delegation_submission` adapter uses the exact REST routes, request/response
+contract, protobuf field mapping, 0x02 prefix, and uppercase SHA256 rule from
+[`vote-sdk` 990fb1c3](https://github.com/valargroup/vote-sdk/tree/990fb1c3fbdbda9f4f459a5259551580c157c5dd)
+(`api/handler.go`, `api/codec.go`, `proto/svote/v1/tx.proto`). These source files
+are unchanged through `02c648134d2738fe74c93d2f379c91e572c143fd`.
+Vizor `3acdff6c0e65b2aa90ebc3f433168e56686bc358`, using library 3.1.0-rc.15,
+independently uses the same delegation and transaction lookup routes.
+Valar's existing `DelegationSubmissionWire` serializer remains authoritative
+for JSON. The golden fixture is independently encoded by `protoc`, using the
+minimal pinned schema and the existing synthetic TX1 vector.
+
+The status response has no transaction hash. Confirmation is bound to the exact
+authenticated `/shielded-vote/v1/tx/{precomputed hash}` lookup, the canonical
+durable bundle, and the validated round event and VAN position, not a claimed
+response-body hash assertion. Possible dispatch is never retried by POST. A
+cancelled dispatch-intent checkpoint can conservatively require polling even
+when the original POST was never reached; no client can close that crash window
+without a stronger server-side idempotency contract.
+
 Check out the proposed upstream commit separately, review protocol/schema and
 dependency changes, and merge the documented compatibility patches explicitly.
 Update this revision and both Cargo lockfiles only after native LRZ tests,

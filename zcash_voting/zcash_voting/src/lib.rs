@@ -35,6 +35,7 @@ mod clock;
 pub mod config;
 pub mod confirmation;
 pub mod delegate;
+pub mod delegation_submission;
 pub mod delegation_capability;
 pub mod error;
 pub mod governance;

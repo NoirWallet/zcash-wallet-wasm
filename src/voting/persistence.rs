@@ -43,8 +43,10 @@ where
     intent()?;
     checkpoint().await?;
     let result = dispatch().await;
-    record(&result)?;
-    checkpoint().await?;
+    record(&result).map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+    checkpoint()
+        .await
+        .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
     result.map_err(|error| {
         VotingApiError::new(if matches!(error, TransportError::Ambiguous) {
             VotingErrorCode::SubmissionUnknown
@@ -113,6 +115,26 @@ impl Default for Persistence {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    #[tokio::test]
+    async fn delegation_post_dispatch_persistence_failure_is_unknown() {
+        let checkpoints = Cell::new(0);
+        let error = checkpointed_dispatch(
+            || Ok(()),
+            || {
+                checkpoints.set(checkpoints.get() + 1);
+                std::future::ready(if checkpoints.get() == 1 {
+                    Ok(())
+                } else {
+                    Err(VotingApiError::new(VotingErrorCode::PersistenceFailed))
+                })
+            },
+            || std::future::ready(Ok(())),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, VotingErrorCode::SubmissionUnknown);
+    }
     #[tokio::test]
     async fn dispatch_future_is_created_only_after_checkpoint() {
         let events = RefCell::new(Vec::new());

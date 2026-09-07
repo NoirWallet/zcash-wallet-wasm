@@ -2,6 +2,8 @@
 
 use std::{future::Future, pin::Pin};
 
+pub const API_LIMIT: usize = 4 * 1024 * 1024;
+
 pub type TransportFuture =
     Pin<Box<dyn Future<Output = Result<OwnedHttpResponse, TransportError>> + Send>>;
 

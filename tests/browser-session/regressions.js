@@ -150,6 +150,23 @@ try {
   const wallet = new WebWallet('test', 'https://example.invalid', walletBytes);
   console.log('Synthetic wallet constructed');
   const session = (callback, restored = votingBytes) => new WebVotingSession(wallet, metadata.accountId, restored, callback);
+  await test('delegation consumes USK once and rejects identity before any Fetch', async () => {
+    const original=window.fetch;
+    let requests=0;
+    window.fetch=()=>{requests++;throw new Error('HOST_PRIVATE');};
+    const s=session(()=>{throw new Error('unexpected checkpoint');});
+    try {
+      for (const [index, fingerprintSeed] of [[0,18],[1,17]]) {
+        const key=new bindings.UnifiedSpendingKey('test',new Uint8Array(32).fill(17),index);
+        const fingerprint=new bindings.SeedFingerprint(new Uint8Array(32).fill(fingerprintSeed));
+        await errorCode(()=>s.submitDelegation(metadata.roundId,key,fingerprint),'RECOVERY_CONFLICT');
+        let consumed=false;
+        try {key.to_unified_full_viewing_key();} catch (_) {consumed=true;}
+        assert(consumed,'USK wrapper was not consumed');
+      }
+      assert(requests===0,'identity mismatch dispatched HTTP');
+    } finally {window.fetch=original;s.free();}
+  });
   await test('synchronous constructor and exact hashed storage key', () => {
     let calls = 0;
     const s = session(() => { calls++; });

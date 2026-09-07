@@ -213,6 +213,47 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Explicit delegation does not create ballot choices. Ordinary resume planning
+/// continues to start new delegations only when a chosen vote requires one.
+pub fn delegation_resume_steps(
+    db: &VotingDb,
+    round_id: &str,
+    proposal_ids: &[u32],
+) -> Result<Vec<NextStep>, VotingError> {
+    let plan = resume_plan(db, round_id, proposal_ids)?;
+    if plan.delegation_statuses.is_empty()
+        || plan
+            .delegation_statuses
+            .iter()
+            .enumerate()
+            .any(|(index, status)| {
+                status.bundle_index as usize != index
+                    || matches!(
+                        status.phase,
+                        DelegationPhase::Submitted | DelegationPhase::Confirmed
+                    ) != status.tx_hash.is_some()
+            })
+    {
+        return Err(VotingError::InvalidInput {
+            message: "incomplete prepared delegation state".into(),
+        });
+    }
+    let mut steps = Vec::new();
+    for status in plan.delegation_statuses {
+        match status.phase {
+            DelegationPhase::Confirmed => {}
+            DelegationPhase::Submitted => steps.push(NextStep::PollDelegation {
+                bundle_index: status.bundle_index,
+            }),
+            _ => steps.push(NextStep::Delegate {
+                bundle_index: status.bundle_index,
+            }),
+        }
+    }
+    steps.sort_by_key(step_rank);
+    Ok(steps)
+}
+
 /// One unit of remaining work for a round. Ordered deterministically within a
 /// `RoundPlan`, so a restart yields the same sequence.
 #[non_exhaustive]

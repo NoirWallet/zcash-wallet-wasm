@@ -76,6 +76,30 @@ impl WebVotingSession {
         value(&self.inner.prepare_round(&round_id).await?)
     }
 
+    #[wasm_bindgen(js_name = submitDelegation)]
+    pub async fn submit_delegation(
+        &self,
+        round_id: String,
+        usk: super::keys::UnifiedSpendingKey,
+        seed_fingerprint: super::keys::SeedFingerprint,
+    ) -> Result<JsValue, JsValue> {
+        let (usk, network, index, key_fingerprint) = usk.into_voting_parts();
+        let fingerprint: zip32::fingerprint::SeedFingerprint = seed_fingerprint.into();
+        let account = self.inner.validate_delegation_key(&usk, fingerprint)?;
+        if !matches!(network, crate::Network::TestNetwork)
+            || u32::from(index) != account.account_index
+            || key_fingerprint != Some(fingerprint)
+        {
+            return Err(VotingApiError::new(VotingErrorCode::RecoveryConflict).into());
+        }
+        value(
+            &self
+                .inner
+                .submit_delegation(&round_id, usk, fingerprint)
+                .await?,
+        )
+    }
+
     /// The host obtains explicit user confirmation naming this round before calling.
     #[wasm_bindgen(js_name = clearRound)]
     pub async fn clear_round(&self, round_id: String) -> Result<(), JsValue> {
