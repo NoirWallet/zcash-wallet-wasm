@@ -26,7 +26,7 @@ use zcash_client_backend::{
         scanning::{ScanPriority, ScanRange},
         wallet::{ConfirmationsPolicy, TargetHeight},
     },
-    wallet::{NoteId, WalletSaplingOutput},
+    wallet::{NoteId, OutputRef, WalletSaplingOutput},
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::transaction::{Transaction, fees::zip317};
@@ -116,6 +116,7 @@ pub struct MemoryWalletDb<P: consensus::Parameters> {
     pub(crate) transaction_data_request_queue: TransactionDataRequestQueue,
     /// Queue of block ranges that should be scanned along with their priority
     pub(crate) scan_queue: ScanQueue,
+    pub(crate) output_locks: BTreeMap<OutputRef, crate::output_locks::OutputLock>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +175,7 @@ impl<P: consensus::Parameters + PartialEq> PartialEq for MemoryWalletDb<P> {
             && self.sent_notes == other.sent_notes
             && self.tx_locator == other.tx_locator
             && self.scan_queue == other.scan_queue
+            && self.output_locks == other.output_locks
             && self.sapling_tree_shard_end_heights == other.sapling_tree_shard_end_heights
             && orchard_comparisons
             && transparent_comparisons
@@ -248,6 +250,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             tx_locator: TxLocatorMap::new(),
             received_note_spends: ReceievedNoteSpends::new(),
             scan_queue: ScanQueue::new(),
+            output_locks: BTreeMap::new(),
             transparent_received_outputs: TransparentReceivedOutputs::new(),
             transparent_received_output_spends: TransparentReceivedOutputSpends::new(),
             transparent_spend_map: TransparentSpendCache::new(),
@@ -490,6 +493,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .next()
             .ok_or(Error::NoteNotFound)?;
         self.received_note_spends.insert_spend(note_id, txid);
+        self.output_locks.remove(&note_id.into());
         Ok(())
     }
 
@@ -711,6 +715,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .next()
             .ok_or(Error::NoteNotFound)?;
         self.received_note_spends.insert_spend(note_id, txid);
+        self.output_locks.remove(&note_id.into());
         Ok(())
     }
 
@@ -727,6 +732,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .map(|v| v.note_id())
             .ok_or(Error::NoteNotFound)?;
         self.received_note_spends.insert_spend(note_id, txid);
+        self.output_locks.remove(&note_id.into());
         Ok(())
     }
 
@@ -759,6 +765,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .insert_received_note(ReceivedNote::from_wallet_sapling_output(note_id, output));
         if let Some(spent_in) = spent_in {
             self.received_note_spends.insert_spend(note_id, spent_in);
+            self.output_locks.remove(&note_id.into());
         }
     }
     #[cfg(feature = "orchard")]
@@ -772,6 +779,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .insert_received_note(ReceivedNote::from_wallet_orchard_output(note_id, output));
         if let Some(spent_in) = spent_in {
             self.received_note_spends.insert_spend(note_id, spent_in);
+            self.output_locks.remove(&note_id.into());
         }
     }
     #[cfg(feature = "orchard")]
@@ -785,6 +793,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .insert_received_note(ReceivedNote::from_wallet_ironwood_output(note_id, output));
         if let Some(spent_in) = spent_in {
             self.received_note_spends.insert_spend(note_id, spent_in);
+            self.output_locks.remove(&note_id.into());
         }
     }
     pub(crate) fn insert_sapling_nullifier_map(
@@ -1442,6 +1451,11 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         let known_output = self.transparent_received_outputs.contains_key(outpoint);
 
         if known_output {
+            self.output_locks.remove(&OutputRef::new(
+                *outpoint.txid(),
+                zcash_protocol::PoolType::Transparent,
+                outpoint.n(),
+            ));
             self.transparent_received_output_spends
                 .insert(outpoint.clone(), *spent_in_tx);
             self.transparent_spend_map.remove(spent_in_tx, outpoint);

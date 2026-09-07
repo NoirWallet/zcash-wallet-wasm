@@ -37,6 +37,9 @@ pub mod pool;
 #[cfg(feature = "transparent-inputs")]
 mod transparent;
 
+#[cfg(feature = "transparent-inputs")]
+mod locking;
+
 /// A test data store factory for in-memory databases
 /// Very simple implementation just creates a new MemoryWalletDb
 pub(crate) struct TestMemDbFactory;
@@ -57,6 +60,9 @@ impl DataStoreFactory for TestMemDbFactory {
     fn new_data_store(
         &self,
         network: LocalNetwork,
+        _anchor_retention_interval: Option<
+            zcash_client_backend::data_api::anchor_retention::AnchorRetentionInterval,
+        >,
         #[cfg(feature = "transparent-inputs")] _gap_limits: Option<GapLimits>,
     ) -> Result<Self::DataStore, Self::Error> {
         Ok(MemoryWalletDb::new(network, 100))
@@ -351,6 +357,7 @@ where
                         0,            // Unimplemented: memo_count
                         false,        // Unimplemented: expired_unmined
                         is_shielding, // is_shielding
+                        None,
                     ),
                 )
             })

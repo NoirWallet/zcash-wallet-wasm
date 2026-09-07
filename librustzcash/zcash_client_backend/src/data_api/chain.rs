@@ -626,7 +626,7 @@ pub fn scan_cached_blocks<ParamsT, DbT, BlockSourceT>(
     from_height: BlockHeight,
     from_state: &ChainState,
     limit: usize,
-) -> Result<ScanSummary, Error<DbT::Error, BlockSourceT::Error>>
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
 where
     ParamsT: consensus::Parameters + Send + 'static,
     BlockSourceT: BlockSource,
@@ -642,9 +642,11 @@ where
     let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
     let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
 
-    block_source.with_blocks::<_, DbT::Error>(Some(from_height), Some(limit), |block| {
-        runners.add_block(params, block).map_err(|e| e.into())
-    })?;
+    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
+        Some(from_height),
+        Some(limit),
+        |block| runners.add_block(params, block).map_err(|e| e.into()),
+    )?;
     runners.flush();
 
     let mut prior_block_metadata = if from_height > BlockHeight::from(0) {
@@ -660,7 +662,7 @@ where
 
     let mut scanned_blocks = vec![];
     let mut scan_summary = ScanSummary::for_range(from_height..from_height);
-    block_source.with_blocks::<_, DbT::Error>(
+    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
         Some(from_height),
         Some(limit),
         |block: CompactBlock| {
@@ -714,7 +716,7 @@ pub fn scan_cached_blocks_optimized<ParamsT, DbT, BlockSourceT>(
     from_height: BlockHeight,
     from_state: &ChainState,
     limit: usize,
-) -> Result<ScanSummary, Error<DbT::Error, BlockSourceT::Error>>
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
 where
     ParamsT: consensus::Parameters + Send + 'static,
     BlockSourceT: BlockSource,
@@ -747,9 +749,11 @@ where
     };
     let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
 
-    block_source.with_blocks::<_, DbT::Error>(Some(from_height), Some(limit), |block| {
-        runners.add_block(params, block).map_err(|e| e.into())
-    })?;
+    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
+        Some(from_height),
+        Some(limit),
+        |block| runners.add_block(params, block).map_err(|e| e.into()),
+    )?;
     runners.flush();
 
     let mut prior_block_metadata = if from_height > BlockHeight::from(0) {
@@ -764,7 +768,7 @@ where
 
     let mut scanned_blocks = vec![];
     let mut scan_summary = ScanSummary::for_range(from_height..from_height);
-    block_source.with_blocks::<_, DbT::Error>(
+    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
         Some(from_height),
         Some(limit),
         |block: CompactBlock| {

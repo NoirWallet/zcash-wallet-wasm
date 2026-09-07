@@ -1226,7 +1226,7 @@ impl TryFrom<zcash_client_backend::data_api::AccountBalance> for AccountBalance 
         let sapling_pending_balance = pending_value(balance.sapling_balance())?;
         let orchard_pending_balance = pending_value(balance.orchard_balance())?;
         let ironwood_pending_balance = pending_value(balance.ironwood_balance())?;
-        let unshielded_pending_balance = pending_value(balance.unshielded_balance())?;
+        let unshielded_pending_balance = pending_value(&balance.unshielded_balance())?;
         let pending_balance = (balance.change_pending_confirmation()
             + balance.value_pending_spendability())
         .ok_or(zcash_protocol::value::BalanceError::Overflow)

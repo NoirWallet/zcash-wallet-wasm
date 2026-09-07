@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, hash::Hash, ops::Range};
 #[cfg(feature = "orchard")]
-use std::collections::BTreeSet;
-use std::hash::Hash;
-use std::ops::Range;
+use {
+    crate::data_api::ORCHARD_SHARD_HEIGHT, shardtree::store::Checkpoint, std::collections::BTreeSet,
+};
 
 use rayon::{
     iter::{IndexedParallelIterator as _, ParallelIterator},
@@ -26,12 +26,16 @@ use crate::{
     TransferType,
     data_api::{
         DecryptedTransaction, SAPLING_SHARD_HEIGHT, ScannedBlock, TransactionStatus,
-        WalletCommitmentTrees, chain::ChainState, ll::ReceivedShieldedOutput,
+        WalletCommitmentTrees, anchor_retention::AnchorRetention, chain::ChainState,
+        ll::ReceivedShieldedOutput,
     },
     wallet::{Recipient, WalletTransparentOutput},
 };
 
 use super::{LowLevelWalletRead, LowLevelWalletWrite, TxMeta};
+
+#[cfg(feature = "orchard")]
+use crate::data_api::anchor_retention::{AnchorRetentionInterval, PoolMigrationParams};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -39,15 +43,13 @@ use {
     std::collections::HashSet,
     transparent::keys::TransparentKeyScope,
     zcash_keys::keys::{
-        ReceiverRequirement, UnifiedAddressRequest,
+        ReceiverRequirement::*,
+        UnifiedAddressRequest,
         transparent::gap_limits::{
             AddressStore, GapAddressesError, GapLimits, generate_gap_addresses,
         },
     },
 };
-
-#[cfg(feature = "orchard")]
-use {crate::data_api::ORCHARD_SHARD_HEIGHT, shardtree::store::Checkpoint};
 
 /// The maximum number of blocks the wallet is allowed to rewind. This is
 /// consistent with the bound in zcashd, and allows block data deeper than
@@ -122,6 +124,8 @@ where
     Ok(())
 }
 
+#[derive(Debug)]
+#[non_exhaustive]
 pub enum PutBlocksError<SE, TE> {
     /// Returned if a provided block sequence has gaps.
     NonSequentialBlocks {
@@ -402,8 +406,11 @@ where
                 .queue_tx_retrieval(std::iter::once(tx.txid()), None)
                 .map_err(PutBlocksError::Storage)?;
 
-            // Mark notes as spent and remove them from the scanning cache
-            mark_notes_spent(
+            // Mark notes as spent and remove them from the scanning cache. Block scanning does
+            // not yet detect transparent spends, so no prevouts are available here.
+            // TODO: Pass the scanned transparent spends once the scanner reports them.
+            // https://github.com/zcash/librustzcash/issues/2395
+            let _ = mark_notes_spent(
                 wallet_db,
                 tx_ref,
                 #[cfg(feature = "transparent-inputs")]
@@ -501,6 +508,24 @@ where
                 |_account_id| (),
             )
             .map_err(PutBlocksError::Storage)?;
+
+            // Record the transparent outputs of the transaction that pay this wallet. As for
+            // the shielded pools above, only the receive side is recorded here; the sent
+            // outputs of a transaction the wallet funded are recorded when the complete
+            // transaction data arrives via `put_decrypted_tx`, which this scan has queued for
+            // retrieval. The gap-address regeneration that follows the block loop observes
+            // these receives, so no separate notification is needed.
+            #[cfg(feature = "transparent-inputs")]
+            for output in tx.transparent_outputs() {
+                put_received_transparent_output(
+                    wallet_db,
+                    tx_ref,
+                    output,
+                    block.height(),
+                    |_, _| (),
+                )
+                .map_err(PutBlocksError::Storage)?;
+            }
         }
 
         // Insert the new nullifiers from this block into the nullifier map, unless the caller
@@ -577,7 +602,6 @@ where
         .map_err(PutBlocksError::Storage)?
     {
         if let Some(t_key_scope) = key_scope {
-            use ReceiverRequirement::*;
             generate_transparent_gap_addresses(
                 wallet_db,
                 gap_limits,
@@ -618,15 +642,20 @@ where
 /// - `blocks`: The scanned block data to be added to the data store. This vector must contain
 ///   data for blocks in sequentially increasing height order;
 ///   [`PutBlocksError::NonSequentialBlocks`] will be returned if this invariant is violated.
-/// - `anchor_retention_height`: If `Some(h)`, checkpoints established at or above height `h` whose
-///   height falls on the [`ANCHOR_RETENTION_INTERVAL`] are retained as durable anchors, exempting
-///   them from automatic pruning of excess checkpoints. `None` disables anchor retention.
+/// - `anchor_retention`: If `Some(retention)`, the checkpoints the policy
+///   [retains](AnchorRetention::retains) — those at or above its floor that fall on its interval —
+///   are kept as durable anchors, exempting them from automatic pruning of excess checkpoints.
+///   A checkpoint is CREATED at every retained height in the scanned range that would not
+///   otherwise receive one: scanning only checkpoints a block at its last note commitment, so a
+///   boundary block containing no shielded outputs in any pool would otherwise leave a permanent
+///   hole in the retained grid, and the anchor there could never be proved against. `None`
+///   disables anchor retention.
 pub fn put_blocks<DbT, SE, TE>(
     wallet_db: &mut DbT,
     #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
     from_state: &ChainState,
     blocks: Vec<ScannedBlock<<DbT as LowLevelWalletRead>::AccountId>>,
-    anchor_retention_height: Option<BlockHeight>,
+    anchor_retention: Option<&AnchorRetention>,
 ) -> Result<(), PutBlocksError<SE, TE>>
 where
     DbT: PutBlocksDbT<SE, TE, <DbT as LowLevelWalletRead>::AccountRef>,
@@ -678,6 +707,14 @@ where
         // Ensure that we have the same set of checkpoints across all trees. Each tree must gain a
         // checkpoint at every height that is checkpointed in any of the other trees, so the set of
         // heights to ensure for a given tree is the union of the checkpoint heights of the others.
+        //
+        // The heights the anchor-retention policy retains within this batch are added to every
+        // pool's ensure set. Scanning checkpoints a block only at its last note commitment, so a
+        // grid boundary landing on a block with no shielded outputs in ANY pool would otherwise
+        // never be checkpointed at all — and a retention policy can only keep alive a checkpoint
+        // that exists. The ensured checkpoint carries the tree state as of the last commitment at
+        // or before the boundary, which is exactly the state a ZIP 318 anchor at that height
+        // commits to.
         #[cfg(feature = "orchard")]
         let (
             missing_sapling_checkpoints,
@@ -688,10 +725,12 @@ where
             let orchard_checkpoint_positions = checkpoint_positions(&orchard_subtrees);
             let ironwood_checkpoint_positions = checkpoint_positions(&ironwood_subtrees);
 
-            let [ensure_sapling, ensure_orchard, ensure_ironwood] = cross_pool_ensure_heights(
+            let [ensure_sapling, ensure_orchard, ensure_ironwood] = batch_ensure_heights(
                 &sapling_checkpoint_positions.keys().copied().collect(),
                 &orchard_checkpoint_positions.keys().copied().collect(),
                 &ironwood_checkpoint_positions.keys().copied().collect(),
+                anchor_retention,
+                from_state.block_height() + 1..=last_scanned_height,
             );
 
             (
@@ -724,7 +763,7 @@ where
                     from_state.final_sapling_tree(),
                     from_state.block_height(),
                     sapling_tree,
-                    anchor_retention_height,
+                    anchor_retention,
                     &mut sapling_subtrees,
                     #[cfg(feature = "orchard")]
                     &mut missing_checkpoints,
@@ -748,7 +787,7 @@ where
                     from_state.final_orchard_tree(),
                     from_state.block_height(),
                     orchard_tree,
-                    anchor_retention_height,
+                    anchor_retention,
                     &mut orchard_subtrees,
                     &mut missing_checkpoints,
                 )
@@ -771,7 +810,7 @@ where
                     from_state.final_ironwood_tree(),
                     from_state.block_height(),
                     ironwood_tree,
-                    anchor_retention_height,
+                    anchor_retention,
                     &mut ironwood_subtrees,
                     &mut missing_checkpoints,
                 )
@@ -921,7 +960,31 @@ where
         wallet_db.set_transaction_status(d_tx.tx().txid(), TransactionStatus::Mined(height))?;
     }
 
-    mark_notes_spent(
+    // Record how the transaction classifies against ZIP 318, so that a wallet can label a
+    // migration transaction in its history without a migration plan, which does not survive a
+    // seed restore. This is the one moment at which the parsed transaction and the decrypted
+    // outputs are both in hand; a store recomputing it later would have neither.
+    //
+    // The SPECIFIED parameters are used rather than the store's own. The only value a wallet
+    // overrides is the anchor bucket interval, and this evidence source cannot evaluate the anchor
+    // clause at all (resolving an anchor to a height needs the retained boundary checkpoints), so
+    // the override cannot change the answer. Deliberately not read from the store: `LowLevelWalletRead`
+    // does not expose it, and adding a second accessor for a grid the store is the authority on is
+    // exactly how two call sites come to disagree. Thread the store's parameters in here if a
+    // future clause ever consults the grid.
+    #[cfg(feature = "orchard")]
+    {
+        let params = PoolMigrationParams::from(AnchorRetentionInterval::default());
+        let classification = crate::data_api::zip318::classify_decrypted_tx(
+            d_tx.tx(),
+            d_tx.orchard_outputs(),
+            d_tx.ironwood_outputs(),
+            &params,
+        );
+        wallet_db.put_zip318_classification(tx_ref, classification)?;
+    }
+
+    let has_wallet_shielded_spend = mark_notes_spent(
         wallet_db,
         tx_ref,
         #[cfg(feature = "transparent-inputs")]
@@ -1035,7 +1098,7 @@ where
         tx_ref,
         &wallet_transparent_outputs,
         #[cfg(feature = "transparent-inputs")]
-        |wallet_db, output| wallet_db.put_transparent_output(output, observed_height, false),
+        observed_height,
         #[cfg(feature = "transparent-inputs")]
         |account_id, t_key_scope| {
             gap_update_set.insert((account_id, t_key_scope));
@@ -1045,7 +1108,6 @@ where
     // Regenerate the gap limit addresses.
     #[cfg(feature = "transparent-inputs")]
     for (account_id, key_scope) in gap_update_set {
-        use ReceiverRequirement::*;
         generate_transparent_gap_addresses(
             wallet_db,
             gap_limits,
@@ -1074,20 +1136,16 @@ where
         wallet_db.queue_transparent_input_retrieval(tx_ref, &d_tx)?
     }
 
+    // Receiving complete transaction data satisfies enhancement intent, but must not erase a
+    // durable status-observation intent created when the transaction was sent.
     wallet_db.delete_retrieval_queue_entries(d_tx.tx().txid())?;
 
-    // If the decrypted transaction is unmined and has no shielded components, add it to
-    // the queue for status retrieval.
-    #[cfg(feature = "transparent-inputs")]
+    // A shielded bundle is observable through compact-block scanning only when this wallet can
+    // match one of its real nullifiers or decrypt one of its outputs. Transactions without either
+    // capability require explicit status observation by txid.
+    if d_tx.mined_height().is_none() && !(has_wallet_shielded_spend || d_tx.has_decrypted_outputs())
     {
-        let detectable_via_scanning = d_tx.tx().sapling_bundle().is_some();
-        #[cfg(feature = "orchard")]
-        let detectable_via_scanning =
-            detectable_via_scanning | d_tx.tx().orchard_bundle().is_some();
-
-        if d_tx.mined_height().is_none() && !detectable_via_scanning {
-            wallet_db.queue_tx_retrieval(std::iter::once(d_tx.tx().txid()), None)?
-        }
+        wallet_db.queue_tx_status(d_tx.tx().txid())?;
     }
 
     Ok(())
@@ -1210,10 +1268,12 @@ fn mark_notes_spent<'a, DbT>(
     sapling_nfs: impl Iterator<Item = &'a sapling::Nullifier>,
     #[cfg(feature = "orchard")] orchard_nfs: impl Iterator<Item = &'a orchard::note::Nullifier>,
     #[cfg(feature = "orchard")] ironwood_nfs: impl Iterator<Item = &'a orchard::note::Nullifier>,
-) -> Result<(), <DbT as LowLevelWalletRead>::Error>
+) -> Result<bool, <DbT as LowLevelWalletRead>::Error>
 where
     DbT: LowLevelWalletWrite,
 {
+    let mut has_wallet_shielded_spend = false;
+
     // If any of the utxos spent in the transaction are ours, mark them as spent.
     #[cfg(feature = "transparent-inputs")]
     for outpoint in transparent_prevouts {
@@ -1222,22 +1282,22 @@ where
 
     // Mark Sapling notes as spent when we observe their nullifiers.
     for nf in sapling_nfs {
-        wallet_db.mark_sapling_note_spent(nf, tx_ref)?;
+        has_wallet_shielded_spend |= wallet_db.mark_sapling_note_spent(nf, tx_ref)?;
     }
 
     // Mark Orchard notes as spent when we observe their nullifiers.
     #[cfg(feature = "orchard")]
     for nf in orchard_nfs {
-        wallet_db.mark_orchard_note_spent(nf, tx_ref)?;
+        has_wallet_shielded_spend |= wallet_db.mark_orchard_note_spent(nf, tx_ref)?;
     }
 
     // Mark Ironwood notes as spent when we observe their nullifiers.
     #[cfg(feature = "orchard")]
     for nf in ironwood_nfs {
-        wallet_db.mark_ironwood_note_spent(nf, tx_ref)?;
+        has_wallet_shielded_spend |= wallet_db.mark_ironwood_note_spent(nf, tx_ref)?;
     }
 
-    Ok(())
+    Ok(has_wallet_shielded_spend)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1347,21 +1407,76 @@ where
     Ok(())
 }
 
+/// Records the wallet's receipt of `output` if its recipient address belongs to a wallet
+/// account, and queues the resulting outpoint for transparent spend detection.
+///
+/// An output whose recipient address belongs to no wallet account is ignored; recording such an
+/// output as a send is the caller's responsibility.
+///
+/// `observation_height` is the height as of which the output was observed: the height of the
+/// containing block for an output discovered in a mined block, or the caller's best estimate of
+/// the chain tip for one discovered in an unmined transaction. The output is never recorded as
+/// known-unspent, because neither observing it in a block nor receiving complete data for the
+/// transaction that created it establishes that it is still a member of the UTXO set; only a
+/// query of that set can do so.
+///
+/// `on_received` is invoked with the receiving account and key scope when the output is recorded,
+/// so that a caller which does not otherwise track address use can extend the transparent address
+/// gap for that account.
+#[cfg(feature = "transparent-inputs")]
+fn put_received_transparent_output<DbT>(
+    wallet_db: &mut DbT,
+    tx_ref: <DbT as LowLevelWalletRead>::TxRef,
+    output: &WalletTransparentOutput<<DbT as LowLevelWalletRead>::AccountId>,
+    observation_height: BlockHeight,
+    mut on_received: impl FnMut(<DbT as LowLevelWalletRead>::AccountId, TransparentKeyScope),
+) -> Result<(), <DbT as LowLevelWalletRead>::Error>
+where
+    DbT: LowLevelWalletWrite,
+{
+    if output.recipient_account().is_none() {
+        return Ok(());
+    }
+
+    let (account_id, _) = wallet_db.put_transparent_output(output, observation_height, false)?;
+
+    if let Some(t_key_scope) = output.recipient_key_scope() {
+        on_received(account_id, t_key_scope);
+    }
+
+    // Queue this outpoint for explicit transparent-spend detection.
+    //
+    // Unlike shielded notes -- whose spends are detected naturally during
+    // scanning via nullifier matching -- transparent spends are only found
+    // when the wallet already knows which outpoints to watch. For receives at
+    // ordinary transparent addresses this is handled by indexer-driven address
+    // watches, but for receives at ephemeral addresses (e.g. the middle hop of
+    // a ZIP 320 / TEX flow) there is no ongoing watch. A purely-transparent
+    // spend of such an output would otherwise go undetected. This is especially
+    // a problem in wallet recovery, where transactions can be processed out of
+    // order: queuing here ensures the spend is detected even when the receive
+    // side is processed first.
+    wallet_db.queue_transparent_spend_detection(
+        *output.recipient_address(),
+        tx_ref,
+        output.outpoint().n(),
+    )?;
+
+    Ok(())
+}
+
+/// Records both sides of each transparent output of a transaction: the wallet's receipt of
+/// those outputs that pay one of its accounts, and, for each output that names a funding
+/// account, the corresponding sent output.
+///
+/// `observation_height` is the height as of which the outputs were observed; see
+/// [`put_received_transparent_output`].
 fn put_transparent_outputs<DbT, P>(
     wallet_db: &mut DbT,
     params: &P,
     tx_ref: <DbT as LowLevelWalletRead>::TxRef,
     outputs: &[WalletTransparentOutput<<DbT as LowLevelWalletRead>::AccountId>],
-    #[cfg(feature = "transparent-inputs")] put_received_output: impl Fn(
-        &mut DbT,
-        &WalletTransparentOutput<<DbT as LowLevelWalletRead>::AccountId>,
-    ) -> Result<
-        (
-            <DbT as LowLevelWalletRead>::AccountId,
-            std::option::Option<TransparentKeyScope>,
-        ),
-        <DbT as LowLevelWalletRead>::Error,
-    >,
+    #[cfg(feature = "transparent-inputs")] observation_height: BlockHeight,
     #[cfg(feature = "transparent-inputs")] mut on_received: impl FnMut(
         <DbT as LowLevelWalletRead>::AccountId,
         TransparentKeyScope,
@@ -1375,32 +1490,13 @@ where
         // Receive side: record the output as received whenever its recipient
         // address belongs to a wallet account.
         #[cfg(feature = "transparent-inputs")]
-        if output.recipient_account().is_some() {
-            let (account_id, _) = put_received_output(wallet_db, output)?;
-
-            if let Some(t_key_scope) = output.recipient_key_scope() {
-                on_received(account_id, t_key_scope);
-            }
-
-            // Queue this outpoint for explicit transparent-spend detection.
-            //
-            // Unlike shielded notes -- whose spends are detected naturally
-            // during scanning via nullifier matching -- transparent spends are
-            // only found when the wallet already knows which outpoints to
-            // watch. For receives at ordinary transparent addresses this is
-            // handled by indexer-driven address watches, but for receives at
-            // ephemeral addresses (e.g. the middle hop of a ZIP 320 / TEX
-            // flow) there is no ongoing watch. A purely-transparent spend of
-            // such an output would otherwise go undetected. This is
-            // especially a problem in wallet recovery, where transactions can
-            // be processed out of order: queuing here ensures the spend is
-            // detected even when the receive side is processed first.
-            wallet_db.queue_transparent_spend_detection(
-                *output.recipient_address(),
-                tx_ref,
-                output.outpoint().n(),
-            )?;
-        }
+        put_received_transparent_output(
+            wallet_db,
+            tx_ref,
+            output,
+            observation_height,
+            &mut on_received,
+        )?;
 
         // Send side: record the output as sent for the wallet account that
         // funded the transaction, if any. If the recipient is also a wallet
@@ -1604,31 +1700,24 @@ fn should_track_nullifiers(
     nullifier_tracking_floor.is_none_or(|floor| block_height >= floor)
 }
 
-/// The interval, in blocks, at which checkpoints are retained as durable "anchors" once anchor
-/// retention is active. At 75-second blocks this is roughly every 6 hours (4 per day).
-const ANCHOR_RETENTION_INTERVAL: u32 = 288;
-
-/// Returns whether the checkpoint at `height` should be retained as a durable anchor.
-///
-/// Anchor retention is active for `height` when `anchor_retention_height` is `Some` and `height`
-/// is at or above it (i.e. at or after the network upgrade that enables anchor retention), and
-/// `height` falls on the [`ANCHOR_RETENTION_INTERVAL`].
-fn should_retain_anchor(anchor_retention_height: Option<BlockHeight>, height: BlockHeight) -> bool {
-    anchor_retention_height.is_some_and(|floor| height >= floor)
-        && u32::from(height) % ANCHOR_RETENTION_INTERVAL == 0
+/// Returns whether the checkpoint at `height` should be retained as a durable anchor: anchor
+/// retention is enabled at all (`anchor_retention` is `Some`) and its policy
+/// [retains](AnchorRetention::retains) `height`.
+fn should_retain_anchor(anchor_retention: Option<&AnchorRetention>, height: BlockHeight) -> bool {
+    anchor_retention.is_some_and(|retention| retention.retains(height))
 }
 
 /// Retains `height` as a durable anchor checkpoint when [`should_retain_anchor`] holds.
 fn retain_anchor_checkpoint<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<S, DEPTH, SHARD_HEIGHT>,
-    anchor_retention_height: Option<BlockHeight>,
+    anchor_retention: Option<&AnchorRetention>,
     height: BlockHeight,
 ) -> Result<(), ShardTreeError<S::Error>>
 where
     S: ShardStore<CheckpointId = BlockHeight>,
     S::H: Clone + PartialEq + Hashable,
 {
-    if should_retain_anchor(anchor_retention_height, height) {
+    if should_retain_anchor(anchor_retention, height) {
         tree.ensure_retained(height)?;
     }
     Ok(())
@@ -1660,11 +1749,54 @@ pub fn cross_pool_ensure_heights(
     ]
 }
 
+/// Given the checkpoint heights present in each of the three shielded pools' note commitment trees,
+/// in the order (Sapling, Orchard, Ironwood), returns for each pool the complete set of checkpoint
+/// heights it must ensure for a batch of scanned blocks covering `range`.
+///
+/// This is the whole of the rule, and the set a caller passes to [`ensure_checkpoints`]. It is the
+/// union of two obligations, and satisfying only the first is a silent correctness bug:
+///
+/// 1. **Cross-pool alignment** ([`cross_pool_ensure_heights`]): every pool must be checkpointed at
+///    every height that is checkpointed in any pool, so anchors align across trees.
+/// 2. **Anchor retention**: every height `anchor_retention` retains within `range`. Scanning
+///    checkpoints a block only at its last note commitment, so a grid boundary landing on a block
+///    with no shielded output in ANY pool is never checkpointed by (1) either — and a retention
+///    policy can only keep alive a checkpoint that EXISTS. [`AnchorRetention`] is a promise to
+///    preserve a checkpoint, never to create one: omit this step and a consumer marks boundary
+///    heights that never materialize, leaving anything anchored to them permanently unprovable.
+///
+/// Obligation (2) has no effect when `anchor_retention` is `None`, so a caller with no retention
+/// policy gets exactly [`cross_pool_ensure_heights`].
+///
+/// [`put_blocks`] calls this. It is public so that a consumer maintaining its note commitment trees
+/// by other means — accumulating updates in memory and flushing in bulk, or building shards out of
+/// band — composes the same set rather than rediscovering the rule, which is why the two obligations
+/// live behind one function instead of at each call site.
+#[cfg(feature = "orchard")]
+pub fn batch_ensure_heights(
+    sapling: &BTreeSet<BlockHeight>,
+    orchard: &BTreeSet<BlockHeight>,
+    ironwood: &BTreeSet<BlockHeight>,
+    anchor_retention: Option<&AnchorRetention>,
+    range: std::ops::RangeInclusive<BlockHeight>,
+) -> [BTreeSet<BlockHeight>; 3] {
+    let mut ensure = cross_pool_ensure_heights(sapling, orchard, ironwood);
+
+    if let Some(retention) = anchor_retention {
+        let retained = retention.retained_in_range(range);
+        for pool in ensure.iter_mut() {
+            pool.extend(retained.iter().copied());
+        }
+    }
+
+    ensure
+}
+
 /// Updates the given note commitment tree with all newly read note commitments starting
 /// at the block `frontier_height + 1`.
 ///
-/// If `anchor_retention_height` is `Some`, every checkpoint established at or above that height
-/// whose height falls on the [`ANCHOR_RETENTION_INTERVAL`] is retained as a durable anchor.
+/// If `anchor_retention` is `Some`, every checkpoint the policy
+/// [retains](AnchorRetention::retains) is kept as a durable anchor.
 ///
 /// This is generic over the [`ShardStore`] backing the tree, so stores that maintain their note
 /// commitment trees by other means (for example, accumulating updates in memory and flushing
@@ -1674,7 +1806,7 @@ pub fn update_tree<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     frontier: &Frontier<S::H, DEPTH>,
     frontier_height: BlockHeight,
     tree: &mut ShardTree<S, DEPTH, SHARD_HEIGHT>,
-    anchor_retention_height: Option<BlockHeight>,
+    anchor_retention: Option<&AnchorRetention>,
     subtrees: impl Iterator<Item = (LocatedPrunableTree<S::H>, BTreeMap<BlockHeight, Position>)>,
     #[cfg(feature = "orchard")] missing_checkpoints: impl Iterator<Item = (BlockHeight, Checkpoint)>,
 ) -> Result<(), ShardTreeError<S::Error>>
@@ -1695,15 +1827,18 @@ where
             marking: Marking::Reference,
         },
     )?;
-    retain_anchor_checkpoint(tree, anchor_retention_height, frontier_height)?;
+    retain_anchor_checkpoint(tree, anchor_retention, frontier_height)?;
 
     for (subtree, checkpoints) in subtrees {
-        // Capture the checkpoint heights before the checkpoint map is consumed by `insert_tree`.
-        let checkpoint_heights = checkpoints.keys().copied().collect::<Vec<_>>();
-        tree.insert_tree(subtree, checkpoints)?;
-        for height in checkpoint_heights {
-            retain_anchor_checkpoint(tree, anchor_retention_height, height)?;
+        // Register anchor retention for this batch's checkpoint heights *before* `insert_tree`,
+        // which prunes down to `max_checkpoints` during insertion. A batch larger than the
+        // checkpoint budget would otherwise prune an anchor before it could be retained, so
+        // retention must be recorded first; `ShardTree::ensure_retained` accepts a checkpoint
+        // height whose checkpoint does not yet exist.
+        for height in checkpoints.keys() {
+            retain_anchor_checkpoint(tree, anchor_retention, *height)?;
         }
+        tree.insert_tree(subtree, checkpoints)?;
     }
 
     // Ensure we have a tree checkpoint for each checkpointed block height.
@@ -1727,7 +1862,7 @@ where
                 tree.store_mut()
                     .add_checkpoint(height, checkpoint.clone())
                     .map_err(ShardTreeError::Storage)?;
-                retain_anchor_checkpoint(tree, anchor_retention_height, height)?;
+                retain_anchor_checkpoint(tree, anchor_retention, height)?;
             }
         }
     }
@@ -1738,17 +1873,20 @@ where
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "orchard")]
-    use std::collections::BTreeSet;
+    use {super::cross_pool_ensure_heights, std::collections::BTreeSet};
+
+    use core::num::NonZeroU32;
 
     use proptest::prelude::*;
     use zcash_protocol::consensus::BlockHeight;
 
     #[cfg(feature = "orchard")]
-    use super::cross_pool_ensure_heights;
+    use super::batch_ensure_heights;
     use super::{
-        ANCHOR_RETENTION_INTERVAL, NULLIFIER_MAP_RETENTION_BLOCKS, nullifier_tracking_floor,
-        should_retain_anchor, should_track_nullifiers,
+        NULLIFIER_MAP_RETENTION_BLOCKS, nullifier_tracking_floor, should_retain_anchor,
+        should_track_nullifiers,
     };
+    use crate::data_api::anchor_retention::{AnchorRetention, AnchorRetentionInterval};
 
     /// A range scanned after a gap of unscanned history (or below the frontier, or with no
     /// frontier at all) must track every nullifier: a skipped entry could belong to a note
@@ -1821,39 +1959,48 @@ mod tests {
         assert!(!should_track_nullifiers(Some(floor), BlockHeight::from(0)));
     }
 
+    /// The gating semantics hold identically at the ZIP 318 interval and at a non-default one, so
+    /// a wallet configured with a short interval retains exactly its own grid.
     #[test]
     fn anchor_retention_gating() {
-        let interval = ANCHOR_RETENTION_INTERVAL;
-        let floor = BlockHeight::from(4 * interval);
+        for interval in [
+            AnchorRetentionInterval::ZIP_318,
+            AnchorRetentionInterval::custom(NonZeroU32::new(12).expect("nonzero")),
+        ] {
+            let blocks = interval.block_count().get();
+            let floor = BlockHeight::from(4 * blocks);
+            let policy = AnchorRetention::new(floor, interval);
+            let retention = Some(&policy);
 
-        // With no retention floor, nothing is retained, even on the interval.
-        assert!(!should_retain_anchor(None, BlockHeight::from(8 * interval)));
+            // With retention disabled, nothing is retained, even on the interval.
+            assert!(!should_retain_anchor(None, BlockHeight::from(8 * blocks)));
 
-        // On the interval and at or above the floor: retained.
-        assert!(should_retain_anchor(
-            Some(floor),
-            BlockHeight::from(4 * interval)
-        ));
-        assert!(should_retain_anchor(
-            Some(floor),
-            BlockHeight::from(8 * interval)
-        ));
+            // On the interval and at or above the floor: retained.
+            assert!(should_retain_anchor(
+                retention,
+                BlockHeight::from(4 * blocks)
+            ));
+            assert!(should_retain_anchor(
+                retention,
+                BlockHeight::from(8 * blocks)
+            ));
 
-        // On the interval but below the floor: not retained.
-        assert!(!should_retain_anchor(
-            Some(floor),
-            BlockHeight::from(3 * interval)
-        ));
+            // On the interval but below the floor: not retained.
+            assert!(!should_retain_anchor(
+                retention,
+                BlockHeight::from(3 * blocks)
+            ));
 
-        // At or above the floor but not on the interval: not retained.
-        assert!(!should_retain_anchor(
-            Some(floor),
-            BlockHeight::from(4 * interval + 1)
-        ));
-        assert!(!should_retain_anchor(
-            Some(floor),
-            BlockHeight::from(5 * interval - 1)
-        ));
+            // At or above the floor but not on the interval: not retained.
+            assert!(!should_retain_anchor(
+                retention,
+                BlockHeight::from(4 * blocks + 1)
+            ));
+            assert!(!should_retain_anchor(
+                retention,
+                BlockHeight::from(5 * blocks - 1)
+            ));
+        }
     }
 
     #[cfg(feature = "orchard")]
@@ -1915,5 +2062,77 @@ mod tests {
             prop_assert_eq!(ensure_orchard, sapling.clone());
             prop_assert_eq!(ensure_ironwood, union(&sapling, &orchard));
         }
+    }
+
+    /// THE anchor-retention obligation: a retained boundary landing on a block with no shielded
+    /// output in ANY pool must still be ensured in every pool.
+    ///
+    /// Cross-pool alignment cannot supply this one — it unions heights that some pool already
+    /// checkpointed, and here no pool did. Retention cannot supply it either: a policy preserves a
+    /// checkpoint, it never creates one. So the boundary is checkpointed by this step or by nothing,
+    /// and "by nothing" is silent — the wallet keeps scanning, balances stay correct, and only a
+    /// transaction pre-signed against that boundary ever notices, by being unprovable forever.
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn retained_boundary_on_a_commitment_free_block_is_ensured() {
+        let h = BlockHeight::from;
+        // Interval 12, so 1_200 is a boundary. Every pool's commitments sit elsewhere, which is the
+        // ordinary case on a sparse chain: most blocks carry no shielded output at all.
+        let retention = AnchorRetention::new(
+            h(1_000),
+            AnchorRetentionInterval::custom(NonZeroU32::new(12).unwrap()),
+        );
+
+        let (sap_cp, orch_cp, iw_cp) = (
+            BTreeSet::from([h(1_198)]),
+            BTreeSet::from([h(1_205)]),
+            BTreeSet::new(),
+        );
+
+        // CONTROL, so this test can never pass for the wrong reason: cross-pool alignment alone
+        // does NOT produce 1200. Were the retention union ever dropped, the assertions below would
+        // fail rather than silently agree with a weaker implementation.
+        for heights in cross_pool_ensure_heights(&sap_cp, &orch_cp, &iw_cp) {
+            assert!(
+                !heights.contains(&h(1_200)),
+                "cross-pool alignment must not supply the boundary; the union is what does"
+            );
+        }
+
+        let [sapling, orchard, ironwood] = batch_ensure_heights(
+            &sap_cp,
+            &orch_cp,
+            &iw_cp,
+            Some(&retention),
+            h(1_150)..=h(1_250),
+        );
+
+        for (pool, heights) in [
+            ("sapling", &sapling),
+            ("orchard", &orchard),
+            ("ironwood", &ironwood),
+        ] {
+            assert!(
+                heights.contains(&h(1_200)),
+                "{pool} must ensure the retained boundary 1200, got {heights:?}"
+            );
+        }
+    }
+
+    /// The retention step is additive, never substitutive: with no policy the result is EXACTLY
+    /// `cross_pool_ensure_heights`. This is what makes the composition safe to adopt at every call
+    /// site — a consumer that does not pre-sign against boundaries sees byte-identical behaviour.
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn no_retention_policy_is_exactly_cross_pool() {
+        let h = BlockHeight::from;
+        let sapling = BTreeSet::from([h(100), h(140)]);
+        let orchard = BTreeSet::from([h(120)]);
+        let ironwood = BTreeSet::from([h(160)]);
+
+        assert_eq!(
+            batch_ensure_heights(&sapling, &orchard, &ironwood, None, h(1)..=h(1_000)),
+            cross_pool_ensure_heights(&sapling, &orchard, &ironwood)
+        );
     }
 }

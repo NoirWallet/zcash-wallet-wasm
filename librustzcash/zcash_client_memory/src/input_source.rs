@@ -7,9 +7,10 @@ use zcash_client_backend::{
 use zcash_client_backend::{
     data_api::{
         AccountMeta, InputSource, NoteFilter, PoolMeta, ReceivedNotes, TargetValue, WalletRead,
+        locking::LockFilter,
         wallet::{ConfirmationsPolicy, TargetHeight},
     },
-    wallet::NoteId,
+    wallet::{NoteId, OutputRef},
 };
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
@@ -46,12 +47,38 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
     type AccountId = AccountId;
     type NoteRef = NoteId;
 
+    fn anchor_computable(
+        &self,
+        protocol: ShieldedPool,
+        height: zcash_protocol::consensus::BlockHeight,
+    ) -> Result<bool, Self::Error> {
+        Ok(match protocol {
+            ShieldedPool::Sapling => self
+                .sapling_tree
+                .root_at_checkpoint_id(&height)
+                .is_ok_and(|root| root.is_some()),
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Orchard => self
+                .orchard_tree
+                .root_at_checkpoint_id(&height)
+                .is_ok_and(|root| root.is_some()),
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Ironwood => self
+                .ironwood_tree
+                .root_at_checkpoint_id(&height)
+                .is_ok_and(|root| root.is_some()),
+            #[cfg(not(feature = "orchard"))]
+            _ => false,
+        })
+    }
+
     fn get_spendable_note(
         &self,
         txid: &zcash_primitives::transaction::TxId,
         protocol: ShieldedPool,
         index: u32,
         target_height: TargetHeight,
+        lock_filter: LockFilter<'_>,
     ) -> Result<
         Option<
             zcash_client_backend::wallet::ReceivedNote<
@@ -67,41 +94,23 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             .find(|rn| &rn.txid == txid && rn.note.pool() == protocol && rn.output_index == index);
 
         Ok(if let Some(note) = note {
-            if self.note_is_spent(note, target_height)? {
+            if self.note_is_spent(note, target_height)?
+                || !self.lock_allows(&note.note_id.into(), target_height.into(), lock_filter)
+            {
                 None
             } else {
-                let tx = self.tx_table.get_transaction(&note.txid);
+                let (mined_height, transparent_input_height) = self.note_transaction_heights(txid);
                 Some(zcash_client_backend::wallet::ReceivedNote::from_parts(
                     note.note_id,
                     *txid,
-                    index.try_into().unwrap(), // this overflow can never happen or else the chain is broken
+                    index.try_into().unwrap(),
                     note.note.clone(),
                     note.recipient_key_scope
                         .ok_or(Error::Missing("recipient key scope".into()))?,
                     note.commitment_tree_position
                         .ok_or(Error::Missing("commitment tree position".into()))?,
-                    tx.and_then(|tx| tx.mined_height()),
-                    // Find the maximum height among transparent inputs to the transaction that
-                    // produced this note.
-                    tx.and_then(|tx| {
-                        tx.raw()
-                            .and_then(|raw| {
-                                // The branch id here is irrelevant; it does not affect any APIs that we
-                                // end up using here.
-                                Transaction::read(raw, BranchId::Sapling).ok()
-                            })
-                            .and_then(|tx| {
-                                tx.transparent_bundle()
-                                    .iter()
-                                    .flat_map(|b| b.vin.iter())
-                                    .filter_map(|txin| {
-                                        self.tx_table
-                                            .get_transaction(txin.prevout().txid())
-                                            .and_then(|input_tx| input_tx.mined_height())
-                                    })
-                                    .max()
-                            })
-                    }),
+                    mined_height,
+                    transparent_input_height,
                 ))
             }
         } else {
@@ -117,6 +126,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         exclude: &[Self::NoteRef],
+        lock_filter: LockFilter<'_>,
     ) -> Result<zcash_client_backend::data_api::ReceivedNotes<Self::NoteRef>, Self::Error> {
         let sapling_eligible_notes = if sources.contains(&ShieldedPool::Sapling) {
             self.select_spendable_notes_from_pool(
@@ -126,6 +136,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
                 target_height,
                 confirmations_policy,
                 exclude,
+                lock_filter,
             )?
         } else {
             Vec::new()
@@ -140,6 +151,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
                 target_height,
                 confirmations_policy,
                 exclude,
+                lock_filter,
             )?
         } else {
             Vec::new()
@@ -154,6 +166,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
                 target_height,
                 confirmations_policy,
                 exclude,
+                lock_filter,
             )?
         } else {
             Vec::new()
@@ -165,6 +178,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             &orchard_eligible_notes,
             #[cfg(feature = "orchard")]
             &ironwood_eligible_notes,
+            |note| self.note_transaction_heights(&note.txid),
         )
     }
 
@@ -174,6 +188,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         _sources: &[ShieldedPool],
         _target_height: TargetHeight,
         _exclude: &[Self::NoteRef],
+        _lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
         unimplemented!()
     }
@@ -185,6 +200,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         output_filter: CoinbaseFilter,
+        lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         // TODO: take into consideration coinbase maturity
         // See <https://github.com/zcash/librustzcash/issues/821>
@@ -192,6 +208,17 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             .transparent_received_outputs
             .iter()
             .filter(|(_, txo)| txo.address == *address)
+            .filter(|(outpoint, _)| {
+                self.lock_allows(
+                    &OutputRef::new(
+                        *outpoint.txid(),
+                        zcash_protocol::PoolType::Transparent,
+                        outpoint.n(),
+                    ),
+                    target_height.into(),
+                    lock_filter,
+                )
+            })
             .map(|(outpoint, txo)| (outpoint, txo, self.tx_table.get(&txo.transaction_id)))
             .filter(|(outpoint, _, _)| {
                 self.utxo_is_spendable(outpoint, target_height, confirmations_policy)
@@ -228,6 +255,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         target_value: TargetValue,
         max_inputs: usize,
         fee_rule: &StandardFeeRule,
+        lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         let target_zat = match target_value {
             TargetValue::AtLeast(value) => Some(u64::from(value)),
@@ -238,6 +266,17 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             .transparent_received_outputs
             .iter()
             .filter(|(_, output)| output.account_id == account)
+            .filter(|(outpoint, _)| {
+                self.lock_allows(
+                    &OutputRef::new(
+                        *outpoint.txid(),
+                        zcash_protocol::PoolType::Transparent,
+                        outpoint.n(),
+                    ),
+                    target_height.into(),
+                    lock_filter,
+                )
+            })
             .filter(|(_, output)| {
                 address_allow_list.is_none_or(|addresses| addresses.contains(&output.address))
             })
@@ -262,9 +301,29 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             .collect::<Vec<_>>();
 
         eligible.sort_by(|a, b| {
-            b.value()
-                .cmp(&a.value())
-                .then_with(|| a.outpoint().cmp(b.outpoint()))
+            self.lock_order(
+                &OutputRef::new(
+                    *a.outpoint().txid(),
+                    zcash_protocol::PoolType::Transparent,
+                    a.outpoint().n(),
+                ),
+                target_height.into(),
+                lock_filter,
+            )
+            .cmp(&self.lock_order(
+                &OutputRef::new(
+                    *b.outpoint().txid(),
+                    zcash_protocol::PoolType::Transparent,
+                    b.outpoint().n(),
+                ),
+                target_height.into(),
+                lock_filter,
+            ))
+            .then_with(|| {
+                b.value()
+                    .cmp(&a.value())
+                    .then_with(|| a.outpoint().cmp(b.outpoint()))
+            })
         });
 
         let mut selected = Vec::new();
@@ -328,6 +387,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         selector: &NoteFilter,
         target_height: TargetHeight,
         exclude: &[Self::NoteRef],
+        lock_filter: LockFilter<'_>,
     ) -> Result<AccountMeta, Self::Error> {
         let confirmations_policy = ConfirmationsPolicy::new_symmetrical(
             NonZeroU32::MIN,
@@ -342,6 +402,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             target_height,
             confirmations_policy,
             exclude,
+            lock_filter,
         )?;
 
         #[cfg(feature = "orchard")]
@@ -352,6 +413,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             target_height,
             confirmations_policy,
             exclude,
+            lock_filter,
         )?;
         #[cfg(not(feature = "orchard"))]
         let orchard_pool_meta = None;
@@ -364,6 +426,7 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             target_height,
             confirmations_policy,
             exclude,
+            lock_filter,
         )?;
         #[cfg(not(feature = "orchard"))]
         let ironwood_pool_meta = None;
@@ -377,6 +440,37 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
 }
 
 impl<P: consensus::Parameters> MemoryWalletDb<P> {
+    fn note_transaction_heights(
+        &self,
+        txid: &zcash_primitives::transaction::TxId,
+    ) -> (
+        Option<zcash_protocol::consensus::BlockHeight>,
+        Option<zcash_protocol::consensus::BlockHeight>,
+    ) {
+        let tx = self.tx_table.get_transaction(txid);
+        let transparent_input_height = tx
+            .and_then(|entry| entry.raw())
+            .and_then(|raw| Transaction::read(raw, BranchId::Sapling).ok())
+            .and_then(|tx| {
+                tx.transparent_bundle().map(|bundle| {
+                    bundle
+                        .vin
+                        .iter()
+                        .filter_map(|input| {
+                            self.tx_table
+                                .get_transaction(input.prevout().txid())
+                                .and_then(|entry| entry.mined_height())
+                        })
+                        .max()
+                })
+            })
+            .flatten();
+        (
+            tx.and_then(|entry| entry.mined_height()),
+            transparent_input_height,
+        )
+    }
+
     // Select the spendable notes to cover the given target value considering only a single pool
     // Returns the notes sorted oldest to newest
     fn select_spendable_notes_from_pool(
@@ -387,6 +481,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         exclude: &[NoteId],
+        lock_filter: LockFilter<'_>,
     ) -> Result<Vec<&crate::ReceivedNote>, Error> {
         let birthday_height = match self.get_wallet_birthday()? {
             Some(birthday) => birthday,
@@ -403,6 +498,9 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .filter(|note| note.account_id == account)
             .filter(|note| note.note.pool() == *pool)
             .filter(|note| {
+                self.lock_allows(&note.note_id.into(), target_height.into(), lock_filter)
+            })
+            .filter(|note| {
                 self.note_is_spendable(
                     note,
                     birthday_height,
@@ -415,7 +513,12 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .collect::<Vec<_>>();
 
         // sort by oldest first (use location in commitment tree since this gives a total order)
-        eligible_notes.sort_by_key(|a| a.commitment_tree_position);
+        eligible_notes.sort_by_key(|a| {
+            (
+                self.lock_order(&a.note_id.into(), target_height.into(), lock_filter),
+                a.commitment_tree_position,
+            )
+        });
 
         // now take notes until we have enough to cover the target value
         let mut value_acc = Zatoshis::ZERO;
@@ -542,6 +645,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         exclude: &[NoteId],
+        lock_filter: LockFilter<'_>,
     ) -> Result<Option<PoolMeta>, Error> {
         let birthday_height = match self.get_wallet_birthday()? {
             Some(birthday) => birthday,
@@ -554,6 +658,9 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .iter()
             .filter(|note| note.account_id == account)
             .filter(|note| note.note.pool() == protocol)
+            .filter(|note| {
+                self.lock_allows(&note.note_id.into(), target_height.into(), lock_filter)
+            })
             .filter(|note| {
                 self.note_is_spendable(
                     note,

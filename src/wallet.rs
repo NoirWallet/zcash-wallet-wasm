@@ -31,9 +31,9 @@ use zcash_client_backend::data_api::wallet::input_selection::{
 };
 use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, SpendingKeys, TargetHeight, create_pczt_from_proposal,
-    create_proposed_transactions, create_proposed_transactions_with_expiry_height,
-    extract_and_store_transaction_from_pczt, propose_send_max_transfer,
-    propose_send_max_transparent_transfer, propose_shielding, propose_transfer,
+    create_proposed_transactions, extract_and_store_transaction_from_pczt,
+    propose_send_max_transfer, propose_send_max_transparent_transfer, propose_shielding,
+    propose_transfer,
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, TransactionDataRequest,
@@ -391,41 +391,23 @@ where
 {
     let prover = get_prover();
     let spending_keys = SpendingKeys::from_unified_spending_key(usk);
-    let result = match target_expiry_height {
-        Some(target_expiry_height) => create_proposed_transactions_with_expiry_height::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <FeeRuleT as FeeRule>::Error,
-            _,
-        >(
-            db,
-            network,
-            prover,
-            prover,
-            &spending_keys,
-            OvkPolicy::Sender,
-            proposal,
-            target_expiry_height,
-        ),
-        None => create_proposed_transactions::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <FeeRuleT as FeeRule>::Error,
-            _,
-        >(
-            db,
-            network,
-            prover,
-            prover,
-            &spending_keys,
-            OvkPolicy::Sender,
-            proposal,
-        ),
-    };
+    let result = create_proposed_transactions::<
+        _,
+        _,
+        <MemoryWalletDb<Network> as InputSource>::Error,
+        _,
+        <FeeRuleT as FeeRule>::Error,
+        _,
+    >(
+        db,
+        network,
+        prover,
+        prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        proposal,
+        target_expiry_height,
+    );
 
     result.map_err(|error| {
         Error::Generic(format!("Failed to create transfer transactions: {error:?}"))
@@ -1872,6 +1854,7 @@ where
             self.confirmations_policy(),
             &spend_policy,
             None,
+            None,
         ) {
             Ok(proposal) => Ok(proposal),
             Err(transfer_error) => {
@@ -1891,6 +1874,8 @@ where
                             memo,
                             MaxSpendMode::MaxSpendable,
                             self.confirmations_policy(),
+                            &Default::default(),
+                            None,
                         )
                         .ok();
 
@@ -2070,6 +2055,7 @@ where
             account_id,
             self.confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
+            None,
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
 
@@ -2087,7 +2073,7 @@ where
             OvkPolicy::Sender,
             &proposal,
             None,
-            orchard::builder::BundleType::DEFAULT,
+            zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
         )
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {e:?}")))?;
 
@@ -2176,6 +2162,7 @@ where
             self.confirmations_policy(),
             &spend_policy,
             None,
+            None,
         )
         .map_err(|e| {
             Error::Generic(format!(
@@ -2196,7 +2183,7 @@ where
             OvkPolicy::Sender,
             &proposal,
             None,
-            orchard::builder::BundleType::DEFAULT,
+            zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
         )
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {e:?}")))?;
         Ok(pczt)
@@ -2283,6 +2270,7 @@ where
             account_id,
             self.confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
+            None,
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
 
@@ -2301,7 +2289,7 @@ where
                 OvkPolicy::Sender,
                 &proposal,
                 Some(BlockHeight::from(proposal.min_target_height()) + expiry_delta_blocks),
-                orchard::builder::BundleType::DEFAULT,
+                zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
             ),
             None => create_pczt_from_proposal::<
                 _,
@@ -2317,7 +2305,7 @@ where
                 OvkPolicy::Sender,
                 &proposal,
                 None,
-                orchard::builder::BundleType::DEFAULT,
+                zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
             ),
         }
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {e:?}")))?;
@@ -2469,6 +2457,7 @@ where
             self.confirmations_policy(),
             &spend_policy,
             None,
+            None,
         ) {
             Ok(proposal) => proposal,
             Err(transfer_error) => {
@@ -2487,6 +2476,8 @@ where
                         memo,
                         MaxSpendMode::MaxSpendable,
                         self.confirmations_policy(),
+                        &Default::default(),
+                        None,
                     )
                     .ok()
                 } else {
@@ -2518,7 +2509,7 @@ where
                 OvkPolicy::Sender,
                 &proposal,
                 Some(BlockHeight::from(proposal.min_target_height()) + expiry_delta_blocks),
-                orchard::builder::BundleType::DEFAULT,
+                zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
             ),
             None => create_pczt_from_proposal::<
                 _,
@@ -2534,7 +2525,7 @@ where
                 OvkPolicy::Sender,
                 &proposal,
                 None,
-                orchard::builder::BundleType::DEFAULT,
+                zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
             ),
         }
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {e:?}")))?;
@@ -2600,6 +2591,8 @@ where
             memo,
             MaxSpendMode::MaxSpendable,
             self.confirmations_policy(),
+            &Default::default(),
+            None,
         )
         .map_err(|e| Error::Generic(format!("Failed to propose Orchard migration: {e:?}")))?
         .with_proposed_version(Some(TxVersion::V6));
@@ -2619,7 +2612,7 @@ where
             &proposal,
             expiry_delta_blocks
                 .map(|delta| BlockHeight::from(proposal.min_target_height()) + delta),
-            orchard::builder::BundleType::DEFAULT,
+            zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
         )
         .map_err(|e| Error::Generic(format!("Failed to create migration PCZT: {e:?}")))
     }
@@ -2674,6 +2667,8 @@ where
             memo,
             MaxSpendMode::MaxSpendable,
             self.confirmations_policy(),
+            &Default::default(),
+            None,
         )
         .map_err(|e| Error::Generic(format!("Failed to estimate Orchard migration: {e:?}")))?
         .with_proposed_version(Some(TxVersion::V6));
@@ -2735,6 +2730,7 @@ where
             account_id,
             self.confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
+            None,
         )
         .map_err(|e| Error::Generic(format!("Error when estimating shielding fee: {e:?}")))?;
 
@@ -2830,6 +2826,7 @@ where
             self.confirmations_policy(),
             &spend_policy,
             None,
+            None,
         )
         .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {e:?}")))?;
 
@@ -2860,6 +2857,8 @@ where
             memo,
             MaxSpendMode::MaxSpendable,
             self.confirmations_policy(),
+            &Default::default(),
+            None,
         )
         .map_err(|e| Error::Generic(format!("Error when estimating max transfer: {e:?}")))?;
 

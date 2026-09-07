@@ -1,6 +1,7 @@
 mod block_source;
 mod error;
 mod input_source;
+mod output_locks;
 pub mod proto;
 mod types;
 mod wallet_commitment_trees;
