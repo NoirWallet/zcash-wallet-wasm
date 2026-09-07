@@ -53,6 +53,9 @@ The session facade additionally exposes `VotingDb::round_session_json`, a
 wallet-scoped read of caller-owned round context. Missing rounds return an
 error, while a present round without context returns `None`. Schema and helper
 lifecycle semantics are unchanged.
+`VotingDb::round_params_with_network` similarly exposes a wallet-scoped read
+of the complete stored protocol parameters and network for recovery identity
+comparison, with safe errors for missing or unreadable records.
 
 Check out the proposed upstream commit separately, review protocol/schema and
 dependency changes, and merge the documented compatibility patches explicitly.

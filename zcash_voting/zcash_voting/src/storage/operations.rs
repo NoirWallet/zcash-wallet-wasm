@@ -453,6 +453,18 @@ impl VotingDb {
             })
     }
 
+    /// Loads the complete protocol parameters and network for this wallet's round.
+    pub fn round_params_with_network(
+        &self,
+        round_id: &str,
+    ) -> Result<(VotingRoundParams, Network), VotingError> {
+        queries::load_round_params_with_network(&self.conn(), round_id, &self.wallet_id()).map_err(
+            |_| VotingError::InvalidInput {
+                message: "round parameters are unavailable".into(),
+            },
+        )
+    }
+
     /// Get all votes for a round, including proposal, bundle, and choice.
     pub fn get_votes(&self, round_id: &str) -> Result<Vec<VoteRecord>, VotingError> {
         let conn = self.conn();

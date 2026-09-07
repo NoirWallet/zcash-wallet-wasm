@@ -189,9 +189,16 @@ impl VotingSessionInner {
         &self,
         round: &TrustedRound,
     ) -> Result<(), VotingApiError> {
-        if let Some(saved) = self.saved_identity(&round.summary.round_id)? {
-            round.compare_identity(&saved)?;
+        let id = &round.summary.round_id;
+        if !self.db.has_round(id).map_err(conflict)? {
+            return Ok(());
         }
+        let saved = self.saved_identity(id)?.ok_or_else(|| conflict(()))?;
+        let (params, network) = self.db.round_params_with_network(id).map_err(conflict)?;
+        if network != zcash_voting::Network::Testnet || params != saved.params {
+            return Err(conflict(()));
+        }
+        round.compare_identity(&saved)?;
         Ok(())
     }
     /// Call under the mutation guard before every future network/proof action.
@@ -324,7 +331,7 @@ impl VotingSessionInner {
                     plan.primary_action.as_str()
                 })
                 .into();
-            status.phase = if plan.all_decided && !plan.pending_recovery {
+            status.phase = if !roster.is_empty() && plan.all_decided && !plan.pending_recovery {
                 VotingRoundPhase::SharesConfirmed
             } else if status.total_bundles == 0 {
                 status.next_action = if cached.is_some() {
@@ -717,6 +724,203 @@ mod tests {
                 .code,
             VotingErrorCode::RoundExpired
         );
+    }
+    #[tokio::test]
+    async fn authorization_requires_identity_for_existing_cached_round() {
+        let (session, round) = session().await;
+        session
+            .db
+            .init_round(zcash_voting::Network::Testnet, &round.params, None)
+            .unwrap();
+        let err = session
+            .ensure_trusted_round_with(ID, async { panic!("cached round fetched") }, || Ok(1500))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, VotingErrorCode::RecoveryConflict);
+        let _writer = session.wallet.db.write().await;
+        let mut eligibility = Box::pin(session.check_eligibility_at(ID, || Ok(1500)));
+        assert!(matches!(
+            poll!(&mut eligibility),
+            std::task::Poll::Ready(Err(VotingApiError {
+                code: VotingErrorCode::RecoveryConflict,
+                ..
+            }))
+        ));
+    }
+    #[tokio::test]
+    async fn authorization_requires_identity_after_rediscovery_of_restored_round() {
+        let (session, round) = session().await;
+        session
+            .db
+            .init_round(zcash_voting::Network::Testnet, &round.params, None)
+            .unwrap();
+        let restored = open(
+            session.wallet.clone(),
+            session.account_id,
+            Some(&session.export_state().unwrap()),
+        )
+        .unwrap();
+        let fetched = Cell::new(false);
+        let err = restored
+            .ensure_trusted_round_with(
+                ID,
+                async {
+                    fetched.set(true);
+                    Ok(super::super::config::tests::discover(
+                        vec![super::super::config::tests::active()],
+                        1500,
+                    )
+                    .await)
+                },
+                || Ok(1500),
+            )
+            .await
+            .unwrap_err();
+        assert!(fetched.get());
+        assert_eq!(err.code, VotingErrorCode::RecoveryConflict);
+        assert!(!restored.export_state().unwrap().is_empty());
+        restored
+            .clear_round_with(ID, || async { Ok(()) })
+            .await
+            .unwrap();
+        assert!(!restored.db.has_round(ID).unwrap());
+    }
+    #[tokio::test]
+    async fn authorization_allows_new_round_after_authenticated_discovery() {
+        let (session, _) = session().await;
+        assert!(!session.db.has_round(ID).unwrap());
+        session
+            .ensure_trusted_round_with(ID, async { panic!("cached round fetched") }, || Ok(1500))
+            .await
+            .unwrap();
+        session.trusted_rounds.borrow_mut().clear();
+        session
+            .ensure_trusted_round_with(
+                ID,
+                async {
+                    Ok(super::super::config::tests::discover(
+                        vec![super::super::config::tests::active()],
+                        1500,
+                    )
+                    .await)
+                },
+                || Ok(1500),
+            )
+            .await
+            .unwrap();
+        assert!(!session.db.has_round(ID).unwrap());
+    }
+    async fn reject_stored_protocol_mismatch(field: &str) {
+        let (mut session, round) = session().await;
+        let mut params = round.params.clone();
+        let mut network = zcash_voting::Network::Testnet;
+        match field {
+            "snapshot" => params.snapshot_height += 1,
+            "authority" => params.ea_pk[0] ^= 1,
+            "commitment_root" => params.nc_root[0] ^= 1,
+            "nullifier_root" => params.nullifier_imt_root[0] ^= 1,
+            "network" => network = zcash_voting::Network::Mainnet,
+            _ => panic!("unknown fixture field"),
+        }
+        // A native DB allows testing the authorization boundary's network check
+        // independently of open_browser's earlier owner/network rejection.
+        session.db = VotingDb::open(":memory:").unwrap();
+        session.db.set_wallet_id(&session.wallet_id);
+        let envelope = VotingSessionEnvelope {
+            version: 1,
+            authenticated_round: round.identity(),
+        };
+        session
+            .db
+            .init_round(
+                network,
+                &params,
+                Some(&serde_json::to_string(&envelope).unwrap()),
+            )
+            .unwrap();
+        for cached in [true, false] {
+            if !cached {
+                session.trusted_rounds.borrow_mut().clear();
+            }
+            let err = session
+                .ensure_trusted_round_with(
+                    ID,
+                    async {
+                        assert!(!cached, "current authenticated cache should be reused");
+                        Ok(super::super::config::tests::discover(
+                            vec![super::super::config::tests::active()],
+                            1500,
+                        )
+                        .await)
+                    },
+                    || Ok(1500),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, VotingErrorCode::RecoveryConflict, "{field}");
+            assert_eq!(
+                err.message,
+                VotingApiError::new(VotingErrorCode::RecoveryConflict).message
+            );
+        }
+    }
+    #[tokio::test]
+    async fn authorization_rejects_stored_snapshot_mismatch() {
+        reject_stored_protocol_mismatch("snapshot").await;
+    }
+    #[tokio::test]
+    async fn authorization_rejects_stored_authority_mismatch() {
+        reject_stored_protocol_mismatch("authority").await;
+    }
+    #[tokio::test]
+    async fn authorization_rejects_stored_commitment_root_mismatch() {
+        reject_stored_protocol_mismatch("commitment_root").await;
+    }
+    #[tokio::test]
+    async fn authorization_rejects_stored_nullifier_root_mismatch() {
+        reject_stored_protocol_mismatch("nullifier_root").await;
+    }
+    #[tokio::test]
+    async fn authorization_rejects_stored_network_mismatch() {
+        reject_stored_protocol_mismatch("network").await;
+    }
+    #[tokio::test]
+    async fn restored_empty_roster_is_never_complete_even_after_expiry() {
+        let (session, round) = session().await;
+        let mut identity = round.identity();
+        identity.proposals.clear();
+        let envelope = VotingSessionEnvelope {
+            version: 1,
+            authenticated_round: identity,
+        };
+        session
+            .db
+            .init_round(
+                zcash_voting::Network::Testnet,
+                &round.params,
+                Some(&serde_json::to_string(&envelope).unwrap()),
+            )
+            .unwrap();
+        let restored = open(
+            session.wallet.clone(),
+            session.account_id,
+            Some(&session.export_state().unwrap()),
+        )
+        .unwrap();
+        assert!(restored.trusted_rounds.borrow().is_empty());
+        assert_eq!(*restored.selected_round_id.borrow(), Some(ID.into()));
+        for now in [1500, 2000, 2001] {
+            let status = restored.round_status_at(ID, now).unwrap();
+            assert_ne!(status.phase, VotingRoundPhase::SharesConfirmed);
+            assert_eq!(
+                status.phase,
+                if now < 2000 {
+                    VotingRoundPhase::Uninitialized
+                } else {
+                    VotingRoundPhase::Expired
+                }
+            );
+        }
     }
     #[tokio::test]
     async fn durable_status_uses_proposal_roster_and_terminal_rounds_do_not_conflict() {

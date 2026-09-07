@@ -34,6 +34,43 @@ fn round_session_context_distinguishes_absence_and_is_wallet_scoped() {
 }
 
 #[test]
+fn round_protocol_params_are_complete_and_wallet_scoped() {
+    use zcash_voting::{storage::VotingDb, Network, VotingRoundParams};
+    let db = VotingDb::open(":memory:").unwrap();
+    let params = VotingRoundParams {
+        vote_round_id: "01".repeat(32),
+        snapshot_height: 100,
+        ea_pk: vec![7; 32],
+        nc_root: vec![1; 32],
+        nullifier_imt_root: vec![2; 32],
+    };
+    db.set_wallet_id("owner-a");
+    assert!(db.round_params_with_network(&params.vote_round_id).is_err());
+    db.init_round(Network::Testnet, &params, None).unwrap();
+    assert_eq!(
+        db.round_params_with_network(&params.vote_round_id).unwrap(),
+        (params.clone(), Network::Testnet)
+    );
+    db.set_wallet_id("owner-b");
+    assert!(db.round_params_with_network(&params.vote_round_id).is_err());
+    let mut other = params.clone();
+    other.snapshot_height += 1;
+    other.ea_pk[0] ^= 1;
+    other.nc_root[0] ^= 1;
+    other.nullifier_imt_root[0] ^= 1;
+    db.init_round(Network::Mainnet, &other, None).unwrap();
+    assert_eq!(
+        db.round_params_with_network(&params.vote_round_id).unwrap(),
+        (other, Network::Mainnet)
+    );
+    db.set_wallet_id("owner-a");
+    assert_eq!(
+        db.round_params_with_network(&params.vote_round_id).unwrap(),
+        (params, Network::Testnet)
+    );
+}
+
+#[test]
 fn authenticated_config_round_params_bind_only_the_signed_authority_key() {
     use sha2::{Digest, Sha256};
     use zcash_voting::config::{
