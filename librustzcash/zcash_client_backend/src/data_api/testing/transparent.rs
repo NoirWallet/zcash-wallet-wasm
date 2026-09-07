@@ -2790,6 +2790,138 @@ where
     );
 }
 
+/// Tests that a TEX payment funded exclusively by a wallet transparent UTXO is proposed
+/// and created as a fully-transparent ZIP 320 transaction pair.
+pub fn propose_t2tex_with_transparent_funding<DSF>(dsf: DSF, cache: impl TestCache)
+where
+    DSF: DataStoreFactory,
+{
+    use std::convert::Infallible;
+
+    use crate::{
+        fees::{SplitPolicy, TransparentChangePolicy},
+        proposal::{StepOutput, StepOutputIndex},
+        wallet::OvkPolicy,
+    };
+
+    let utxo_value = Zatoshis::const_from_u64(100_000);
+    let transfer_amount = Zatoshis::const_from_u64(40_000);
+    let (mut st, account, outpoint) = setup_transparent_only_account(dsf, cache, utxo_value);
+
+    let tex_address = Address::Tex([7u8; 20]);
+    let tex_recipient = tex_address.to_zcash_address(st.network());
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        tex_recipient.clone(),
+        transfer_amount,
+    )])
+    .unwrap();
+
+    let input_selector = GreedyInputSelector::new();
+    let spend_policy = SpendPolicy::shielded_pools(std::iter::empty::<ShieldedPool>())
+        .with_transparent(TransparentSpendPolicy::any_account_addr());
+    let change_strategy = standard::MultiOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        None,
+        ShieldedPool::Orchard,
+        DustOutputPolicy::default(),
+        SplitPolicy::single_output(),
+    )
+    .with_transparent_change_policy(TransparentChangePolicy::TransparentChangeAllowed);
+
+    let proposal = st
+        .propose_transfer_with_policy(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+            &spend_policy,
+        )
+        .expect("transparent-funded TEX proposal must succeed");
+
+    let steps: Vec<_> = proposal.steps().iter().collect();
+    assert_eq!(steps.len(), 2);
+
+    let first_step = steps[0];
+    assert_eq!(first_step.transparent_inputs().len(), 1);
+    assert_eq!(first_step.transparent_inputs()[0].outpoint(), &outpoint);
+    assert!(first_step.shielded_inputs().is_none());
+    let ephemeral_outputs: Vec<_> = first_step
+        .balance()
+        .proposed_change()
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.is_ephemeral())
+        .collect();
+    assert_eq!(ephemeral_outputs.len(), 1);
+    let ephemeral_output_index = ephemeral_outputs[0].0;
+
+    let second_step = steps[1];
+    assert!(second_step.transparent_inputs().is_empty());
+    assert!(second_step.shielded_inputs().is_none());
+    assert_eq!(
+        second_step.prior_step_inputs(),
+        [StepOutput::new(
+            0,
+            StepOutputIndex::Change(ephemeral_output_index),
+        )]
+    );
+    assert_eq!(second_step.transaction_request().payments().len(), 1);
+    let tex_payment = second_step
+        .transaction_request()
+        .payments()
+        .get(&0)
+        .expect("the TEX payment is retained in the second step");
+    assert_eq!(tex_payment.recipient_address(), &tex_recipient);
+    assert_eq!(tex_payment.amount(), Some(transfer_amount));
+
+    let txids = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .expect("native transaction creation must succeed");
+    assert_eq!(txids.len(), 2);
+    let first_txid = *txids.first();
+    let second_txid = *txids.last();
+    assert_ne!(first_txid, second_txid);
+
+    let first_tx = st
+        .wallet()
+        .get_transaction(first_txid)
+        .unwrap()
+        .expect("the first transaction is stored");
+    let second_tx = st
+        .wallet()
+        .get_transaction(second_txid)
+        .unwrap()
+        .expect("the second transaction is stored");
+    assert_eq!(first_tx.txid(), first_txid);
+    assert_eq!(second_tx.txid(), second_txid);
+    for tx in [&first_tx, &second_tx] {
+        assert!(tx.sapling_bundle().is_none());
+        assert!(tx.orchard_bundle().is_none());
+        assert!(tx.ironwood_bundle().is_none());
+    }
+
+    let first_bundle = first_tx
+        .transparent_bundle()
+        .expect("the first transaction has a transparent bundle");
+    assert_eq!(first_bundle.vin.len(), 1);
+    assert_eq!(first_bundle.vin[0].prevout(), &outpoint);
+
+    let second_bundle = second_tx
+        .transparent_bundle()
+        .expect("the second transaction has a transparent bundle");
+    assert_eq!(second_bundle.vin.len(), 1);
+    assert_eq!(second_bundle.vin[0].prevout().txid(), &first_txid);
+    assert!(second_bundle.vout.iter().any(|output| {
+        output.recipient_address() == Some(TransparentAddress::PublicKeyHash([7u8; 20]))
+            && output.value() == transfer_amount
+    }));
+}
+
 /// Tests that when a fully-transparent transaction balances exactly (input value equals
 /// payments plus the minimum fee), no transparent change output is produced even when the
 /// change strategy is configured with [`TransparentChangePolicy::TransparentChangeAllowed`].

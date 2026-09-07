@@ -1444,7 +1444,24 @@ Instead derive the ufvk in the calling code and import it using `import_account_
         status: TransactionStatus,
     ) -> Result<(), Self::Error> {
         tracing::debug!("set_transaction_status");
-        self.tx_table.set_transaction_status(&txid, status)
+        self.tx_table.set_transaction_status(&txid, status)?;
+        let request_resolved = match status {
+            TransactionStatus::Mined(_) => true,
+            TransactionStatus::TxidNotRecognized | TransactionStatus::NotInMainChain => {
+                match (
+                    self.tx_table.get(&txid).and_then(|tx| tx.expiry_height()),
+                    self.chain_height()?,
+                ) {
+                    (Some(expiry_height), Some(chain_height)) => chain_height > expiry_height,
+                    _ => false,
+                }
+            }
+        };
+        if request_resolved {
+            self.transaction_data_request_queue
+                .remove_status_retrieval(&txid);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -1536,10 +1553,23 @@ Instead derive the ufvk in the calling code and import it using `import_account_
     #[cfg(feature = "transparent-inputs")]
     fn notify_address_checked(
         &mut self,
-        _request: TransactionsInvolvingAddress,
-        _as_of_height: BlockHeight,
+        request: TransactionsInvolvingAddress,
+        as_of_height: BlockHeight,
     ) -> Result<(), Self::Error> {
-        todo!()
+        for (outpoint, output) in self.transparent_received_outputs.iter_mut() {
+            if output.address == request.address()
+                && !self
+                    .transparent_received_output_spends
+                    .contains_key(outpoint)
+            {
+                output.max_observed_unspent_height = Some(
+                    output
+                        .max_observed_unspent_height
+                        .map_or(as_of_height, |height| height.max(as_of_height)),
+                );
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "transparent-key-import")]

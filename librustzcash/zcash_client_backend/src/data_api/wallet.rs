@@ -1114,6 +1114,96 @@ where
     ParamsT: consensus::Parameters + Clone,
     FeeRuleT: FeeRule,
 {
+    create_proposed_transactions_internal(
+        wallet_db,
+        params,
+        spend_prover,
+        output_prover,
+        spending_keys,
+        ovk_policy,
+        proposal,
+        None,
+    )
+}
+
+/// Construct, prove, and sign a transaction or series of transactions using the inputs supplied by
+/// the given proposal, and persist it to the wallet database, using `target_expiry_height` for
+/// every transaction in the proposal.
+///
+/// Returns the database identifier for each newly constructed transaction, or an error if
+/// an error occurs in transaction construction, proving, signing, or persistence.
+///
+/// A nonzero `target_expiry_height` below the proposal's
+/// [`min_target_height`](Proposal::min_target_height) is rejected with
+/// [`Error::ExpiryHeightBelowTargetHeight`]. A `target_expiry_height` of zero,
+/// which disables expiry, is exempt from this check.
+///
+/// When evaluating multi-step proposals, only transparent outputs of any given step may be spent
+/// in later steps; attempting to spend a shielded note (including change) output by an earlier
+/// step is not supported, because the ultimate positions of those notes in the global note
+/// commitment tree cannot be known until the transaction that produces those notes is mined,
+/// and therefore the required spend proofs for such notes cannot be constructed.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+pub fn create_proposed_transactions_with_expiry_height<
+    DbT,
+    ParamsT,
+    InputsErrT,
+    FeeRuleT,
+    ChangeErrT,
+    N,
+>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    spend_prover: &impl SpendProver,
+    output_prover: &impl OutputProver,
+    spending_keys: &SpendingKeys,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    target_expiry_height: BlockHeight,
+) -> Result<NonEmpty<TxId>, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+{
+    let min_target_height = BlockHeight::from(proposal.min_target_height());
+    if target_expiry_height != consensus::H0 && target_expiry_height < min_target_height {
+        return Err(Error::ExpiryHeightBelowTargetHeight {
+            expiry_height: target_expiry_height,
+            min_target_height,
+        });
+    }
+
+    create_proposed_transactions_internal(
+        wallet_db,
+        params,
+        spend_prover,
+        output_prover,
+        spending_keys,
+        ovk_policy,
+        proposal,
+        Some(target_expiry_height),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+fn create_proposed_transactions_internal<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    spend_prover: &impl SpendProver,
+    output_prover: &impl OutputProver,
+    spending_keys: &SpendingKeys,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    target_expiry_height: Option<BlockHeight>,
+) -> Result<NonEmpty<TxId>, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+{
     // The transaction version is carried on the proposal, chosen when the proposal was
     // constructed; `None` builds at the version implied by the target height.
     let proposed_version = proposal.proposed_version();
@@ -1147,6 +1237,7 @@ where
             step,
             #[cfg(feature = "transparent-inputs")]
             &mut unused_transparent_outputs,
+            target_expiry_height,
             proposed_version,
         )?;
         step_results.push((step, step_result));
@@ -1352,6 +1443,7 @@ fn build_proposed_transaction<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>
         StepOutput,
         (TransparentAddress, OutPoint),
     >,
+    target_expiry_height: Option<BlockHeight>,
     proposed_version: Option<TxVersion>,
     // The transactional bundle type for the Orchard and Ironwood bundles; the PCZT path
     // threads the proposal's configured type here, other callers pass `BundleType::DEFAULT`.
@@ -1563,6 +1655,10 @@ where
             orchard_pool_bundle_type,
         },
     );
+
+    if let Some(expiry_height) = target_expiry_height {
+        builder = builder.with_expiry_height(expiry_height);
+    }
 
     if let Some(version) = proposed_version {
         builder.propose_version(version)?;
@@ -2175,6 +2271,7 @@ fn create_proposed_transaction<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N
         StepOutput,
         (TransparentAddress, OutPoint),
     >,
+    target_expiry_height: Option<BlockHeight>,
     proposed_version: Option<TxVersion>,
 ) -> Result<
     StepResult<<DbT as WalletRead>::AccountId>,
@@ -2197,6 +2294,7 @@ where
         proposal_step,
         #[cfg(feature = "transparent-inputs")]
         unused_transparent_outputs,
+        target_expiry_height,
         proposed_version,
         // The non-PCZT path always builds padded Orchard-pool bundles.
         BundleType::DEFAULT,
@@ -2517,6 +2615,7 @@ where
         proposal_step,
         #[cfg(feature = "transparent-inputs")]
         unused_transparent_outputs,
+        None,
         proposed_version,
         orchard_pool_bundle_type,
     )?;

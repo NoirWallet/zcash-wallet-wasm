@@ -2951,6 +2951,14 @@ mod tests {
     }
 
     #[test]
+    fn propose_t2tex_with_transparent_funding() {
+        zcash_client_backend::data_api::testing::transparent::propose_t2tex_with_transparent_funding(
+            TestDbFactory::default(),
+            BlockCache::new(),
+        );
+    }
+
+    #[test]
     fn propose_t2t_transparent_change_exact_match() {
         zcash_client_backend::data_api::testing::transparent::propose_t2t_transparent_change_exact_match(
             TestDbFactory::default(),

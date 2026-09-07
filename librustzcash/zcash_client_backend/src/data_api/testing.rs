@@ -57,6 +57,7 @@ use super::{
     scanning::ScanRange,
     wallet::{
         ConfirmationsPolicy, SpendingKeys, create_proposed_transactions,
+        create_proposed_transactions_with_expiry_height,
         input_selection::{GreedyInputSelector, InputSelector, SpendPolicy},
         propose_send_max_transfer, propose_standard_transfer_to_address, propose_transfer,
     },
@@ -1319,6 +1320,32 @@ where
             &SpendingKeys::from_unified_spending_key(usk.clone()),
             ovk_policy,
             proposal,
+        )
+    }
+
+    /// Invokes [`create_proposed_transactions_with_expiry_height`] with the given arguments.
+    #[allow(clippy::type_complexity)]
+    pub fn create_proposed_transactions_with_expiry_height<InputsErrT, FeeRuleT, ChangeErrT, N>(
+        &mut self,
+        usk: &UnifiedSpendingKey,
+        ovk_policy: OvkPolicy,
+        proposal: &Proposal<FeeRuleT, N>,
+        target_expiry_height: BlockHeight,
+    ) -> Result<NonEmpty<TxId>, super::wallet::CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+    where
+        FeeRuleT: FeeRule,
+    {
+        let prover = LocalTxProver::bundled();
+        let network = self.network().clone();
+        create_proposed_transactions_with_expiry_height(
+            self.wallet_mut(),
+            &network,
+            &prover,
+            &prover,
+            &SpendingKeys::from_unified_spending_key(usk.clone()),
+            ovk_policy,
+            proposal,
+            target_expiry_height,
         )
     }
 

@@ -16,6 +16,17 @@ pub(crate) fn send_single_step_proposed_transfer<T: ShieldedPoolTester>() {
     )
 }
 
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn spend_everything_multi_step_single_note_proposed_transfer<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::spend_everything_multi_step_single_note_proposed_transfer::<
+        T,
+        _,
+    >(
+        TestMemDbFactory::new(),
+        MemBlockCache::new(),
+    )
+}
+
 #[cfg(feature = "orchard")]
 pub(crate) fn orchard_send_max_routes_to_ironwood() {
     use std::convert::Infallible;

@@ -10,10 +10,12 @@ use sapling::ProofGenerationKey;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use subtle::ConditionallySelectable;
@@ -28,13 +30,14 @@ use zcash_client_backend::data_api::wallet::input_selection::{
     GreedyInputSelector, SpendPolicy, TransparentSpendPolicy,
 };
 use zcash_client_backend::data_api::wallet::{
-    ConfirmationsPolicy, create_pczt_from_proposal, extract_and_store_transaction_from_pczt,
-    propose_send_max_transfer, propose_send_max_transparent_transfer, propose_shielding,
-    propose_transfer,
+    ConfirmationsPolicy, SpendingKeys, TargetHeight, create_pczt_from_proposal,
+    create_proposed_transactions, create_proposed_transactions_with_expiry_height,
+    extract_and_store_transaction_from_pczt, propose_send_max_transfer,
+    propose_send_max_transparent_transfer, propose_shielding, propose_transfer,
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, TransactionDataRequest,
-    WalletSummary, Zip32Derivation,
+    TransactionStatus, WalletSummary, Zip32Derivation,
 };
 use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
 use zcash_client_backend::fees::{
@@ -51,7 +54,10 @@ use zcash_primitives::transaction::fees::{FeeRule, zip317 as prim_zip317};
 use zcash_primitives::transaction::{TxId, TxVersion};
 use zcash_proofs::prover::LocalTxProver;
 
-use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+use zcash_keys::{
+    encoding::AddressCodec,
+    keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
+};
 use zcash_protocol::ShieldedPool;
 use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkUpgrade, Parameters};
 use zcash_protocol::memo::MemoBytes;
@@ -66,6 +72,22 @@ const BATCH_SIZE: u32 = 10000;
 /// constant that signals what's the minimum transparent balance for proposing a
 /// shielding transaction
 const SHIELDING_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(100000);
+
+fn transaction_status_from_raw_height(
+    txid: TxId,
+    raw_height: u64,
+) -> Result<TransactionStatus, Error> {
+    match raw_height {
+        0 | u64::MAX => Ok(TransactionStatus::NotInMainChain),
+        height => Ok(TransactionStatus::Mined(BlockHeight::from_u32(
+            u32::try_from(height).map_err(|_| {
+                Error::Generic(format!(
+                    "Invalid mined height {height} for transaction {txid}"
+                ))
+            })?,
+        ))),
+    }
+}
 
 fn dynamic_zip317_fee_rule(marginal_fee_zats: u64) -> Result<prim_zip317::FeeRule, Error> {
     if marginal_fee_zats == 0 {
@@ -93,12 +115,205 @@ fn validate_expiry_delta_blocks(expiry_delta_blocks: u32) -> Result<u32, Error> 
     }
 }
 
+fn transfer_expiry_height(
+    min_target_height: TargetHeight,
+    expiry_delta_blocks: Option<u32>,
+) -> Result<Option<BlockHeight>, Error> {
+    expiry_delta_blocks
+        .map(validate_expiry_delta_blocks)
+        .transpose()
+        .map(|delta| delta.map(|delta| BlockHeight::from(min_target_height) + delta))
+}
+
 fn transparent_transfer_policies() -> (SpendPolicy, TransparentChangePolicy) {
     (
         SpendPolicy::shielded_pools(std::iter::empty::<ShieldedPool>())
             .with_transparent(TransparentSpendPolicy::any_account_addr()),
         TransparentChangePolicy::TransparentChangeAllowed,
     )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransferFundingSource {
+    Shielded,
+    Transparent,
+}
+
+impl FromStr for TransferFundingSource {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "shielded" => Ok(Self::Shielded),
+            "transparent" => Ok(Self::Transparent),
+            other => Err(Error::InvalidTransferFundingSource(other.to_owned())),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TransferOverallStatus {
+    Success,
+    Partial,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TransferSubmissionStatus {
+    Submitted,
+    Rejected,
+    Unknown,
+    NotAttempted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransferTransactionResult {
+    tx_id: String,
+    status: TransferSubmissionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransferResult {
+    status: TransferOverallStatus,
+    tx_ids: Vec<String>,
+    final_tx_id: String,
+    transactions: Vec<TransferTransactionResult>,
+}
+
+impl TransferResult {
+    fn from_transactions(transactions: Vec<TransferTransactionResult>) -> Self {
+        let final_tx_id = transactions
+            .last()
+            .expect("transfer transactions must be non-empty")
+            .tx_id
+            .clone();
+        let tx_ids = transactions.iter().map(|tx| tx.tx_id.clone()).collect();
+        let submitted = transactions
+            .iter()
+            .filter(|tx| tx.status == TransferSubmissionStatus::Submitted)
+            .count();
+        let status = if submitted == transactions.len() {
+            TransferOverallStatus::Success
+        } else if submitted > 0 {
+            TransferOverallStatus::Partial
+        } else {
+            TransferOverallStatus::Failed
+        };
+
+        Self {
+            status,
+            tx_ids,
+            final_tx_id,
+            transactions,
+        }
+    }
+}
+
+async fn submit_transfer_transactions_with<F, Fut>(
+    transactions: NonEmpty<(TxId, service::RawTransaction)>,
+    mut submit: F,
+) -> TransferResult
+where
+    F: FnMut(service::RawTransaction) -> Fut,
+    Fut: Future<Output = Result<service::SendResponse, tonic::Status>>,
+{
+    let mut stopped = false;
+    let mut results = Vec::with_capacity(transactions.len());
+
+    for (txid, raw_tx) in transactions {
+        let tx_id = txid.to_string();
+        let result = if stopped {
+            TransferTransactionResult {
+                tx_id,
+                status: TransferSubmissionStatus::NotAttempted,
+                error_code: None,
+                error_message: None,
+            }
+        } else {
+            match submit(raw_tx).await {
+                Ok(response) if response.error_code == 0 => TransferTransactionResult {
+                    tx_id,
+                    status: TransferSubmissionStatus::Submitted,
+                    error_code: None,
+                    error_message: None,
+                },
+                Ok(response) => {
+                    stopped = true;
+                    TransferTransactionResult {
+                        tx_id,
+                        status: TransferSubmissionStatus::Rejected,
+                        error_code: Some(response.error_code),
+                        error_message: Some(response.error_message),
+                    }
+                }
+                Err(status) => {
+                    stopped = true;
+                    TransferTransactionResult {
+                        tx_id,
+                        status: TransferSubmissionStatus::Unknown,
+                        error_code: None,
+                        error_message: Some(status.to_string()),
+                    }
+                }
+            }
+        };
+        results.push(result);
+    }
+
+    TransferResult::from_transactions(results)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransferEstimate {
+    amount_zats: String,
+    fee_zats: String,
+    transaction_count: usize,
+    step_fees_zats: Vec<String>,
+}
+
+impl TransferEstimate {
+    fn from_amount_and_step_fees(
+        amount: Zatoshis,
+        step_fees: impl IntoIterator<Item = Zatoshis>,
+    ) -> Result<Self, Error> {
+        let mut fee = Zatoshis::ZERO;
+        let mut step_fees_zats = vec![];
+
+        for step_fee in step_fees {
+            fee = (fee + step_fee).ok_or(zcash_protocol::value::BalanceError::Overflow)?;
+            step_fees_zats.push(u64::from(step_fee).to_string());
+        }
+
+        Ok(Self {
+            amount_zats: u64::from(amount).to_string(),
+            fee_zats: u64::from(fee).to_string(),
+            transaction_count: step_fees_zats.len(),
+            step_fees_zats,
+        })
+    }
+}
+
+fn transfer_policies(source: TransferFundingSource) -> (SpendPolicy, TransparentChangePolicy) {
+    match source {
+        TransferFundingSource::Shielded => (
+            SpendPolicy::default(),
+            TransparentChangePolicy::ShieldChange,
+        ),
+        TransferFundingSource::Transparent => transparent_transfer_policies(),
+    }
+}
+
+fn allow_exact_send_max_fallback(source: TransferFundingSource, has_dynamic_fee: bool) -> bool {
+    source == TransferFundingSource::Shielded && has_dynamic_fee
 }
 
 fn proposal_fee_required_zats<FeeRuleT, NoteRef>(
@@ -138,6 +353,18 @@ fn proposal_payment_amount_zats<FeeRuleT, NoteRef>(
     Ok(amount.into())
 }
 
+fn transfer_estimate_from_proposal<FeeRuleT, NoteRef>(
+    proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
+) -> Result<TransferEstimate, Error> {
+    TransferEstimate::from_amount_and_step_fees(
+        Zatoshis::from_u64(proposal_payment_amount_zats(proposal)?)?,
+        proposal
+            .steps()
+            .iter()
+            .map(|step| step.balance().fee_required()),
+    )
+}
+
 /// Global prover instance, initialized once on first use
 /// This avoids repeatedly loading the expensive Sapling parameters
 static PROVER: OnceLock<LocalTxProver> = OnceLock::new();
@@ -147,6 +374,64 @@ fn get_prover() -> &'static LocalTxProver {
     PROVER.get_or_init(|| {
         tracing::info!("🔧 Initializing LocalTxProver (loading Sapling parameters)...");
         LocalTxProver::bundled()
+    })
+}
+
+fn create_and_store_transfer<W, FeeRuleT>(
+    db: &mut W,
+    network: &Network,
+    usk: UnifiedSpendingKey,
+    proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, <W as InputSource>::NoteRef>,
+    target_expiry_height: Option<BlockHeight>,
+) -> Result<NonEmpty<TxId>, Error>
+where
+    W: WalletWrite + WalletCommitmentTrees + InputSource,
+    FeeRuleT: FeeRule,
+    FeeRuleT::Error: Debug,
+    <W as WalletRead>::Error: Debug,
+    <W as WalletCommitmentTrees>::Error: Debug,
+    <W as InputSource>::NoteRef: Debug,
+{
+    let prover = get_prover();
+    let spending_keys = SpendingKeys::from_unified_spending_key(usk);
+    let result = match target_expiry_height {
+        Some(target_expiry_height) => create_proposed_transactions_with_expiry_height::<
+            _,
+            _,
+            <MemoryWalletDb<Network> as InputSource>::Error,
+            _,
+            <FeeRuleT as FeeRule>::Error,
+            _,
+        >(
+            db,
+            network,
+            prover,
+            prover,
+            &spending_keys,
+            OvkPolicy::Sender,
+            proposal,
+            target_expiry_height,
+        ),
+        None => create_proposed_transactions::<
+            _,
+            _,
+            <MemoryWalletDb<Network> as InputSource>::Error,
+            _,
+            <FeeRuleT as FeeRule>::Error,
+            _,
+        >(
+            db,
+            network,
+            prover,
+            prover,
+            &spending_keys,
+            OvkPolicy::Sender,
+            proposal,
+        ),
+    };
+
+    result.map_err(|error| {
+        Error::Generic(format!("Failed to create transfer transactions: {error:?}"))
     })
 }
 
@@ -552,7 +837,7 @@ where
         .await
         .map_err(|error| -> Error { error.into() })?;
         drop(db);
-        self.enhance_pending_transactions().await
+        self.process_pending_transaction_requests().await
     }
 
     /// Runs a single batch of the sync process without looping.
@@ -572,7 +857,7 @@ where
         .await
         .map_err(|error| -> Error { error.into() })?;
         drop(db);
-        self.enhance_pending_transactions().await?;
+        self.process_pending_transaction_requests().await?;
         Ok(did_work)
     }
 
@@ -591,46 +876,63 @@ where
         .await
         .map_err(|error| -> Error { error.into() })?;
         drop(db);
-        self.enhance_pending_transactions().await?;
+        self.process_pending_transaction_requests().await?;
         Ok(did_work)
     }
 
-    pub(crate) async fn enhance_pending_transactions(&self) -> Result<(), Error> {
-        let txids = {
+    pub(crate) async fn process_pending_transaction_requests(&self) -> Result<(), Error> {
+        let transaction_requests = {
             let db = self.db.read().await;
-            db.transaction_data_requests()?
-                .into_iter()
-                .filter_map(|request| match request {
-                    TransactionDataRequest::Enhancement(txid) => Some(txid),
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>()
+            db.transaction_data_requests()?.into_iter().fold(
+                BTreeMap::new(),
+                |mut requests, request| {
+                    match request {
+                        TransactionDataRequest::GetStatus(txid) => {
+                            requests.entry(txid).or_insert(false);
+                        }
+                        TransactionDataRequest::Enhancement(txid) => {
+                            requests.insert(txid, true);
+                        }
+                        _ => {}
+                    }
+                    requests
+                },
+            )
         };
 
-        if txids.is_empty() {
-            return Ok(());
-        }
-
         let mut client = self.client.clone();
-        for requested_txid in txids {
-            let raw = client
+        for (requested_txid, needs_enhancement) in transaction_requests {
+            let raw = match client
                 .get_transaction(service::TxFilter {
                     block: None,
                     index: 0,
                     hash: requested_txid.as_ref().to_vec(),
                 })
-                .await?
-                .into_inner();
+                .await
+            {
+                Ok(response) => response.into_inner(),
+                Err(status) if !needs_enhancement && status.code() == tonic::Code::NotFound => {
+                    let mut db = self.db.write().await;
+                    db.set_transaction_status(
+                        requested_txid,
+                        TransactionStatus::TxidNotRecognized,
+                    )?;
+                    continue;
+                }
+                Err(status) => return Err(status.into()),
+            };
 
-            let mined_height = match raw.height {
-                0 | u64::MAX => None,
-                height => Some(BlockHeight::from_u32(u32::try_from(height).map_err(
-                    |_| {
-                        Error::Generic(format!(
-                            "Invalid mined height {height} for transaction {requested_txid}"
-                        ))
-                    },
-                )?)),
+            let status = transaction_status_from_raw_height(requested_txid, raw.height)?;
+            if !needs_enhancement {
+                let mut db = self.db.write().await;
+                db.set_transaction_status(requested_txid, status)?;
+                continue;
+            }
+
+            let mined_height = match status {
+                TransactionStatus::Mined(height) => Some(height),
+                TransactionStatus::NotInMainChain => None,
+                TransactionStatus::TxidNotRecognized => unreachable!(),
             };
             let parse_height = match mined_height {
                 Some(height) => height,
@@ -661,6 +963,88 @@ where
             decrypt_and_store_transaction(&self.network, &mut *db, &tx, mined_height)?;
         }
 
+        let address_requests = {
+            let db = self.db.read().await;
+            db.transaction_data_requests()?
+                .into_iter()
+                .filter_map(|request| match request {
+                    TransactionDataRequest::TransactionsInvolvingAddress(request) => Some(request),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+
+        for request in address_requests {
+            if request
+                .request_at()
+                .is_some_and(|request_at| request_at > std::time::SystemTime::now())
+            {
+                continue;
+            }
+
+            let chain_tip_height = {
+                let db = self.db.read().await;
+                db.chain_height()?.ok_or_else(|| {
+                    Error::Generic(
+                        "Unable to process transparent transaction request without chain height"
+                            .to_string(),
+                    )
+                })?
+            };
+            let block_range_end = request
+                .block_range_end()
+                .unwrap_or(chain_tip_height + 1)
+                .min(chain_tip_height + 1);
+            if block_range_end <= request.block_range_start() {
+                continue;
+            }
+            let as_of_height = block_range_end - 1;
+
+            let mut transactions = client
+                .get_taddress_txids(service::TransparentAddressBlockFilter {
+                    address: request.address().encode(&self.network),
+                    range: Some(service::BlockRange {
+                        start: Some(service::BlockId {
+                            height: u64::from(request.block_range_start()),
+                            hash: vec![],
+                        }),
+                        end: Some(service::BlockId {
+                            height: u64::from(as_of_height),
+                            hash: vec![],
+                        }),
+                        pool_types: vec![],
+                    }),
+                })
+                .await?
+                .into_inner();
+
+            while let Some(raw) = transactions.try_next().await? {
+                let mined_height = match raw.height {
+                    0 | u64::MAX => {
+                        return Err(Error::Generic(format!(
+                            "Transparent transaction query returned unmined transaction at height {}",
+                            raw.height
+                        )));
+                    }
+                    height => BlockHeight::from_u32(u32::try_from(height).map_err(|_| {
+                        Error::Generic(format!(
+                            "Invalid mined height {height} returned for transparent transaction"
+                        ))
+                    })?),
+                };
+                let tx = zcash_primitives::transaction::Transaction::read(
+                    raw.data.as_slice(),
+                    BranchId::for_height(&self.network, mined_height),
+                )?;
+
+                let mut db = self.db.write().await;
+                decrypt_and_store_transaction(&self.network, &mut *db, &tx, Some(mined_height))?;
+            }
+
+            let mut db = self.db.write().await;
+            db.notify_address_checked(request, as_of_height)?;
+        }
+
         Ok(())
     }
 
@@ -672,10 +1056,14 @@ where
         use zcash_client_backend::proto::service;
 
         let mut client = self.client.clone();
-        let mut start_id = service::BlockId::default();
-        start_id.height = start_height as u64;
-        let mut end_id = service::BlockId::default();
-        end_id.height = (start_height + count - 1) as u64;
+        let start_id = service::BlockId {
+            height: start_height as u64,
+            ..Default::default()
+        };
+        let end_id = service::BlockId {
+            height: (start_height + count - 1) as u64,
+            ..Default::default()
+        };
 
         let blocks: Vec<CompactBlock> = client
             .get_block_range(service::BlockRange {
@@ -952,16 +1340,20 @@ where
             Some(r) => r,
             None => {
                 drop(db);
-                self.enhance_pending_transactions().await?;
+                self.process_pending_transaction_requests().await?;
                 return Ok(None);
             }
         };
 
         // 5. Download compact blocks for the range
-        let mut start_id = service::BlockId::default();
-        start_id.height = scan_range.block_range().start.into();
-        let mut end_id = service::BlockId::default();
-        end_id.height = (scan_range.block_range().end - 1).into();
+        let start_id = service::BlockId {
+            height: scan_range.block_range().start.into(),
+            ..Default::default()
+        };
+        let end_id = service::BlockId {
+            height: (scan_range.block_range().end - 1).into(),
+            ..Default::default()
+        };
         let compact_blocks: Vec<CompactBlock> = client
             .get_block_range(service::BlockRange {
                 start: Some(start_id),
@@ -1028,7 +1420,7 @@ where
         )?;
         if rewound {
             drop(db);
-            self.enhance_pending_transactions().await?;
+            self.process_pending_transaction_requests().await?;
             return Ok(None);
         }
 
@@ -1041,7 +1433,7 @@ where
         }
 
         drop(db);
-        self.enhance_pending_transactions().await?;
+        self.process_pending_transaction_requests().await?;
         Ok(Some(journal_data))
     }
 
@@ -1119,7 +1511,7 @@ where
         let has_more = remaining.iter().any(|r| !r.is_empty());
 
         drop(db);
-        self.enhance_pending_transactions().await?;
+        self.process_pending_transaction_requests().await?;
         Ok(has_more)
     }
 
@@ -1437,6 +1829,44 @@ where
         Ok(start)
     }
 
+    async fn load_stored_transfer_transactions(
+        &self,
+        txids: &NonEmpty<TxId>,
+    ) -> Result<NonEmpty<(TxId, service::RawTransaction)>, Error> {
+        let db = self.db.read().await;
+        let mut transactions = Vec::with_capacity(txids.len());
+        for requested_txid in txids {
+            let tx = db
+                .get_transaction(*requested_txid)?
+                .ok_or(Error::TransactionNotFound(*requested_txid))?;
+            let mut raw_tx = service::RawTransaction::default();
+            tx.write(&mut raw_tx.data)?;
+            transactions.push((tx.txid(), raw_tx));
+        }
+        Ok(NonEmpty::from_vec(transactions).expect("txids is non-empty"))
+    }
+
+    async fn submit_stored_transfer_transactions(
+        &self,
+        txids: &NonEmpty<TxId>,
+    ) -> Result<TransferResult, Error> {
+        let transactions = self.load_stored_transfer_transactions(txids).await?;
+        let client = self.client.clone();
+
+        Ok(
+            submit_transfer_transactions_with(transactions, move |raw_tx| {
+                let mut client = client.clone();
+                async move {
+                    client
+                        .send_transaction(raw_tx)
+                        .await
+                        .map(tonic::Response::into_inner)
+                }
+            })
+            .await,
+        )
+    }
+
     pub async fn send_authorized_transactions(&self, txids: &NonEmpty<TxId>) -> Result<(), Error> {
         let mut client = self.client.clone();
         for txid in txids.iter() {
@@ -1464,6 +1894,210 @@ where
             }
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn propose_unified_transfer<FeeRuleT>(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        fee_rule: FeeRuleT,
+        funding_source: TransferFundingSource,
+        allow_send_max_fallback: bool,
+    ) -> Result<
+        zcash_client_backend::proposal::Proposal<FeeRuleT, <W as InputSource>::NoteRef>,
+        Error,
+    >
+    where
+        FeeRuleT: FeeRule + Clone + zcash_client_backend::fees::zip317::Zip317FeeRule,
+        FeeRuleT::Error: Debug + From<zcash_protocol::value::BalanceError>,
+    {
+        let (spend_policy, transparent_change_policy) = transfer_policies(funding_source);
+        let change_strategy =
+            zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
+                fee_rule.clone(),
+                None,
+                ShieldedPool::Orchard,
+                DustOutputPolicy::default(),
+                SplitPolicy::with_min_output_value(
+                    NonZeroUsize::new(self.target_note_count)
+                        .ok_or(Error::FailedToCreateTransaction)?,
+                    Zatoshis::from_u64(self.min_split_output_value)?,
+                ),
+            )
+            .with_transparent_change_policy(transparent_change_policy);
+
+        let input_selector = GreedyInputSelector::new();
+        let memo = memo.as_deref().map(MemoBytes::from_bytes).transpose()?;
+        let payment = Payment::new(
+            to_address.clone(),
+            Some(Zatoshis::from_u64(value)?),
+            memo.clone(),
+            None,
+            None,
+            vec![],
+        )
+        .map_err(|e| Error::Zip321(e.with_index(0)))?;
+        let request = TransactionRequest::new(vec![payment])?;
+        let mut db = self.db.write().await;
+
+        match propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+            &mut *db,
+            &self.network,
+            account_id,
+            &input_selector,
+            &change_strategy,
+            request,
+            self.confirmations_policy(),
+            &spend_policy,
+            None,
+        ) {
+            Ok(proposal) => Ok(proposal),
+            Err(transfer_error) => {
+                if allow_send_max_fallback {
+                    let max_proposal =
+                        propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
+                            &mut *db,
+                            &self.network,
+                            account_id,
+                            &[
+                                ShieldedPool::Sapling,
+                                ShieldedPool::Orchard,
+                                ShieldedPool::Ironwood,
+                            ],
+                            &fee_rule,
+                            to_address,
+                            memo,
+                            MaxSpendMode::MaxSpendable,
+                            self.confirmations_policy(),
+                        )
+                        .ok();
+
+                    if let Some(proposal) = max_proposal
+                        && proposal_payment_amount_zats(&proposal)? == value
+                    {
+                        return Ok(proposal);
+                    }
+                }
+
+                Err(Error::Generic(format!(
+                    "Failed to propose transfer. Possibly insufficient permitted funds: {transfer_error:?}"
+                )))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn estimate_transfer(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        funding_source: TransferFundingSource,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: Option<u64>,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<TransferEstimate, Error> {
+        expiry_delta_blocks
+            .map(validate_expiry_delta_blocks)
+            .transpose()?;
+
+        match marginal_fee_zats {
+            Some(marginal_fee_zats) => {
+                let proposal = self
+                    .propose_unified_transfer(
+                        account_id,
+                        to_address,
+                        value,
+                        memo,
+                        dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                        funding_source,
+                        allow_exact_send_max_fallback(funding_source, true),
+                    )
+                    .await?;
+                transfer_estimate_from_proposal(&proposal)
+            }
+            None => {
+                let proposal = self
+                    .propose_unified_transfer(
+                        account_id,
+                        to_address,
+                        value,
+                        memo,
+                        StandardFeeRule::Zip317,
+                        funding_source,
+                        false,
+                    )
+                    .await?;
+                transfer_estimate_from_proposal(&proposal)
+            }
+        }
+    }
+
+    async fn execute_unified_transfer<FeeRuleT>(
+        &self,
+        usk: UnifiedSpendingKey,
+        proposal: zcash_client_backend::proposal::Proposal<FeeRuleT, <W as InputSource>::NoteRef>,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<TransferResult, Error>
+    where
+        FeeRuleT: FeeRule,
+        FeeRuleT::Error: Debug,
+    {
+        let expiry = transfer_expiry_height(proposal.min_target_height(), expiry_delta_blocks)?;
+        let txids = {
+            let mut db = self.db.write().await;
+            create_and_store_transfer(&mut *db, &self.network, usk, &proposal, expiry)?
+        };
+        self.submit_stored_transfer_transactions(&txids).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn oneclick_transfer(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        usk: UnifiedSpendingKey,
+        funding_source: TransferFundingSource,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: Option<u64>,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<TransferResult, Error> {
+        match marginal_fee_zats {
+            Some(marginal_fee_zats) => {
+                let proposal = self
+                    .propose_unified_transfer(
+                        account_id,
+                        to_address,
+                        value,
+                        memo,
+                        dynamic_zip317_fee_rule(marginal_fee_zats)?,
+                        funding_source,
+                        allow_exact_send_max_fallback(funding_source, true),
+                    )
+                    .await?;
+                self.execute_unified_transfer(usk, proposal, expiry_delta_blocks)
+                    .await
+            }
+            None => {
+                let proposal = self
+                    .propose_unified_transfer(
+                        account_id,
+                        to_address,
+                        value,
+                        memo,
+                        StandardFeeRule::Zip317,
+                        funding_source,
+                        false,
+                    )
+                    .await?;
+                self.execute_unified_transfer(usk, proposal, expiry_delta_blocks)
+                    .await
+            }
+        }
     }
 
     pub async fn pczt_shield(&self, account_id: AccountId) -> Result<Pczt, Error> {
@@ -2507,17 +3141,224 @@ pub(crate) fn usk_from_seed_str(
 
 #[cfg(test)]
 mod tests {
-    use super::{transparent_transfer_policies, usk_from_seed_str};
+    use super::{
+        TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
+        allow_exact_send_max_fallback, dynamic_zip317_fee_rule, submit_transfer_transactions_with,
+        transaction_status_from_raw_height, transfer_expiry_height, transfer_policies,
+        usk_from_seed_str, validate_expiry_delta_blocks,
+    };
     use crate::Network;
+    use nonempty::NonEmpty;
+    use std::collections::VecDeque;
     use zcash_client_backend::data_api::wallet::input_selection::{
         CoinbasePolicy, TransparentSource,
     };
+    use zcash_client_backend::data_api::{TransactionStatus, wallet::TargetHeight};
     use zcash_client_backend::fees::TransparentChangePolicy;
+    use zcash_client_backend::proto::service;
+    use zcash_primitives::transaction::TxId;
     use zcash_protocol::ShieldedPool;
+    use zcash_protocol::consensus::BlockHeight;
+    use zcash_protocol::value::Zatoshis;
+
+    fn txid(value: u8) -> TxId {
+        TxId::from_bytes([value; 32])
+    }
+
+    #[test]
+    fn raw_transaction_height_maps_to_wallet_status() {
+        let txid = txid(9);
+
+        assert_eq!(
+            transaction_status_from_raw_height(txid, 0).unwrap(),
+            TransactionStatus::NotInMainChain
+        );
+        assert_eq!(
+            transaction_status_from_raw_height(txid, u64::MAX).unwrap(),
+            TransactionStatus::NotInMainChain
+        );
+        assert_eq!(
+            transaction_status_from_raw_height(txid, 3_472_762).unwrap(),
+            TransactionStatus::Mined(BlockHeight::from_u32(3_472_762))
+        );
+        assert!(transaction_status_from_raw_height(txid, u64::from(u32::MAX) + 1).is_err());
+    }
+
+    fn two_raw_transactions() -> NonEmpty<(TxId, service::RawTransaction)> {
+        NonEmpty {
+            head: (
+                txid(1),
+                service::RawTransaction {
+                    data: vec![1],
+                    ..Default::default()
+                },
+            ),
+            tail: vec![(
+                txid(2),
+                service::RawTransaction {
+                    data: vec![2],
+                    ..Default::default()
+                },
+            )],
+        }
+    }
+
+    #[tokio::test]
+    async fn transfer_submission_reports_all_successes_in_order() {
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| async {
+            Ok(service::SendResponse::default())
+        })
+        .await;
+
+        assert_eq!(result.status, TransferOverallStatus::Success);
+        assert_eq!(
+            result.tx_ids,
+            vec![txid(1).to_string(), txid(2).to_string()]
+        );
+        assert_eq!(result.final_tx_id, txid(2).to_string());
+        assert!(
+            result
+                .transactions
+                .iter()
+                .all(|tx| tx.status == TransferSubmissionStatus::Submitted)
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_submission_stops_after_first_rejection() {
+        let mut responses = VecDeque::from([
+            Ok(service::SendResponse {
+                error_code: -25,
+                error_message: "rejected by server".to_string(),
+            }),
+            Ok(service::SendResponse::default()),
+        ]);
+
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| {
+            let response = responses.pop_front().unwrap();
+            async move { response }
+        })
+        .await;
+
+        assert_eq!(result.status, TransferOverallStatus::Failed);
+        assert_eq!(
+            result.transactions[0].status,
+            TransferSubmissionStatus::Rejected
+        );
+        assert_eq!(result.transactions[0].error_code, Some(-25));
+        assert_eq!(
+            result.transactions[0].error_message.as_deref(),
+            Some("rejected by server")
+        );
+        assert_eq!(
+            result.transactions[1].status,
+            TransferSubmissionStatus::NotAttempted
+        );
+        assert_eq!(responses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn transfer_submission_reports_partial_after_later_rejection() {
+        let mut responses = VecDeque::from([
+            Ok(service::SendResponse::default()),
+            Ok(service::SendResponse {
+                error_code: -26,
+                error_message: "later transaction rejected".to_string(),
+            }),
+        ]);
+
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| {
+            let response = responses.pop_front().unwrap();
+            async move { response }
+        })
+        .await;
+
+        assert_eq!(result.status, TransferOverallStatus::Partial);
+        assert_eq!(
+            result.transactions[0].status,
+            TransferSubmissionStatus::Submitted
+        );
+        assert_eq!(
+            result.transactions[1].status,
+            TransferSubmissionStatus::Rejected
+        );
+        assert_eq!(result.transactions[1].error_code, Some(-26));
+        assert_eq!(
+            result.transactions[1].error_message.as_deref(),
+            Some("later transaction rejected")
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_submission_stops_after_transport_uncertainty() {
+        let mut responses = VecDeque::from([
+            Err(tonic::Status::unavailable("offline")),
+            Ok(service::SendResponse::default()),
+        ]);
+
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| {
+            let response = responses.pop_front().unwrap();
+            async move { response }
+        })
+        .await;
+
+        assert_eq!(result.status, TransferOverallStatus::Failed);
+        assert_eq!(
+            result.transactions[0].status,
+            TransferSubmissionStatus::Unknown
+        );
+        assert_eq!(result.transactions[0].error_code, None);
+        assert!(
+            result.transactions[0]
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("offline")
+        );
+        assert_eq!(
+            result.transactions[1].status,
+            TransferSubmissionStatus::NotAttempted
+        );
+        assert_eq!(responses.len(), 1);
+    }
+
+    #[test]
+    fn unified_transfer_optional_values_use_existing_validation() {
+        assert!(dynamic_zip317_fee_rule(0).is_err());
+        assert!(dynamic_zip317_fee_rule(5_000).is_ok());
+        assert!(validate_expiry_delta_blocks(0).is_err());
+        assert_eq!(validate_expiry_delta_blocks(12).unwrap(), 12);
+    }
+
+    #[test]
+    fn transfer_expiry_uses_the_proposal_target() {
+        let min_target = TargetHeight::from(BlockHeight::from_u32(2_000_000));
+        assert_eq!(
+            transfer_expiry_height(min_target, Some(12)).unwrap(),
+            Some(BlockHeight::from_u32(2_000_012)),
+        );
+        assert_eq!(transfer_expiry_height(min_target, None).unwrap(), None);
+    }
+
+    #[test]
+    fn send_max_fallback_is_only_enabled_for_dynamic_shielded_transfers() {
+        assert!(!allow_exact_send_max_fallback(
+            TransferFundingSource::Shielded,
+            false,
+        ));
+        assert!(allow_exact_send_max_fallback(
+            TransferFundingSource::Shielded,
+            true,
+        ));
+        assert!(!allow_exact_send_max_fallback(
+            TransferFundingSource::Transparent,
+            true,
+        ));
+    }
 
     #[test]
     fn transparent_transfer_policies_exclude_shielded_funds_and_allow_transparent_change() {
-        let (spend_policy, change_policy) = transparent_transfer_policies();
+        let (spend_policy, change_policy) = transfer_policies(TransferFundingSource::Transparent);
 
         assert!(!spend_policy.permits_shielded(ShieldedPool::Sapling));
         assert!(!spend_policy.permits_shielded(ShieldedPool::Orchard));
@@ -2532,6 +3373,46 @@ mod tests {
             change_policy,
             TransparentChangePolicy::TransparentChangeAllowed
         );
+    }
+
+    #[test]
+    fn transfer_funding_source_accepts_only_documented_values() {
+        assert_eq!(
+            "shielded".parse::<TransferFundingSource>().unwrap(),
+            TransferFundingSource::Shielded
+        );
+        assert_eq!(
+            "transparent".parse::<TransferFundingSource>().unwrap(),
+            TransferFundingSource::Transparent
+        );
+        assert!("mixed".parse::<TransferFundingSource>().is_err());
+        assert!("Shielded".parse::<TransferFundingSource>().is_err());
+    }
+
+    #[test]
+    fn shielded_transfer_policy_excludes_transparent_inputs() {
+        let (spend, change) = transfer_policies(TransferFundingSource::Shielded);
+        assert!(spend.permits_shielded(ShieldedPool::Sapling));
+        assert!(spend.permits_shielded(ShieldedPool::Orchard));
+        assert!(spend.permits_shielded(ShieldedPool::Ironwood));
+        assert!(spend.transparent().is_none());
+        assert_eq!(change, TransparentChangePolicy::ShieldChange);
+    }
+
+    #[test]
+    fn transfer_estimate_preserves_step_fee_order_and_total() {
+        let estimate = TransferEstimate::from_amount_and_step_fees(
+            Zatoshis::const_from_u64(50_000),
+            [
+                Zatoshis::const_from_u64(15_000),
+                Zatoshis::const_from_u64(10_000),
+            ],
+        )
+        .unwrap();
+        assert_eq!(estimate.amount_zats, "50000");
+        assert_eq!(estimate.fee_zats, "25000");
+        assert_eq!(estimate.transaction_count, 2);
+        assert_eq!(estimate.step_fees_zats, ["15000", "10000"]);
     }
 
     #[test]

@@ -1294,10 +1294,13 @@ pub fn spend_everything_multi_step_single_note_proposed_transfer<T: ShieldedPool
     assert_matches!(&create_proposed_result, Ok(txids) if txids.len() == 2);
     let txids = create_proposed_result.unwrap();
 
-    // Mine the created transactions.
+    // Mine the created transactions. The second transaction is fully transparent, so compact
+    // block scanning cannot discover its status and leaves a GetStatus request for the caller.
+    let mut mined_heights = Vec::with_capacity(txids.len());
     for txid in txids.iter() {
         let (h, _) = st.generate_next_block_including(*txid);
         st.scan_cached_blocks(h, 1);
+        mined_heights.push(h);
     }
 
     // Check that there are sent outputs with the correct values.
@@ -1310,6 +1313,49 @@ pub fn spend_everything_multi_step_single_note_proposed_transfer<T: ShieldedPool
     // the ZIP 320 pair.
     let tx_data_requests = st.wallet().transaction_data_requests().unwrap();
     assert!(tx_data_requests.contains(&TransactionDataRequest::GetStatus(*txids.last())));
+
+    let second_txid = *txids.last();
+    let second_mined_height = *mined_heights.last().unwrap();
+    st.wallet_mut()
+        .set_transaction_status(
+            second_txid,
+            data_api::TransactionStatus::Mined(second_mined_height),
+        )
+        .unwrap();
+    assert!(
+        !st.wallet()
+            .transaction_data_requests()
+            .unwrap()
+            .contains(&TransactionDataRequest::GetStatus(second_txid))
+    );
+
+    let second_expiry_height = st
+        .wallet()
+        .get_transaction(second_txid)
+        .unwrap()
+        .unwrap()
+        .expiry_height();
+    let blocks_through_expiry =
+        u32::from(second_expiry_height) - u32::from(second_mined_height) + 1;
+    for _ in 0..blocks_through_expiry {
+        st.generate_empty_block();
+    }
+    st.scan_cached_blocks(second_mined_height + 1, blocks_through_expiry as usize);
+
+    let summary = st
+        .wallet()
+        .get_wallet_summary(ConfirmationsPolicy::MIN)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        summary
+            .account_balances()
+            .get(&account_id)
+            .unwrap()
+            .unshielded_balance()
+            .total(),
+        Zatoshis::ZERO
+    );
 
     assert!(expected_step0_change > expected_ephemeral_spend);
     assert_eq!(confirmed_sent.len(), 2);
@@ -1846,6 +1892,7 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
         wallet::{Exposure, TransparentAddressSource},
     };
     use zcash_keys::keys::transparent::gap_limits::GapLimits;
+    use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 
     let gap_limits = GapLimits::new(10, 5, 3);
     let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache)
@@ -1875,7 +1922,10 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
     let value = Zatoshis::const_from_u64(100000);
     let transfer_amount = Zatoshis::const_from_u64(50000);
 
-    let run_test = |st: &mut TestState<_, Dsf::DataStore, _>, expected_index, prior_balance| {
+    let run_test = |st: &mut TestState<_, Dsf::DataStore, _>,
+                    expected_index,
+                    prior_balance,
+                    expiry_delta: Option<u32>| {
         // Add funds to the wallet.
         add_funds(st, value);
         let initial_balance: Option<Zatoshis> = prior_balance + value;
@@ -1933,14 +1983,42 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
             .unwrap();
         assert_eq!(exposed_at_tip.len(), 0);
 
-        let create_proposed_result = st
-            .create_proposed_transactions::<Infallible, _, Infallible, _>(
+        let min_target_height = BlockHeight::from(proposal.min_target_height());
+        let expected_expiry_height = expiry_delta
+            .map(|delta| min_target_height + delta)
+            .unwrap_or(min_target_height + DEFAULT_TX_EXPIRY_DELTA);
+
+        let create_proposed_result = if let Some(delta) = expiry_delta {
+            assert_matches!(
+                st.create_proposed_transactions_with_expiry_height::<Infallible, _, Infallible, _>(
+                    account.usk(),
+                    OvkPolicy::Sender,
+                    &proposal,
+                    min_target_height - 1,
+                ),
+                Err(Error::ExpiryHeightBelowTargetHeight { .. })
+            );
+
+            st.create_proposed_transactions_with_expiry_height::<Infallible, _, Infallible, _>(
                 account.usk(),
                 OvkPolicy::Sender,
                 &proposal,
-            );
+                min_target_height + delta,
+            )
+        } else {
+            st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+                account.usk(),
+                OvkPolicy::Sender,
+                &proposal,
+            )
+        };
         assert_matches!(&create_proposed_result, Ok(txids) if txids.len() == 2);
         let txids = create_proposed_result.unwrap();
+
+        for txid in txids.iter() {
+            let tx = st.wallet().get_transaction(*txid).unwrap().unwrap();
+            assert_eq!(tx.expiry_height(), expected_expiry_height);
+        }
 
         // After creation, there should be a new ephemeral address exposed.
         let exposed_at_tip = st
@@ -2040,8 +2118,8 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
     };
 
     // Each transfer should use a different ephemeral address.
-    let (ephemeral0, _, bal_0) = run_test(&mut st, 0, Zatoshis::ZERO);
-    let (ephemeral1, _, _) = run_test(&mut st, 1, bal_0);
+    let (ephemeral0, _, bal_0) = run_test(&mut st, 0, Zatoshis::ZERO, Some(12));
+    let (ephemeral1, _, _) = run_test(&mut st, 1, bal_0, None);
     assert_ne!(ephemeral0, ephemeral1);
 
     add_funds(&mut st, value);
