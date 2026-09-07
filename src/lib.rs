@@ -10,6 +10,9 @@ pub use error::*;
 pub use network::*;
 pub use wallet::*;
 
+#[cfg(feature = "voting")]
+pub use zcash_voting;
+
 /// The maximum number of checkpoints to store in each shard-tree
 pub const PRUNING_DEPTH: usize = 100;
 

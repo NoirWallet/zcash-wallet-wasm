@@ -13,6 +13,13 @@ wasm-opt = ["-O4", "-O4", "--enable-threads", "--enable-bulk-memory", "--enable-
 default = ["wasm-parallel"]
 multicore = ["zcash_proofs/multicore", "zcash_primitives/multicore", "zcash_client_memory/multicore", "orchard/multicore"]
 wasm-parallel = ["wasm-bindgen-rayon", "multicore"]
+voting = ["dep:zcash_voting"]
+
+[dependencies.zcash_voting]
+path = "./zcash_voting/zcash_voting"
+default-features = false
+features = ["lrz", "browser"]
+optional = true
 
 [dependencies]
 wasm-bindgen = { version = "0.2" }
@@ -85,3 +92,12 @@ lto = "fat"
 codegen-units = 1
 panic = 'abort'
 strip = true
+
+[patch.crates-io]
+pczt = { path = "./librustzcash/pczt" }
+zcash_client_backend = { path = "./librustzcash/zcash_client_backend" }
+zcash_client_sqlite = { path = "./librustzcash/zcash_client_sqlite" }
+zcash_keys = { path = "./librustzcash/zcash_keys" }
+zcash_primitives = { path = "./librustzcash/zcash_primitives" }
+zcash_protocol = { path = "./librustzcash/components/zcash_protocol" }
+zcash_transparent = { path = "./librustzcash/zcash_transparent" }
