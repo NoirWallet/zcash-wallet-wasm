@@ -66,6 +66,10 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use voting_crypto_deps::pasta_curves::{
+    group::{Group, GroupEncoding},
+    pallas,
+};
 
 use crate::{
     round_auth::{RoundAuthPayloadV2, ROUND_AUTH_VERSION_V2},
@@ -238,6 +242,7 @@ impl ResolvedVotingConfig {
     ///
     /// Dynamic server fields (`snapshot_height`, roots) are accepted as inputs,
     /// but `ea_pk` is always sourced from authenticated dynamic config material.
+    /// The authority key must encode a nonidentity Pallas point usable by ZKP2.
     pub fn trusted_voting_round_params(
         &self,
         round_id: String,
@@ -263,11 +268,20 @@ impl ResolvedVotingConfig {
             .ok_or_else(|| VotingConfigError::RemoteAuthenticationFailed {
                 message: format!("round {round_id} is not authenticated in resolved voting config"),
             })?;
-        if trusted_round.ea_pk.len() != ROUND_PARAM_BYTE_LEN {
-            return Err(VotingConfigError::InvalidInput {
+        let ea_pk_bytes: [u8; ROUND_PARAM_BYTE_LEN] = trusted_round.ea_pk.as_slice()
+            .try_into().map_err(|_| VotingConfigError::InvalidInput {
                 message: format!(
                     "authenticated round {round_id} has invalid ea_pk length: expected {ROUND_PARAM_BYTE_LEN} bytes"
                 ),
+            })?;
+        let ea_pk = Option::<pallas::Point>::from(pallas::Point::from_bytes(&ea_pk_bytes))
+            .ok_or_else(|| VotingConfigError::InvalidInput {
+                message: "authenticated ea_pk is not a valid compressed Pallas point".to_string(),
+            })?;
+        // Identity encryption keys reveal the plaintext share, and ZKP2 rejects them.
+        if bool::from(ea_pk.is_identity()) {
+            return Err(VotingConfigError::InvalidInput {
+                message: "authenticated ea_pk must not be the identity point".to_string(),
             });
         }
 
@@ -1273,6 +1287,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn browser_unusable_key_fixtures_have_valid_round_signatures() {
+        use voting_crypto_deps::pasta_curves::{
+            group::{Group, GroupEncoding},
+            pallas,
+        };
+        let signing_key = SigningKey::from_bytes(&[3; 32]);
+        for (fixture, ea_pk) in [
+            (
+                include_bytes!("../../../../src/voting/fixtures/dynamic-invalid-key.json")
+                    .as_slice(),
+                [255; 32],
+            ),
+            (
+                include_bytes!("../../../../src/voting/fixtures/dynamic-identity-key.json")
+                    .as_slice(),
+                pallas::Point::identity().to_bytes(),
+            ),
+        ] {
+            let mut generated: serde_json::Value =
+                serde_json::from_slice(&dynamic_bytes(&signing_key)).unwrap();
+            generated["rounds"][ROUND_ID]["ea_pk"] = serde_json::json!(BASE64.encode(ea_pk));
+            generated["rounds"][ROUND_ID]["signatures"][0]["sig"] = serde_json::json!(BASE64
+                .encode(
+                    signing_key
+                        .sign(&round_auth_v2_preimage(ROUND_ID, &ea_pk, test_pir_layout()))
+                        .to_bytes()
+                ));
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(fixture).unwrap(),
+                generated
+            );
+            let resolved = resolve_test_dynamic(&signing_key, fixture).unwrap();
+            assert_eq!(resolved.authenticated_rounds.len(), 1);
+            assert_eq!(resolved.authenticated_rounds[0].ea_pk, ea_pk);
+        }
+    }
+
     fn round_auth_v2_preimage(round_id: &str, ea_pk: &[u8], layout: PirLayout) -> Vec<u8> {
         let round_id = hex::decode(round_id).unwrap().try_into().unwrap();
         let ea_pk = ea_pk.try_into().unwrap();
@@ -1978,6 +2030,30 @@ mod tests {
         assert_eq!(params.ea_pk, vec![7u8; 32]);
         assert_eq!(params.nc_root, vec![2u8; 32]);
         assert_eq!(params.nullifier_imt_root, vec![3u8; 32]);
+    }
+
+    #[test]
+    fn trusted_voting_round_params_rejects_unusable_authenticated_ea_pk() {
+        use voting_crypto_deps::pasta_curves::{
+            group::{Group, GroupEncoding},
+            pallas,
+        };
+        for ea_pk in [vec![255; 32], pallas::Point::identity().to_bytes().to_vec()] {
+            let config = resolved_config_with_authenticated_round(ea_pk);
+            let error = config
+                .trusted_voting_round_params(ROUND_ID.to_string(), 123, vec![2; 32], vec![3; 32])
+                .unwrap_err();
+            assert!(matches!(error, VotingConfigError::InvalidInput { .. }));
+        }
+        let valid = pallas::Point::generator().to_bytes().to_vec();
+        let config = resolved_config_with_authenticated_round(valid.clone());
+        assert_eq!(
+            config
+                .trusted_voting_round_params(ROUND_ID.to_string(), 123, vec![2; 32], vec![3; 32])
+                .unwrap()
+                .ea_pk,
+            valid
+        );
     }
 
     #[test]

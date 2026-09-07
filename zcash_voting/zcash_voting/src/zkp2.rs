@@ -334,6 +334,38 @@ mod tests {
     }
 
     #[test]
+    fn test_build_vote_commitment_rejects_unusable_authority_keys() {
+        for (ea_pk, expected) in [
+            ([255; 32], "ea_pk is not a valid compressed Pallas point"),
+            (
+                pallas::Point::identity().to_bytes(),
+                "ea_pk must not be the identity point",
+            ),
+        ] {
+            let error = build_vote_commitment(
+                &[0x42; 64],
+                Network::Testnet,
+                0,
+                1_000_000,
+                &[0; 32],
+                &[0; 32],
+                &ea_pk,
+                1,
+                0,
+                2,
+                &[[0; 32]; VOTE_COMM_TREE_DEPTH],
+                0,
+                1,
+                65535,
+                false,
+                &TestReporter,
+            )
+            .unwrap_err();
+            assert!(matches!(error, VotingError::InvalidInput { message } if message == expected));
+        }
+    }
+
+    #[test]
     fn test_build_vote_commitment_invalid_option_count() {
         assert!(build_vote_commitment(
             &[0x42; 64],

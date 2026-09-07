@@ -7,6 +7,11 @@ wallet material. The signing seed is Valar's existing `[3; 32]` test seed.
 JSON documents with Valar's `static_bytes_v2` and `dynamic_bytes` helpers and
 compares their parsed contents. The v2 signature uses `RoundAuthPayloadV2`.
 
+`dynamic-invalid-key.json` and `dynamic-identity-key.json` carry correctly
+signed, unusable authority keys. Valar's fixture contract reproduces their
+signatures with the same test helper and confirms signature authentication;
+trusted-parameter construction must reject the malformed/identity points.
+
 The root fixture transport derives a SHA-256 pin from the checked-in static
 bytes. Production always uses `STAGE_STATIC_CONFIG_SOURCE`; no caller-facing
 custom-source API exists.

@@ -69,6 +69,61 @@ mod tests {
         .await
         .unwrap()
     }
+    async fn discover_with_source(
+        transport: &impl HttpTransport,
+        source: &str,
+        now: u64,
+    ) -> Result<(VotingDiscovery, BTreeMap<String, TrustedRound>), VotingApiError> {
+        discover_with_clock(transport, source, || Ok(now)).await
+    }
+
+    #[tokio::test]
+    async fn discovery_checks_expiry_after_fetching_active_metadata() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+        };
+        struct AdvancingTransport {
+            fixture: Fixture,
+            clock: Arc<AtomicU64>,
+        }
+        impl HttpTransport for AdvancingTransport {
+            fn execute(&self, req: OwnedHttpRequest) -> TransportFuture {
+                let reply = self.fixture.execute(req);
+                let clock = self.clock.clone();
+                Box::pin(async move {
+                    let result = reply.await;
+                    clock.fetch_add(1, Ordering::SeqCst);
+                    result
+                })
+            }
+        }
+        for (initial, expired) in [(1996, false), (1997, true), (1998, true)] {
+            let clock = Arc::new(AtomicU64::new(initial));
+            let samples = AtomicUsize::new(0);
+            let transport = AdvancingTransport {
+                fixture: fixture(vec![
+                    ok(STATIC.to_vec()),
+                    ok(DYNAMIC.to_vec()),
+                    ok(envelope(vec![active()])),
+                ]),
+                clock: clock.clone(),
+            };
+            let (discovery, trusted) = discover_with_clock(&transport, &source(), || {
+                samples.fetch_add(1, Ordering::SeqCst);
+                Ok(clock.load(Ordering::SeqCst))
+            })
+            .await
+            .unwrap();
+            assert_eq!(clock.load(Ordering::SeqCst), initial + 3);
+            assert_eq!(samples.load(Ordering::SeqCst), 1);
+            assert_eq!(trusted.is_empty(), expired, "initial clock {initial}");
+            if expired {
+                assert!(discovery.accepted.is_empty());
+                assert_eq!(discovery.rejected[0].code, VotingErrorCode::RoundExpired);
+            }
+        }
+    }
     #[tokio::test]
     async fn pinned_discovery_intersects_and_preserves_endpoint_provenance() {
         let mut other = active();
@@ -289,6 +344,45 @@ mod tests {
             let (d, t) = discover_with_source(&f, &source(), 1500).await.unwrap();
             assert!(d.accepted.is_empty(), "{field}");
             assert!(t.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn correctly_signed_unusable_authority_keys_are_rejected() {
+        for dynamic in [
+            include_bytes!("fixtures/dynamic-invalid-key.json").as_slice(),
+            include_bytes!("fixtures/dynamic-identity-key.json").as_slice(),
+        ] {
+            let anchor = resolve_static_voting_config(&source(), STATIC).unwrap();
+            let resolved = resolve_dynamic_voting_config(
+                anchor,
+                dynamic,
+                ResolveVotingConfigOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                resolved.authenticated_rounds.len(),
+                1,
+                "signature must authenticate"
+            );
+            let transport = fixture(vec![
+                ok(STATIC.to_vec()),
+                ok(dynamic.to_vec()),
+                ok(envelope(vec![active()])),
+            ]);
+            let (discovery, trusted) = discover_with_source(&transport, &source(), 1500)
+                .await
+                .unwrap();
+            assert!(trusted.is_empty());
+            assert!(discovery.accepted.is_empty());
+            assert_eq!(
+                discovery.rejected[0].code,
+                VotingErrorCode::RoundUnauthenticated
+            );
+            assert_eq!(
+                discovery.rejected[0].message,
+                "Voting round could not be authenticated."
+            );
         }
     }
 
@@ -543,10 +637,11 @@ use zcash_voting::transport::{HttpTransport, OwnedHttpRequest, RequestKind};
 pub(crate) async fn discover_rounds(
     transport: &super::transport::BrowserFetchTransport,
 ) -> Result<(VotingDiscovery, BTreeMap<String, TrustedRound>), VotingApiError> {
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    let now =
-        u64::try_from(now).map_err(|_| VotingApiError::new(VotingErrorCode::ConfigUntrusted))?;
-    discover_with_source(transport, STAGE_STATIC_CONFIG_SOURCE, now).await
+    discover_with_clock(transport, STAGE_STATIC_CONFIG_SOURCE, || {
+        u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp())
+            .map_err(|_| VotingApiError::new(VotingErrorCode::ConfigUntrusted))
+    })
+    .await
 }
 
 async fn fetch(
@@ -579,10 +674,10 @@ async fn fetch(
 }
 
 // The custom source is private: production has only the fixed stage wrapper.
-async fn discover_with_source(
+async fn discover_with_clock(
     transport: &impl HttpTransport,
     source: &str,
-    now: u64,
+    clock: impl Fn() -> Result<u64, VotingApiError>,
 ) -> Result<(VotingDiscovery, BTreeMap<String, TrustedRound>), VotingApiError> {
     let pin = PinnedConfigSource::parse(source)
         .map_err(|_| VotingApiError::new(VotingErrorCode::ConfigUntrusted))?;
@@ -698,7 +793,8 @@ async fn discover_with_source(
             reject(&mut discovery, &id, VotingErrorCode::RoundUnauthenticated);
             continue;
         }
-        match trusted_round(&resolved, &id, &entry, now) {
+        // Sample after every awaited fetch, once for this round's validation.
+        match trusted_round(&resolved, &id, &entry, clock()?) {
             Ok(round) => {
                 discovery.accepted.push(round.summary.clone());
                 trusted.insert(id, round);
