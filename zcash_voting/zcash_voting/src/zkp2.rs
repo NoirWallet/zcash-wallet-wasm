@@ -19,6 +19,7 @@ use crate::types::{
 
 // Vote proof build runs circuit synthesis + MockProver + proof generation, which can
 // overflow the default simulator thread stack. Run it on a dedicated large-stack thread.
+#[cfg(not(target_arch = "wasm32"))]
 const VOTE_PROOF_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Public VAN values and authority masks for one preplanned vote action.
@@ -195,37 +196,41 @@ pub(crate) fn build_vote_commitment(
     // The caller will need alpha_v to sign the TX2 sighash with rsk_v = ask_v.randomize(&alpha_v).
     let alpha_v = pallas::Scalar::random(&mut voting_crypto_deps::rand::rngs::OsRng);
     let sk_for_proof = sk.clone();
+    let prove = move || {
+        build_vote_proof_from_delegation(
+            &sk_for_proof,
+            address_index,
+            total_note_value,
+            gcr,
+            vri,
+            auth_path,
+            van_position,
+            anchor_height,
+            proposal_id as u64,
+            choice as u64,
+            ea_pk_affine,
+            alpha_v,
+            proposal_authority,
+            single_share,
+        )
+    };
+    #[cfg(target_arch = "wasm32")]
+    let vote_bundle = prove();
+    #[cfg(not(target_arch = "wasm32"))]
     let vote_bundle = std::thread::Builder::new()
         .name("vote-proof-build".to_string())
         .stack_size(VOTE_PROOF_STACK_BYTES)
-        .spawn(move || {
-            build_vote_proof_from_delegation(
-                &sk_for_proof,
-                address_index,
-                total_note_value,
-                gcr,
-                vri,
-                auth_path,
-                van_position,
-                anchor_height,
-                proposal_id as u64,
-                choice as u64,
-                ea_pk_affine,
-                alpha_v,
-                proposal_authority,
-                single_share,
-            )
-        })
+        .spawn(prove)
         .map_err(|e| VotingError::Internal {
             message: format!("failed to spawn vote proof builder thread: {e}"),
         })?
         .join()
         .map_err(|_| VotingError::Internal {
             message: "vote proof builder thread panicked".to_string(),
-        })?
-        .map_err(|e| VotingError::ProofFailed {
-            message: format!("vote proof generation failed: {}", e),
         })?;
+    let vote_bundle = vote_bundle.map_err(|e| VotingError::ProofFailed {
+        message: format!("vote proof generation failed: {}", e),
+    })?;
     progress.on_progress(1.0);
 
     // Convert Instance public inputs to byte vectors

@@ -378,6 +378,49 @@ fn validate_witnesses_for_round(
 }
 
 impl VotingDb {
+    pub fn load_voting_hotkey(
+        &self,
+        round_id: &str,
+    ) -> Result<Option<crate::VotingHotkey>, VotingError> {
+        let (_, network) = self.round_params_with_network(round_id)?;
+        let secret: Option<Vec<u8>> = self
+            .conn()
+            .query_row(
+                "SELECT voting_hotkey_secret FROM rounds WHERE round_id = ?1 AND wallet_id = ?2",
+                rusqlite::params![round_id, self.wallet_id()],
+                |row| row.get(0),
+            )
+            .map_err(|_| VotingError::InvalidInput {
+                message: "voting hotkey state unavailable".into(),
+            })?;
+        secret
+            .map(|secret| {
+                crate::VotingHotkey::from_stored_secret(&zeroize::Zeroizing::new(secret), network)
+            })
+            .transpose()
+    }
+    /// Create once and reload from the authoritative round row, never replace a secret.
+    pub fn ensure_voting_hotkey(&self, round_id: &str) -> Result<crate::VotingHotkey, VotingError> {
+        let (_, network) = self.round_params_with_network(round_id)?;
+        let error = || VotingError::InvalidInput {
+            message: "voting hotkey state unavailable".into(),
+        };
+        if let Some(hotkey) = self.load_voting_hotkey(round_id)? {
+            return Ok(hotkey);
+        }
+        let hotkey = crate::hotkey::generate_random_voting_hotkey(network)?;
+        self.conn().execute("UPDATE rounds SET voting_hotkey_secret = ?3 WHERE round_id = ?1 AND wallet_id = ?2 AND voting_hotkey_secret IS NULL",
+            rusqlite::params![round_id, self.wallet_id(), hotkey.stored_secret()]).map_err(|_| error())?;
+        let secret: Vec<u8> = self
+            .conn()
+            .query_row(
+                "SELECT voting_hotkey_secret FROM rounds WHERE round_id = ?1 AND wallet_id = ?2",
+                rusqlite::params![round_id, self.wallet_id()],
+                |row| row.get(0),
+            )
+            .map_err(|_| error())?;
+        crate::VotingHotkey::from_stored_secret(&zeroize::Zeroizing::new(secret), network)
+    }
     // --- Round management ---
 
     /// Initialize a new voting round. Stores params, sets phase to Initialized.
@@ -391,6 +434,99 @@ impl VotingDb {
         let conn = self.conn();
         let wallet_id = self.wallet_id();
         queries::insert_round(&conn, &wallet_id, network, params, session_json)
+    }
+
+    /// Fetch missing real and padded nullifier proofs without retaining a DB guard.
+    /// The caller must bind its transport to the round identity before invoking
+    /// this method. Every returned proof is verified against the stored root.
+    pub async fn precompute_delegation_pir_async<F, Fut>(
+        &self,
+        round_id: &str,
+        bundle_index: u32,
+        notes: &[NoteInfo],
+        network: Network,
+        fetch: F,
+    ) -> Result<PirCachePrecomputeResult, VotingError>
+    where
+        F: FnOnce(Vec<pallas::Base>) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<pir_client::ImtProofData>, VotingError>>,
+    {
+        let (params, extras) = {
+            let conn = self.conn();
+            let wallet = self.wallet_id();
+            let (params, stored_network) =
+                queries::load_round_params_with_network(&conn, round_id, &wallet)?;
+            validate_network_matches_round(stored_network, network, "delegation PIR")?;
+            queries::require_bundle_notes(&conn, round_id, &wallet, bundle_index, notes)?;
+            let secrets =
+                queries::load_padded_note_secrets(&conn, round_id, &wallet, bundle_index)?;
+            (params, secrets)
+        };
+        let extras = padded_nullifiers_for_circuit(notes, &extras, network)?;
+        let root = nullifier_imt_root_to_base(&params.nullifier_imt_root)?;
+        let targets = pir_cache_nullifier_targets(notes, &extras)?;
+        let rows = {
+            let conn = self.conn();
+            targets
+                .iter()
+                .map(|(bytes, _)| {
+                    queries::load_pir_cache_row(
+                        &conn,
+                        &self.wallet_id(),
+                        network,
+                        &params.nullifier_imt_root,
+                        bytes,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut seen = HashSet::new();
+        let missing = targets
+            .into_iter()
+            .zip(rows)
+            .filter_map(|((bytes, nf), row)| {
+                if !seen.insert(bytes)
+                    || row.is_some_and(|row| {
+                        row.decode().is_ok_and(|proof| {
+                            crate::zkp1::validate_pir_proof(&proof, nf, root).is_ok()
+                        })
+                    })
+                {
+                    None
+                } else {
+                    Some((bytes, nf))
+                }
+            })
+            .collect::<Vec<_>>();
+        let proofs = if missing.is_empty() {
+            Vec::new()
+        } else {
+            fetch(missing.iter().map(|(_, nf)| *nf).collect()).await?
+        };
+        if proofs.len() != missing.len() {
+            return Err(VotingError::InvalidInput {
+                message: "PIR proof count mismatch".into(),
+            });
+        }
+        for ((_, nf), proof) in missing.iter().zip(&proofs) {
+            crate::zkp1::validate_pir_proof(proof, *nf, root)?;
+        }
+        let mut fetched: HashMap<_, _> = missing
+            .into_iter()
+            .zip(proofs)
+            .map(|((bytes, _), proof)| (bytes, proof))
+            .collect();
+        self.precompute_pir_proof_cache_inner(notes, &extras, network, root, |nfs| {
+            nfs.iter()
+                .map(|nf| {
+                    fetched
+                        .remove(&nf.to_repr())
+                        .ok_or_else(|| VotingError::InvalidInput {
+                            message: "PIR cache changed during preparation".into(),
+                        })
+                })
+                .collect()
+        })
     }
 
     /// Get the current state of a voting round.

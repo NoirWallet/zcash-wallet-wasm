@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::VotingError;
 
-const CURRENT_VERSION: u32 = 18;
+const CURRENT_VERSION: u32 = 19;
 
 /// Oldest launched schema version that can be upgraded in place.
 ///
@@ -117,6 +117,7 @@ BEGIN
 END;",
     ),
     (17, include_str!("migrations/002_wallet_owner.sql")),
+    (18, include_str!("migrations/003_voting_hotkey.sql")),
 ];
 
 const RESET_SQL: &str = "DROP TABLE IF EXISTS wallet_metadata;
@@ -169,6 +170,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), VotingError> {
         tx.execute_batch(include_str!("migrations/002_wallet_owner.sql"))
             .map_err(|e| VotingError::Internal {
                 message: format!("failed to create wallet owner schema: {e}"),
+            })?;
+        tx.execute_batch(include_str!("migrations/003_voting_hotkey.sql"))
+            .map_err(|_| VotingError::Internal {
+                message: "could not create voting hotkey storage".into(),
             })?;
     } else {
         // Launched databases hold delegation state that cannot be rebuilt, so

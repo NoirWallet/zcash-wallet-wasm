@@ -71,6 +71,11 @@ impl WebVotingSession {
         value(&self.inner.round_status_at(&round_id, now_secs()?)?)
     }
 
+    #[wasm_bindgen(js_name = prepareRound)]
+    pub async fn prepare_round(&self, round_id: String) -> Result<JsValue, JsValue> {
+        value(&self.inner.prepare_round(&round_id).await?)
+    }
+
     /// The host obtains explicit user confirmation naming this round before calling.
     #[wasm_bindgen(js_name = clearRound)]
     pub async fn clear_round(&self, round_id: String) -> Result<(), JsValue> {

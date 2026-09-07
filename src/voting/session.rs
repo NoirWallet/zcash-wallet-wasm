@@ -362,6 +362,13 @@ impl VotingSessionInner {
             } else {
                 VotingRoundPhase::RoundPrepared
             };
+            if self.db.load_voting_hotkey(&id).map_err(conflict)?.is_some()
+                && self.db.get_round_state(&id).map_err(conflict)?.phase
+                    == zcash_voting::storage::RoundPhase::Initialized
+            {
+                status.phase = VotingRoundPhase::ConfigAuthenticated;
+                status.next_action = "prepare_round".into();
+            }
         } else if let Some(round) = cached.as_ref() {
             status.phase = VotingRoundPhase::ConfigAuthenticated;
             status.next_action = "check_eligibility".into();
@@ -415,6 +422,232 @@ impl VotingSessionInner {
         let _cleanup = ClearedRound { session: self, id };
         checkpoint().await
     }
+
+    pub(crate) async fn prepare_round_with<P, C>(
+        &self,
+        id: &str,
+        prepare: impl FnOnce(TrustedRound) -> P,
+        checkpoint: impl FnOnce() -> C,
+        now: impl Fn() -> Result<u64, VotingApiError>,
+    ) -> Result<PreparedVotingRound, VotingApiError>
+    where
+        P: Future<Output = Result<PreparedVotingRound, VotingApiError>>,
+        C: Future<Output = Result<(), VotingApiError>>,
+    {
+        let _mutation = self.mutation_guard()?;
+        let round = self.cached_round_at(id, now()?)?;
+        self.validate_saved_identity(&round)?;
+        let id = round.summary.round_id.clone();
+        if self
+            .selected_round_id
+            .borrow()
+            .as_ref()
+            .is_some_and(|selected| selected != &id)
+        {
+            return Err(conflict(()));
+        }
+        *self.selected_round_id.borrow_mut() = Some(id.clone());
+        let _selection = PreparingRound {
+            session: self,
+            id: id.clone(),
+        };
+        let prepared = prepare(round.clone()).await?;
+        self.cached_round_at(&id, now()?)?;
+        self.validate_saved_identity(&round)?;
+        checkpoint().await?;
+        Ok(prepared)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn prepare_round(
+        &self,
+        id: &str,
+    ) -> Result<PreparedVotingRound, VotingApiError> {
+        use prost::Message;
+        use zcash_voting::{Network, proof_executor::ProofExecutor};
+        let mismatch = |_| VotingApiError::new(VotingErrorCode::PirSnapshotMismatch);
+        self.prepare_round_with(
+            id,
+            |round| async move {
+                // This read is public, and releases its client before any wallet access.
+                let tree = self
+                    .wallet
+                    .client
+                    .clone()
+                    .get_tree_state(zcash_client_backend::proto::service::BlockId {
+                        height: round.params.snapshot_height,
+                        hash: vec![],
+                    })
+                    .await
+                    .map_err(|_| VotingApiError::new(VotingErrorCode::PirSnapshotMismatch))?
+                    .into_inner()
+                    .encode_to_vec();
+                zcash_voting::precompute::validate_snapshot_tree_state(
+                    &round.params,
+                    Network::Testnet,
+                    &tree,
+                )
+                .map_err(mismatch)?;
+                let mut client = None;
+                for endpoint in &round.pir_urls {
+                    if let Ok(connected) = zcash_voting::pir::connect_pir_for_snapshot(
+                        round.pir_layout,
+                        endpoint,
+                        std::sync::Arc::new(self.transport),
+                        Network::Testnet,
+                        &round.params.nullifier_imt_root,
+                        round.params.snapshot_height,
+                    )
+                    .await
+                    {
+                        client = Some(connected);
+                        break;
+                    }
+                }
+                let client = client
+                    .ok_or_else(|| VotingApiError::new(VotingErrorCode::PirSnapshotMismatch))?;
+                self.cached_round_at(&round.summary.round_id, now_secs()?)?;
+                let eligibility =
+                    config::check_eligibility(&self.wallet, self.account_id, &round).await?;
+                self.cached_round_at(&round.summary.round_id, now_secs()?)?;
+                if !eligibility.eligible {
+                    return Err(VotingApiError::new(VotingErrorCode::NotEligible));
+                }
+                if !self
+                    .db
+                    .has_round(&round.summary.round_id)
+                    .map_err(conflict)?
+                {
+                    let envelope = serde_json::to_string(&VotingSessionEnvelope {
+                        version: 1,
+                        authenticated_round: round.identity(),
+                    })
+                    .map_err(conflict)?;
+                    self.db
+                        .init_round(Network::Testnet, &round.params, Some(&envelope))
+                        .map_err(conflict)?;
+                }
+                let hotkey = self
+                    .db
+                    .ensure_voting_hotkey(&round.summary.round_id)
+                    .map_err(conflict)?;
+                let input = super::wallet_adapter::gather_wallet_inputs(
+                    &self.wallet,
+                    self.account_id,
+                    super::wallet_adapter::WalletInputRequest {
+                        network: Network::Testnet,
+                        snapshot_height: round.params.snapshot_height,
+                        anchor_tree_state_bytes: tree,
+                        resolved_round_name: round.summary.name.clone(),
+                        hotkey: &hotkey,
+                    },
+                )
+                .await?;
+                self.cached_round_at(&round.summary.round_id, now_secs()?)?;
+                // Executors receive owned Rust data only. Reads precede execution; writes follow it.
+                #[cfg(feature = "wasm-parallel")]
+                let executor = super::proof_executor::RayonProofExecutor;
+                #[cfg(not(feature = "wasm-parallel"))]
+                let executor = zcash_voting::proof_executor::SequentialProofExecutor;
+                let input = executor
+                    .prove(input, |input| {
+                        for witness in &input.witnesses {
+                            zcash_voting::precompute::verify_witness(witness)?;
+                        }
+                        Ok(input)
+                    })
+                    .await
+                    .map_err(|_| VotingApiError::new(VotingErrorCode::ProofFailed))?;
+                self.cached_round_at(&round.summary.round_id, now_secs()?)?;
+                let notes = &input.delegation.round_note_infos;
+                let policy = self
+                    .db
+                    .effective_bundle_policy(
+                        &round.summary.round_id,
+                        zcash_voting::BundlePolicy::default(),
+                    )
+                    .map_err(conflict)?;
+                let bundles = zcash_voting::round::note_bundles_with_policy(notes, policy)
+                    .map_err(conflict)?;
+                let layout = self
+                    .db
+                    .ensure_bundles_with_policy(&round.summary.round_id, notes, policy)
+                    .map_err(conflict)?;
+                if bundles.is_empty() {
+                    return Err(VotingApiError::new(VotingErrorCode::NotEligible));
+                }
+                for (index, notes) in bundles.iter().enumerate() {
+                    self.db
+                        .ensure_padded_secrets(&round.summary.round_id, index as u32, notes)
+                        .map_err(conflict)?;
+                    let witnesses = input
+                        .witnesses
+                        .iter()
+                        .filter(|w| notes.iter().any(|n| n.position == w.position))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    zcash_voting::store_tree_state_and_witnesses(
+                        &self.db,
+                        &round.summary.round_id,
+                        index as u32,
+                        &input.delegation.anchor_tree_state_bytes,
+                        notes,
+                        &witnesses,
+                    )
+                    .map_err(conflict)?;
+                }
+                for (index, notes) in bundles.iter().enumerate() {
+                    self.cached_round_at(&round.summary.round_id, now_secs()?)?;
+                    let client = &client;
+                    self.db
+                        .precompute_delegation_pir_async(
+                            &round.summary.round_id,
+                            index as u32,
+                            notes,
+                            Network::Testnet,
+                            |nullifiers| async move {
+                                client.fetch_proofs(&nullifiers).await.map_err(|_| {
+                                    zcash_voting::VotingError::InvalidInput {
+                                        message: "PIR retrieval failed".into(),
+                                    }
+                                })
+                            },
+                        )
+                        .await
+                        .map_err(mismatch)?;
+                }
+                self.db
+                    .advance_round_phase(
+                        &round.summary.round_id,
+                        zcash_voting::storage::RoundPhase::HotkeyGenerated,
+                    )
+                    .map_err(conflict)?;
+                Ok(PreparedVotingRound {
+                    round_id: round.summary.round_id,
+                    bundle_count: layout.bundle_count,
+                    selected_note_count: bundles.iter().map(Vec::len).sum::<usize>() as u32,
+                    voting_power: layout.eligible_weight.to_string(),
+                    state: VotingRoundPhase::RoundPrepared,
+                })
+            },
+            || self.persistence.checkpoint(&self.db),
+            now_secs,
+        )
+        .await
+    }
+}
+
+struct PreparingRound<'a> {
+    session: &'a VotingSessionInner,
+    id: String,
+}
+impl Drop for PreparingRound<'_> {
+    fn drop(&mut self) {
+        // A partial durable round is explicit recovery state, including on cancellation.
+        if matches!(self.session.db.has_round(&self.id), Ok(false)) {
+            *self.session.selected_round_id.borrow_mut() = None;
+        }
+    }
 }
 
 struct ClearedRound<'a> {
@@ -455,6 +688,158 @@ mod tests {
     };
     use zcash_protocol::consensus::BlockHeight;
     const ID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[tokio::test]
+    async fn prepare_round_rejects_before_work_and_clears_predurable_selection() {
+        let (session, _) = session().await;
+        let calls = Cell::new(0);
+        let work = |_| {
+            calls.set(calls.get() + 1);
+            std::future::ready(Err::<super::super::types::PreparedVotingRound, _>(
+                conflict(()),
+            ))
+        };
+        let checkpoint = || std::future::ready(Ok(()));
+        let err = session
+            .prepare_round_with("02".repeat(32).as_str(), work, checkpoint, || Ok(1500))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, VotingErrorCode::RoundUnauthenticated);
+        assert_eq!(calls.get(), 0);
+        *session.selected_round_id.borrow_mut() = Some("02".repeat(32));
+        assert_eq!(
+            session
+                .prepare_round_with(ID, work, checkpoint, || Ok(1500))
+                .await
+                .unwrap_err()
+                .code,
+            VotingErrorCode::RecoveryConflict
+        );
+        assert_eq!(calls.get(), 0);
+        *session.selected_round_id.borrow_mut() = None;
+        assert!(
+            session
+                .prepare_round_with(ID, work, checkpoint, || Ok(1500))
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(session.selected_round_id.borrow().is_none());
+        assert!(!session.mutation_active.get());
+    }
+
+    #[tokio::test]
+    async fn prepare_round_cancellation_releases_gate_and_preserves_only_durable_selection() {
+        let (session, round) = session().await;
+        let mut preparing = Box::pin(session.prepare_round_with(
+            ID,
+            |_| pending(),
+            || std::future::ready(Ok(())),
+            || Ok(1500),
+        ));
+        assert!(poll!(preparing.as_mut()).is_pending());
+        assert_eq!(
+            session.mutation_guard().err().unwrap().code,
+            VotingErrorCode::OperationInProgress
+        );
+        drop(preparing);
+        assert!(session.selected_round_id.borrow().is_none());
+        let envelope = serde_json::to_string(&VotingSessionEnvelope {
+            version: 1,
+            authenticated_round: round.identity(),
+        })
+        .unwrap();
+        let mut preparing = Box::pin(session.prepare_round_with(
+            ID,
+            |_| {
+                session
+                    .db
+                    .init_round(
+                        zcash_voting::Network::Testnet,
+                        &round.params,
+                        Some(&envelope),
+                    )
+                    .unwrap();
+                session.db.ensure_voting_hotkey(ID).unwrap();
+                pending()
+            },
+            || std::future::ready(Ok(())),
+            || Ok(1500),
+        ));
+        assert!(poll!(preparing.as_mut()).is_pending());
+        drop(preparing);
+        assert_eq!(*session.selected_round_id.borrow(), Some(ID.into()));
+        assert!(session.mutation_guard().is_ok());
+        assert_eq!(
+            session.round_status_at(ID, 1500).unwrap().next_action,
+            "prepare_round"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_round_checkpoint_rejection_retains_authoritative_hotkey_and_identity() {
+        let (session, round) = session().await;
+        let prepare = |round: TrustedRound| {
+            let envelope = serde_json::to_string(&VotingSessionEnvelope {
+                version: 1,
+                authenticated_round: round.identity(),
+            })
+            .unwrap();
+            if !session.db.has_round(ID).unwrap() {
+                session
+                    .db
+                    .init_round(
+                        zcash_voting::Network::Testnet,
+                        &round.params,
+                        Some(&envelope),
+                    )
+                    .unwrap();
+            }
+            session.db.ensure_voting_hotkey(ID).unwrap();
+            std::future::ready(Ok(super::super::types::PreparedVotingRound {
+                round_id: ID.into(),
+                bundle_count: 1,
+                selected_note_count: 1,
+                voting_power: "1".into(),
+                state: VotingRoundPhase::RoundPrepared,
+            }))
+        };
+        let failed = session
+            .prepare_round_with(
+                ID,
+                prepare,
+                || std::future::ready(Err(VotingApiError::new(VotingErrorCode::PersistenceFailed))),
+                || Ok(1500),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failed.code, VotingErrorCode::PersistenceFailed);
+        let hotkey = session.db.ensure_voting_hotkey(ID).unwrap();
+        assert_eq!(*session.selected_round_id.borrow(), Some(ID.into()));
+        session
+            .prepare_round_with(ID, prepare, || std::future::ready(Ok(())), || Ok(1500))
+            .await
+            .unwrap();
+        assert_eq!(
+            hotkey.stored_secret(),
+            session.db.ensure_voting_hotkey(ID).unwrap().stored_secret()
+        );
+        let restored = open(
+            session.wallet.clone(),
+            session.account_id,
+            Some(&session.export_state().unwrap()),
+        )
+        .unwrap();
+        restored.validate_saved_identity(&round).unwrap();
+        assert_eq!(
+            hotkey.stored_secret(),
+            restored
+                .db
+                .ensure_voting_hotkey(ID)
+                .unwrap()
+                .stored_secret()
+        );
+    }
 
     fn wallet(
         network: crate::Network,

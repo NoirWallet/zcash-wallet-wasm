@@ -183,3 +183,4 @@ pub fn warm_proving_caches() {
 }
 pub use selection::{gather_delegation_wallet_inputs_from_parts, GatherDelegationWalletInputs};
 pub use witness::store_tree_state_and_witnesses;
+pub mod proof_executor;

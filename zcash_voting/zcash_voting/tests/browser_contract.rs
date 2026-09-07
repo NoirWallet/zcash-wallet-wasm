@@ -4,6 +4,219 @@
 mod browser_storage_cases;
 
 #[test]
+fn pir_preparation_hotkey_is_round_wallet_scoped_and_survives_reload() {
+    use zcash_voting::{storage::VotingDb, Network, VotingRoundParams};
+    let db = VotingDb::open_browser("owner", Network::Testnet, None).unwrap();
+    let params = VotingRoundParams {
+        vote_round_id: "01".repeat(32),
+        snapshot_height: 100,
+        ea_pk: vec![7; 32],
+        nc_root: vec![0; 32],
+        nullifier_imt_root: vec![0; 32],
+    };
+    assert!(db.ensure_voting_hotkey(&params.vote_round_id).is_err());
+    db.init_round(Network::Testnet, &params, Some("identity"))
+        .unwrap();
+    let first = db.ensure_voting_hotkey(&params.vote_round_id).unwrap();
+    assert_eq!(
+        first.stored_secret(),
+        db.ensure_voting_hotkey(&params.vote_round_id)
+            .unwrap()
+            .stored_secret()
+    );
+    let reopened = VotingDb::open_browser(
+        "owner",
+        Network::Testnet,
+        Some(&db.serialize_bytes().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        first.stored_secret(),
+        reopened
+            .ensure_voting_hotkey(&params.vote_round_id)
+            .unwrap()
+            .stored_secret()
+    );
+    assert!(VotingDb::open_browser(
+        "other",
+        Network::Testnet,
+        Some(&db.serialize_bytes().unwrap())
+    )
+    .is_err());
+}
+
+mod pir_identity {
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use zcash_voting::pir::{Transport, TransportFuture, TransportResponse};
+
+    #[tokio::test]
+    async fn pir_response_shape_rejects_malformed_and_truncated_data_without_panicking() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use valar_ypir::{
+            client::YPIRClient,
+            modulus_switch::expected_ct_byte_len,
+            params::{GetQPrime, YPIRSPConfig},
+        };
+        struct Responses {
+            length: AtomicUsize,
+            layout: zcash_voting::pir::NegotiatedPirLayout,
+        }
+        impl Transport for Responses {
+            fn get<'a>(&'a self, url: &'a str) -> TransportFuture<'a> {
+                let layout = self.layout;
+                let body = if url.ends_with("/tier0") {
+                    vec![0; layout.tier0_bytes().unwrap()]
+                } else if url.ends_with("/params/tier1") {
+                    serde_json::to_vec(&json!({"num_items":layout.tier1_rows().unwrap(), "item_size_bits":layout.tier1_item_bits().unwrap(),"poly_len":layout.poly_len})).unwrap()
+                } else {
+                    serde_json::to_vec(&json!({"zcash_network":"test","nullifier_pool":"ironwood","dataset_version":2,"circuit_root":hex::encode([0;32]),"pir_root":hex::encode([0;32]),"num_ranges":1,"pir_layout":layout,"pir_depth":layout.pir_depth,"tier1_rows":layout.tier1_rows().unwrap(),"tier1_row_bytes":layout.tier1_row_bytes().unwrap(),"height":100})).unwrap()
+                };
+                Box::pin(async move {
+                    Ok(TransportResponse {
+                        status: 200,
+                        headers: vec![],
+                        body,
+                    })
+                })
+            }
+            fn post<'a>(&'a self, _: &'a str, _: Vec<u8>) -> TransportFuture<'a> {
+                let body = vec![0; self.length.load(Ordering::SeqCst)];
+                Box::pin(async move {
+                    Ok(TransportResponse {
+                        status: 200,
+                        headers: vec![],
+                        body,
+                    })
+                })
+            }
+        }
+        let panics = Arc::new(AtomicUsize::new(0));
+        let thread = std::thread::current().id();
+        let original = std::panic::take_hook();
+        let count = panics.clone();
+        std::panic::set_hook(Box::new(move |_| {
+            if std::thread::current().id() == thread {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        for degree in [2048, 4096] {
+            let layout = zcash_voting::wire::PirLayout {
+                pir_depth: 19,
+                tier0_layers: 11,
+                tier1_layers: 8,
+                poly_len: degree,
+            };
+            let negotiated = zcash_voting::pir::negotiated_pir_layout(layout).unwrap();
+            let params = YPIRClient::from_db_sz_simplepir_with_config(
+                2048,
+                24576 * 8,
+                YPIRSPConfig::for_poly_len(degree as usize),
+            );
+            let params = params.params();
+            let length = params.instances
+                * expected_ct_byte_len(params, params.get_q_prime_1(), params.get_q_prime_2());
+            let server = Arc::new(Responses {
+                length: AtomicUsize::new(1),
+                layout: negotiated,
+            });
+            let client = zcash_voting::pir::connect_pir_for_snapshot(
+                layout,
+                "https://pir.example",
+                server.clone(),
+                zcash_voting::Network::Testnet,
+                &[0; 32],
+                100,
+            )
+            .await
+            .unwrap();
+            for bytes in [0, 1, length - 1, length + 1, length] {
+                server.length.store(bytes, Ordering::SeqCst);
+                assert!(client
+                    .fetch_proof(zcash_voting::backend::pasta_curves::pallas::Base::from(1))
+                    .await
+                    .is_err());
+            }
+        }
+        std::panic::set_hook(original);
+        assert_eq!(
+            panics.load(Ordering::SeqCst),
+            0,
+            "unwind is unavailable in browser WASM"
+        );
+    }
+
+    struct Server {
+        root: serde_json::Value,
+        hits: Mutex<Vec<String>>,
+    }
+    impl Transport for Server {
+        fn get<'a>(&'a self, url: &'a str) -> TransportFuture<'a> {
+            self.hits.lock().unwrap().push(url.into());
+            let body = serde_json::to_vec(&self.root).unwrap();
+            Box::pin(async move {
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: vec![],
+                    body,
+                })
+            })
+        }
+        fn post<'a>(&'a self, _: &'a str, _: Vec<u8>) -> TransportFuture<'a> {
+            panic!("identity rejection must precede private queries")
+        }
+    }
+    #[tokio::test]
+    async fn pir_rejects_each_snapshot_identity_mismatch_before_assets_or_queries() {
+        let layout = zcash_voting::wire::PirLayout {
+            pir_depth: 19,
+            tier0_layers: 11,
+            tier1_layers: 8,
+            poly_len: 2048,
+        };
+        let negotiated = zcash_voting::pir::negotiated_pir_layout(layout).unwrap();
+        let root = json!({ "zcash_network": "test", "nullifier_pool": pir_types::NULLIFIER_POOL,
+            "dataset_version": pir_types::DATASET_VERSION, "circuit_root": hex::encode([0;32]),
+            "pir_root": hex::encode([0;32]), "num_ranges": 1, "pir_layout": negotiated,
+            "pir_depth": 19, "tier1_rows": negotiated.tier1_rows().unwrap(),
+            "tier1_row_bytes": negotiated.tier1_row_bytes().unwrap(), "height": 100 });
+        for (field, bad) in [
+            ("zcash_network", json!("main")),
+            ("nullifier_pool", json!("orchard")),
+            ("dataset_version", json!(999)),
+            (
+                "pir_layout",
+                json!({"pir_depth":19,"tier0_layers":12,"tier1_layers":7,"poly_len":2048}),
+            ),
+            ("circuit_root", json!(hex::encode([1; 32]))),
+            ("height", json!(101)),
+            ("height", json!(null)),
+        ] {
+            let mut mutated = root.clone();
+            mutated[field] = bad;
+            let server = Arc::new(Server {
+                root: mutated,
+                hits: Mutex::new(vec![]),
+            });
+            assert!(
+                zcash_voting::pir::connect_pir_for_snapshot(
+                    layout,
+                    "https://pir.example",
+                    server.clone(),
+                    zcash_voting::Network::Testnet,
+                    &[0; 32],
+                    100
+                )
+                .await
+                .is_err(),
+                "accepted {field}"
+            );
+            assert_eq!(*server.hits.lock().unwrap(), ["https://pir.example/root"]);
+        }
+    }
+}
+
+#[test]
 fn round_session_context_distinguishes_absence_and_is_wallet_scoped() {
     use zcash_voting::{storage::VotingDb, Network, VotingRoundParams};
     let db = VotingDb::open(":memory:").unwrap();
@@ -198,6 +411,135 @@ mod wallet_inputs {
             voting_hotkey: hotkey,
             resolved_round_name: "fixture".into(),
         })
+    }
+
+    #[tokio::test]
+    async fn pir_preparation_persists_witnesses_padding_cache_and_resume_plan() {
+        use voting_circuits::delegation::{ImtProvider, SpacedLeafImtProvider};
+        use zcash_voting::backend::pasta_curves::group::ff::PrimeField;
+        let (note, _, tree, witness) = fixture();
+        let imt = SpacedLeafImtProvider::new();
+        let params = VotingRoundParams {
+            vote_round_id: ROUND.into(),
+            snapshot_height: HEIGHT,
+            ea_pk: vec![7; 32],
+            nc_root: witness.root.clone(),
+            nullifier_imt_root: imt.root().to_repr().to_vec(),
+        };
+        let db = VotingDb::open_browser("owner", Network::Regtest, None).unwrap();
+        db.init_round(Network::Regtest, &params, Some("durable context"))
+            .unwrap();
+        let hotkey = db.ensure_voting_hotkey(ROUND).unwrap();
+        let notes = vec![note];
+        db.ensure_bundles(ROUND, &notes).unwrap();
+        let padding = db.ensure_padded_secrets(ROUND, 0, &notes).unwrap();
+        store_tree_state_and_witnesses(&db, ROUND, 0, &tree.encode_to_vec(), &notes, &[witness])
+            .unwrap();
+        let failure = db
+            .precompute_delegation_pir_async(ROUND, 0, &notes, Network::Regtest, |_| async {
+                Err(zcash_voting::VotingError::InvalidInput {
+                    message: "interrupted".into(),
+                })
+            })
+            .await;
+        assert!(failure.is_err());
+        let fetched = db
+            .precompute_delegation_pir_async(
+                ROUND,
+                0,
+                &notes,
+                Network::Regtest,
+                |nullifiers| async {
+                    // Serializing while the fetch is pending detects a held SQLite owner guard.
+                    assert!(!db.serialize_bytes().unwrap().is_empty());
+                    Ok(nullifiers
+                        .into_iter()
+                        .map(|nf| {
+                            let p = imt.non_membership_proof(nf).unwrap();
+                            zcash_voting::pir::ImtProofData {
+                                root: p.root,
+                                nf_bounds: p.nf_bounds,
+                                leaf_pos: p.leaf_pos,
+                                path: p.path,
+                            }
+                        })
+                        .collect())
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched.fetched_count, 5);
+        let plan = zcash_voting::session::resume_plan(&db, ROUND, &[1]).unwrap();
+        let reopened = VotingDb::open_browser(
+            "owner",
+            Network::Regtest,
+            Some(&db.serialize_bytes().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            hotkey.stored_secret(),
+            reopened
+                .ensure_voting_hotkey(ROUND)
+                .unwrap()
+                .stored_secret()
+        );
+        assert_eq!(
+            padding,
+            reopened.ensure_padded_secrets(ROUND, 0, &notes).unwrap()
+        );
+        assert_eq!(
+            plan,
+            zcash_voting::session::resume_plan(&reopened, ROUND, &[1]).unwrap()
+        );
+        assert!(reopened.has_complete_witnesses(ROUND, 0, &notes).unwrap());
+        let cached = reopened
+            .precompute_delegation_pir_async(ROUND, 0, &notes, Network::Regtest, |_| async {
+                panic!("reload must use verified persisted proofs")
+            })
+            .await
+            .unwrap();
+        assert_eq!(cached.cached_count, 5);
+        assert_eq!(cached.fetched_count, 0);
+    }
+
+    #[test]
+    fn pir_snapshot_tree_identity_rejects_protocol_root_height_and_network() {
+        let (_, _, tree, witness) = fixture();
+        let params = VotingRoundParams {
+            vote_round_id: ROUND.into(),
+            snapshot_height: HEIGHT,
+            ea_pk: vec![7; 32],
+            nc_root: witness.root,
+            nullifier_imt_root: vec![0; 32],
+        };
+        zcash_voting::precompute::validate_snapshot_tree_state(
+            &params,
+            Network::Regtest,
+            &tree.encode_to_vec(),
+        )
+        .unwrap();
+        let mut wrong = params.clone();
+        wrong.nc_root[0] ^= 1;
+        assert!(zcash_voting::precompute::validate_snapshot_tree_state(
+            &wrong,
+            Network::Regtest,
+            &tree.encode_to_vec()
+        )
+        .is_err());
+        wrong = params.clone();
+        wrong.snapshot_height += 1;
+        assert!(zcash_voting::precompute::validate_snapshot_tree_state(
+            &wrong,
+            Network::Regtest,
+            &tree.encode_to_vec()
+        )
+        .is_err());
+        assert!(zcash_voting::precompute::validate_snapshot_tree_state(
+            &params,
+            Network::Testnet,
+            &tree.encode_to_vec()
+        )
+        .is_err());
     }
 
     #[test]
@@ -508,7 +850,7 @@ fn browser_db_file_backed_wal_snapshot_preserves_pending_rows() {
         source.set_wallet_id("wallet-a");
         let observer = Connection::open(&files.0).unwrap();
         // Exercise a v17 file and leave all subsequent round data in its WAL.
-        observer.execute_batch("DROP TABLE wallet_metadata; PRAGMA user_version=17; PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        observer.execute_batch("ALTER TABLE rounds DROP COLUMN voting_hotkey_secret; DROP TABLE wallet_metadata; PRAGMA user_version=17; PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
         let params = RoundParams {
             vote_round_id: "0101010101010101010101010101010101010101010101010101010101010101"
                 .into(),

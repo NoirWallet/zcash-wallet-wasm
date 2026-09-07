@@ -85,3 +85,6 @@ package = "valar-ypir"
 
 [dev-dependencies.rand]
 version = "0.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.js-sys]
+version = "0.3"

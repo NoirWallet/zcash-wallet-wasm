@@ -57,6 +57,17 @@ lifecycle semantics are unchanged.
 of the complete stored protocol parameters and network for recovery identity
 comparison, with safe errors for missing or unreadable records.
 
+Browser preparation adds schema v19's wallet/round-scoped voting hotkey column,
+with create-once/load APIs and no changes to the caller's strict authenticated
+session envelope. Async PIR cache preparation releases SQLite ownership before
+fetching or validating proofs and reuses the existing cache verification path.
+The snapshot transport binds the actual PIR handshake to the authenticated
+testnet network, Ironwood dataset, layout, IMT root and height. The PIR adapter
+uses browser clocks and validates the public encoded response length before
+upstream decoding; query encoding and proof verification remain unchanged.
+Owned proof inputs may run sequentially or on the host's initialized Rayon pool;
+native large-stack proof behavior remains target-gated and unchanged.
+
 Check out the proposed upstream commit separately, review protocol/schema and
 dependency changes, and merge the documented compatibility patches explicitly.
 Update this revision and both Cargo lockfiles only after native LRZ tests,

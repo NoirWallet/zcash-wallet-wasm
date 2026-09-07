@@ -2103,6 +2103,7 @@ dependencies = [
  "futures",
  "hex",
  "imt-tree",
+ "js-sys",
  "log",
  "pir-types",
  "serde_json",

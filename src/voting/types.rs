@@ -44,6 +44,16 @@ pub struct VotingEligibility {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PreparedVotingRound {
+    pub round_id: String,
+    pub bundle_count: u32,
+    pub selected_note_count: u32,
+    pub voting_power: String,
+    pub state: VotingRoundPhase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VotingRoundStatus {
     pub round_id: String,
     pub phase: VotingRoundPhase,

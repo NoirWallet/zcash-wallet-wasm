@@ -34,10 +34,69 @@ pub fn select_pir_endpoint(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use pir_client::PirClientBlocking;
-pub use pir_client::{
-    ImtProofData, PirClient, Transport, TransportFuture, TransportResponse,
-};
+pub use pir_client::{ImtProofData, PirClient, Transport, TransportFuture, TransportResponse};
 pub use pir_types::PirLayout as NegotiatedPirLayout;
+
+/// Bind the client's actual handshake to the trusted round before any private query.
+pub async fn connect_pir_for_snapshot(
+    layout: PirLayout,
+    endpoint: &str,
+    transport: Arc<dyn Transport>,
+    network: crate::Network,
+    root: &[u8],
+    height: u64,
+) -> Result<PirClient, VotingError> {
+    let invalid = || VotingError::InvalidInput {
+        message: "PIR snapshot identity mismatch".into(),
+    };
+    if network != crate::Network::Testnet || root.len() != 32 || height == 0 {
+        return Err(invalid());
+    }
+    let bound = SnapshotTransport {
+        inner: transport,
+        root_url: format!("{}/root", normalize_endpoint_url(endpoint)),
+        layout: negotiated_pir_layout(layout)?,
+        root: root.to_vec(),
+        height,
+    };
+    connect_pir(layout, endpoint, Arc::new(bound))
+        .await
+        .map_err(|_| invalid())
+}
+
+struct SnapshotTransport {
+    inner: Arc<dyn Transport>,
+    root_url: String,
+    layout: NegotiatedPirLayout,
+    root: Vec<u8>,
+    height: u64,
+}
+impl Transport for SnapshotTransport {
+    fn get<'a>(&'a self, url: &'a str) -> TransportFuture<'a> {
+        Box::pin(async move {
+            let response = self.inner.get(url).await?;
+            if url == self.root_url {
+                let info: pir_types::RootInfo = serde_json::from_slice(&response.body)?;
+                anyhow::ensure!(
+                    (200..300).contains(&response.status)
+                        && info.zcash_network == pir_types::ZcashNetwork::Test
+                        && pir_types::is_current_dataset(
+                            &info.nullifier_pool,
+                            info.dataset_version
+                        )
+                        && info.pir_layout == self.layout
+                        && hex::decode(info.circuit_root)? == self.root
+                        && info.height == Some(self.height),
+                    "PIR snapshot identity mismatch"
+                );
+            }
+            Ok(response)
+        })
+    }
+    fn post<'a>(&'a self, url: &'a str, body: Vec<u8>) -> TransportFuture<'a> {
+        self.inner.post(url, body)
+    }
+}
 
 /// Converts a wallet-config [`PirLayout`] into the PIR client's negotiated layout.
 ///

@@ -22,7 +22,7 @@ try {
   const exports = await init();
   assert(crossOriginIsolated, 'host must serve COOP/COEP headers');
   assert(exports.memory.buffer instanceof SharedArrayBuffer, 'WASM memory must be shared');
-  await initThreadPool(2);
+  if (initThreadPool) await initThreadPool(2);
   console.log('WASM initialized');
   if (!WebVotingSession) {
     await test('default wallet initializes Rayon and resolves an async read', async () => {
@@ -31,6 +31,36 @@ try {
       wallet.free();
     });
   } else {
+  await test('owned proof execution on the initialized global pool and sequential executor', async () => {
+    assert(await bindings.votingTestProofExecutor(), 'executor result or worker mismatch');
+  });
+  await test('browser PIR binds actual root metadata and uses supported clocks through private request generation', async () => {
+    const original = window.fetch;
+    const layout = {pir_depth:19,tier0_layers:11,tier1_layers:8,poly_len:2048};
+    const root = {zcash_network:'test',nullifier_pool:'ironwood',dataset_version:2,circuit_root:'00'.repeat(32),pir_root:'00'.repeat(32),num_ranges:1,pir_layout:layout,pir_depth:19,tier1_rows:2048,tier1_row_bytes:24576,height:100};
+    let hits = [];
+    window.fetch = async request => {
+      const path = new URL(request.url).pathname;
+      hits.push(path);
+      assert(request.credentials === 'omit' && request.redirect === 'error', 'unsafe Fetch options');
+      if (path === '/root') return new Response(JSON.stringify(root));
+      if (path === '/tier0') return new Response(new Uint8Array(2047 * 32 + 2048 * 64));
+      if (path === '/params/tier1') return new Response(JSON.stringify({num_items:2048,item_size_bits:24576*8,poly_len:2048}));
+      assert(request.method === 'POST' && (await request.arrayBuffer()).byteLength > 0, 'missing encoded private query');
+      return new Response(new Uint8Array([0]), {status:200});
+    };
+    try {
+      for (const [field,value] of [['zcash_network','main'],['nullifier_pool','orchard'],['dataset_version',1],['pir_layout',{...layout,poly_len:4096}],['circuit_root','01'.repeat(32)],['height',101]]) {
+        const saved=root[field]; root[field]=value; hits=[];
+        await errorCode(()=>bindings.votingTestPir('https://pir.example',false),'PIR_SNAPSHOT_MISMATCH');
+        assert(JSON.stringify(hits) === '["/root"]', 'mismatch reached data or query endpoint');
+        root[field]=saved;
+      }
+      hits=[];
+      assert(await bindings.votingTestPir('https://pir.example',true), 'malformed proof response accepted');
+      assert(hits.includes('/tier1/query'), 'private request path was not exercised');
+    } finally { window.fetch=original; }
+  });
   const bytes = async name => new Uint8Array(await (await fetch(`fixtures/${name}`)).arrayBuffer());
   const metadata = await (await fetch('fixtures/metadata.json')).json();
   const walletBytes = await bytes('wallet.bin');
@@ -123,6 +153,7 @@ try {
     const s = session(()=>{});
     try {
       await errorCode(()=>s.checkEligibility(metadata.roundId),'ROUND_UNAUTHENTICATED');
+      await errorCode(()=>s.prepareRound(metadata.roundId),'ROUND_UNAUTHENTICATED');
       await errorCode(()=>s.clearRound('bad round id'),'ROUND_UNAUTHENTICATED');
       assert(!fetched,'untrusted round reached network');
     } finally { window.fetch=original; s.free(); }

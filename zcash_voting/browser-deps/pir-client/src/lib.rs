@@ -4,7 +4,24 @@
 //! retrieves circuit-ready `ImtProofData` without revealing the
 //! queried nullifier to the server.
 
-use std::{sync::Arc, time::Instant};
+#[cfg(target_arch = "wasm32")]
+use browser_clock::Instant;
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+mod browser_clock {
+    pub struct Instant(f64);
+    impl Instant {
+        pub fn now() -> Self {
+            Self(js_sys::Date::now())
+        }
+        pub fn elapsed(&self) -> std::time::Duration {
+            std::time::Duration::from_secs_f64(((js_sys::Date::now() - self.0) / 1000.0).max(0.0))
+        }
+    }
+}
 
 use anyhow::{Context, Result};
 use imt_tree::hasher::PoseidonHasher;
@@ -545,6 +562,7 @@ impl PirClient {
         // path) become recoverable errors rather than allowing a hostile
         // response to unwind through and abort the client process.
         let t2 = Instant::now();
+        validate_simplepir_response_length(&ypir_client, response_bytes.len())?;
         let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ypir_client.decode_response_simplepir(seed, &response_bytes)
         }))
@@ -586,6 +604,21 @@ impl PirClient {
             },
         ))
     }
+}
+
+fn validate_simplepir_response_length(client: &YPIRClient, length: usize) -> Result<()> {
+    use ypir::{modulus_switch::expected_ct_byte_len, params::GetQPrime};
+    let params = client.params();
+    // SimplePIR concatenates one modulus-switched ciphertext per instance.
+    // Use the codec's own geometry, before its assertion-based decoder is called.
+    let expected = expected_ct_byte_len(params, params.get_q_prime_1(), params.get_q_prime_2())
+        .checked_mul(params.instances)
+        .context("invalid YPIR response geometry")?;
+    anyhow::ensure!(
+        expected > 0 && length == expected,
+        "invalid YPIR response length"
+    );
+    Ok(())
 }
 
 fn fmt_time(ms: f64) -> String {

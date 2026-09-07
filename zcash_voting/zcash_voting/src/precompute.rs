@@ -36,6 +36,26 @@ use crate::{delegate::PreparedDelegationReport, round::BundleLayout, types::Netw
 
 pub use crate::vote::VanWitness;
 
+/// Validate public snapshot identity before gathering private wallet inputs.
+pub fn validate_snapshot_tree_state(
+    params: &crate::VotingRoundParams,
+    network: Network,
+    bytes: &[u8],
+) -> Result<(), VotingError> {
+    let frontier = crate::witness::snapshot_frontier(bytes, network, params.snapshot_height)?;
+    let root = frontier
+        .root(Some(
+            (crate::backend::orchard::NOTE_COMMITMENT_TREE_DEPTH as u8).into(),
+        ))
+        .to_bytes();
+    if root.as_slice() != params.nc_root {
+        return Err(VotingError::InvalidInput {
+            message: "snapshot note commitment root mismatch".into(),
+        });
+    }
+    Ok(())
+}
+
 static VOTE_TREE_SYNCS: OnceLock<Mutex<HashMap<String, Arc<crate::tree_sync::VoteTreeSync>>>> =
     OnceLock::new();
 
