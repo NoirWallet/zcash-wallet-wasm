@@ -4,6 +4,36 @@
 mod browser_storage_cases;
 
 #[test]
+fn round_session_context_distinguishes_absence_and_is_wallet_scoped() {
+    use zcash_voting::{storage::VotingDb, Network, VotingRoundParams};
+    let db = VotingDb::open(":memory:").unwrap();
+    let params = VotingRoundParams {
+        vote_round_id: "01".repeat(32),
+        snapshot_height: 100,
+        ea_pk: vec![7; 32],
+        nc_root: vec![1; 32],
+        nullifier_imt_root: vec![2; 32],
+    };
+    db.set_wallet_id("owner-a");
+    assert!(db.round_session_json(&params.vote_round_id).is_err());
+    db.init_round(Network::Testnet, &params, None).unwrap();
+    assert_eq!(db.round_session_json(&params.vote_round_id).unwrap(), None);
+    db.clear_round(&params.vote_round_id).unwrap();
+    db.init_round(Network::Testnet, &params, Some("opaque caller context"))
+        .unwrap();
+    assert_eq!(
+        db.round_session_json(&params.vote_round_id)
+            .unwrap()
+            .as_deref(),
+        Some("opaque caller context")
+    );
+    db.set_wallet_id("owner-b");
+    assert!(db.round_session_json(&params.vote_round_id).is_err());
+    db.init_round(Network::Testnet, &params, None).unwrap();
+    assert_eq!(db.round_session_json(&params.vote_round_id).unwrap(), None);
+}
+
+#[test]
 fn authenticated_config_round_params_bind_only_the_signed_authority_key() {
     use sha2::{Digest, Sha256};
     use zcash_voting::config::{

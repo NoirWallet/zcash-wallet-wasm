@@ -1,7 +1,7 @@
 //! Authenticated discovery and read-only minimum voting eligibility.
 #![allow(dead_code)]
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
     use zcash_voting::transport::{OwnedHttpResponse, TransportError, TransportFuture};
@@ -43,7 +43,7 @@ mod tests {
             hex::encode(Sha256::digest(STATIC))
         )
     }
-    fn active() -> serde_json::Value {
+    pub(crate) fn active() -> serde_json::Value {
         serde_json::json!({"vote_round_id": BASE64.encode(hex::decode(ID).unwrap()), "snapshot_height": 100,
             "nc_root": BASE64.encode([1;32]), "nullifier_imt_root": BASE64.encode([2;32]),
             "ea_pk": BASE64.encode([9;32]), "status": 1, "network": "testnet",
@@ -53,7 +53,7 @@ mod tests {
     fn envelope(entries: Vec<serde_json::Value>) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({"rounds": entries})).unwrap()
     }
-    async fn discover(
+    pub(crate) async fn discover(
         entries: Vec<serde_json::Value>,
         now: u64,
     ) -> (VotingDiscovery, BTreeMap<String, TrustedRound>) {
@@ -1023,6 +1023,14 @@ impl VotingApiError {
             VotingErrorCode::NetworkMismatch => "Voting requires the test network.",
             VotingErrorCode::WalletNotSynced => "Sync the wallet through the voting snapshot.",
             VotingErrorCode::RecoveryConflict => "Saved voting configuration no longer matches.",
+            VotingErrorCode::OperationInProgress => "Another voting operation is in progress.",
+            VotingErrorCode::PersistenceFailed => {
+                "Voting state could not be saved. Export or retry saving this session."
+            }
+            VotingErrorCode::SubmissionUnknown => {
+                "Voting submission outcome is unknown. Resume from saved state."
+            }
+            VotingErrorCode::SubmissionRejected => "Voting submission was rejected.",
             _ => "Voting inputs are unavailable.",
         };
         Self {

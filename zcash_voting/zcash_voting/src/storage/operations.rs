@@ -439,6 +439,20 @@ impl VotingDb {
         queries::list_rounds(&conn, &wallet_id)
     }
 
+    /// Returns caller-owned session context for this wallet's round.
+    /// A missing round is an error; SQL NULL is a present round without context.
+    pub fn round_session_json(&self, round_id: &str) -> Result<Option<String>, VotingError> {
+        self.conn()
+            .query_row(
+                "SELECT session_json FROM rounds WHERE wallet_id = ?1 AND round_id = ?2",
+                rusqlite::params![self.wallet_id(), round_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| VotingError::InvalidInput {
+                message: "round session context is unavailable".into(),
+            })
+    }
+
     /// Get all votes for a round, including proposal, bundle, and choice.
     pub fn get_votes(&self, round_id: &str) -> Result<Vec<VoteRecord>, VotingError> {
         let conn = self.conn();

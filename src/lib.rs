@@ -6,6 +6,8 @@ mod init;
 mod network;
 mod wallet;
 
+#[cfg(all(feature = "voting", target_arch = "wasm32"))]
+pub use bindgen::voting::WebVotingSession;
 pub use error::*;
 pub use network::*;
 pub use wallet::*;

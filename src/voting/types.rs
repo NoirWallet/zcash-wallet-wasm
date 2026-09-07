@@ -42,6 +42,29 @@ pub struct VotingEligibility {
     pub trimmed_value_zats: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VotingRoundStatus {
+    pub round_id: String,
+    pub phase: VotingRoundPhase,
+    pub completed_bundles: u32,
+    pub total_bundles: u32,
+    pub confirmed_votes: u32,
+    pub total_votes: u32,
+    /// Confirmed helper-share records, each representing Valar's helper quorum.
+    pub confirmed_helpers: u32,
+    pub required_helpers: u32,
+    pub next_action: String,
+}
+
+/// Task 9 persists this envelope through Valar's round creation API.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VotingSessionEnvelope {
+    pub version: u32,
+    pub authenticated_round: AuthenticatedRoundIdentity,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundSummary {

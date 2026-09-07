@@ -49,6 +49,11 @@ The `browser` feature rejects the Zakura backend at compile time.
 
 ## Updating
 
+The session facade additionally exposes `VotingDb::round_session_json`, a
+wallet-scoped read of caller-owned round context. Missing rounds return an
+error, while a present round without context returns `None`. Schema and helper
+lifecycle semantics are unchanged.
+
 Check out the proposed upstream commit separately, review protocol/schema and
 dependency changes, and merge the documented compatibility patches explicitly.
 Update this revision and both Cargo lockfiles only after native LRZ tests,
