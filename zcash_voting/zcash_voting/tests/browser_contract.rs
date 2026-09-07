@@ -3,6 +3,37 @@
 #[path = "support/browser_storage_cases.rs"]
 mod browser_storage_cases;
 
+#[test]
+fn authenticated_config_round_params_bind_only_the_signed_authority_key() {
+    use sha2::{Digest, Sha256};
+    use zcash_voting::config::{
+        resolve_dynamic_voting_config, resolve_static_voting_config, ResolveVotingConfigOptions,
+    };
+    let static_bytes = include_bytes!("../../../src/voting/fixtures/static.json");
+    let source = format!(
+        "https://example.com/static.json?checksum=sha256:{}",
+        hex::encode(Sha256::digest(static_bytes))
+    );
+    let anchor = resolve_static_voting_config(&source, static_bytes).unwrap();
+    let resolved = resolve_dynamic_voting_config(
+        anchor,
+        include_bytes!("../../../src/voting/fixtures/dynamic.json"),
+        ResolveVotingConfigOptions::default(),
+    )
+    .unwrap();
+    let id = resolved.authenticated_rounds[0].round_id.clone();
+    let params = resolved
+        .trusted_voting_round_params(id, 100, vec![1; 32], vec![2; 32])
+        .unwrap();
+    assert_eq!(params.ea_pk, vec![7; 32]);
+    assert!(resolved
+        .trusted_voting_round_params("01".repeat(32), 100, vec![1; 32], vec![2; 32])
+        .is_err());
+    assert!(resolved
+        .trusted_voting_round_params(params.vote_round_id, 100, vec![1; 31], vec![2; 32])
+        .is_err());
+}
+
 mod wallet_inputs {
     use incrementalmerkletree::{
         frontier::{CommitmentTree, Frontier},

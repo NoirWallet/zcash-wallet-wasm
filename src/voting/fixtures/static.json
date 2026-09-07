@@ -1,0 +1,15 @@
+{
+  "static_config_version": 2,
+  "dynamic_config_urls": [
+    "https://a.example.com/dynamic.json",
+    "https://b.example.com/dynamic.json"
+  ],
+  "trusted_keys": [
+    {
+      "key_id": "k1",
+      "alg": "ed25519",
+      "pubkey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY/k2NsFGFKyHN9E=",
+      "notes": null
+    }
+  ]
+}

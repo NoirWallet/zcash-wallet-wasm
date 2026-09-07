@@ -1253,6 +1253,26 @@ mod tests {
         .into_bytes()
     }
 
+    #[test]
+    fn browser_discovery_fixtures_match_valar_helpers() {
+        let signing_key = SigningKey::from_bytes(&[3; 32]);
+        for (checked_in, generated) in [
+            (
+                include_bytes!("../../../../src/voting/fixtures/static.json").as_slice(),
+                static_bytes_v2(&signing_key, &[MIRROR_A, MIRROR_B]),
+            ),
+            (
+                include_bytes!("../../../../src/voting/fixtures/dynamic.json").as_slice(),
+                dynamic_bytes(&signing_key),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(checked_in).unwrap(),
+                serde_json::from_slice::<serde_json::Value>(&generated).unwrap()
+            );
+        }
+    }
+
     fn round_auth_v2_preimage(round_id: &str, ea_pk: &[u8], layout: PirLayout) -> Vec<u8> {
         let round_id = hex::decode(round_id).unwrap().try_into().unwrap();
         let ea_pk = ea_pk.try_into().unwrap();

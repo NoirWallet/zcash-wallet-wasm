@@ -4069,6 +4069,7 @@ name = "zcash-wallet-wasm"
 version = "0.1.0"
 dependencies = [
  "age",
+ "base64 0.22.1",
  "bip0039",
  "bitcoin_hashes",
  "bs58",
@@ -4089,6 +4090,7 @@ dependencies = [
  "secrecy 0.8.0",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.17",
