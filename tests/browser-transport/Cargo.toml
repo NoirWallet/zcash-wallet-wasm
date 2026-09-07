@@ -1,0 +1,31 @@
+[package]
+name = "browser-transport-regressions"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+# Keep the JS boundary bindings aligned with the wallet's locked versions.
+[dependencies]
+wasm-bindgen = "=0.2.122"
+js-sys = "=0.3.99"
+wasm-bindgen-futures = "=0.4.72"
+futures-channel = "0.3"
+futures-util = "0.3"
+serde-wasm-bindgen = "0.6.5"
+http = "1"
+url = "2"
+thiserror = "2"
+web-sys = { version = "=0.3.99", features = [
+    "AbortController", "AbortSignal", "Headers", "Request", "RequestInit",
+    "RequestCredentials", "RequestMode", "RequestRedirect", "Response", "Window",
+] }
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[workspace]

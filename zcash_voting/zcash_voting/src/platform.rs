@@ -103,6 +103,24 @@ impl OwnedHttpRequest {
         }
     }
 
+    /// Validate JavaScript's full numeric length before narrowing to a Rust size.
+    /// A Vec allocation is also bounded by isize::MAX, even if the caller's
+    /// configured response limit is larger. Malformed lengths are read failures.
+    pub fn check_response_size_number(&self, size: f64) -> Result<usize, TransportError> {
+        if !size.is_finite() || size < 0.0 || size.fract() != 0.0 {
+            return Err(TransportError::after_dispatch(self.kind));
+        }
+        // Beyond Number.MAX_SAFE_INTEGER the numeric value is not exact.
+        if size > 9_007_199_254_740_991.0 {
+            return Err(self.oversized_response());
+        }
+        let size = size as u64;
+        if size > self.max_response_bytes as u64 || size > isize::MAX as u64 {
+            return Err(self.oversized_response());
+        }
+        Ok(size as usize)
+    }
+
     /// Reject a usable oversized Content-Length before buffering the body.
     /// Missing or malformed values never replace the actual byte-length check.
     pub fn check_content_length(&self, value: Option<&str>) -> Result<(), TransportError> {

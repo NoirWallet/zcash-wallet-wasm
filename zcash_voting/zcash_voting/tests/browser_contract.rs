@@ -113,6 +113,35 @@ mod transport {
         send::<TransportFuture>();
         object_safe(None);
     }
+
+    #[test]
+    fn javascript_response_lengths_are_validated_before_integer_conversion() {
+        for kind in [RequestKind::Idempotent, RequestKind::NonIdempotent] {
+            let req = request(kind);
+            assert_eq!(req.check_response_size_number(4.0), Ok(4));
+            for size in [5.0, 4_294_967_296.0, f64::MAX] {
+                let expected = match kind {
+                    RequestKind::Idempotent => TransportError::ResponseTooLarge { limit: 4 },
+                    RequestKind::NonIdempotent => TransportError::Ambiguous,
+                };
+                assert_eq!(req.check_response_size_number(size), Err(expected));
+            }
+            for size in [-1.0, 0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert_eq!(
+                    req.check_response_size_number(size),
+                    Err(TransportError::after_dispatch(kind))
+                );
+            }
+            let mut widest = request(kind);
+            widest.max_response_bytes = usize::MAX;
+            assert!(widest
+                .check_response_size_number(usize::MAX as f64 + 1.0)
+                .is_err());
+            assert!(widest
+                .check_response_size_number(isize::MAX as f64 + 1.0)
+                .is_err());
+        }
+    }
 }
 
 #[test]

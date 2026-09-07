@@ -54,6 +54,11 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
     }
     let js_request = web_sys::Request::new_with_str_and_init(&request.url, &init)
         .map_err(|_| TransportError::Definite)?;
+    let fetch: js_sys::Function =
+        js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("fetch"))
+            .map_err(|_| TransportError::Definite)?
+            .dyn_into()
+            .map_err(|_| TransportError::Definite)?;
 
     let (timeout_sender, timeout_receiver) = oneshot::channel::<()>();
     let mut timeout_sender = Some(timeout_sender);
@@ -71,11 +76,15 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
         )
         .map_err(|_| TransportError::Definite)?;
 
-    // From this call onward Fetch cannot establish non-delivery, even for a
-    // CORS failure or an abort. The same deadline includes array_buffer().
-    let promise = window.fetch_with_request(&js_request);
     let after_dispatch = || TransportError::after_dispatch(request.kind);
     let response = async {
+        // Function.call1 catches synchronous host exceptions, unlike the
+        // web-sys Fetch binding. Once invocation begins, non-delivery is unknown.
+        let promise: js_sys::Promise = fetch
+            .call1(&window, &js_request)
+            .map_err(|_| after_dispatch())?
+            .dyn_into()
+            .map_err(|_| after_dispatch())?;
         let value = JsFuture::from(promise)
             .await
             .map_err(|_| after_dispatch())?;
@@ -89,7 +98,13 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
             .await
             .map_err(|_| after_dispatch())?;
         let buffer: js_sys::ArrayBuffer = buffer.dyn_into().map_err(|_| after_dispatch())?;
-        request.check_response_size(buffer.byte_length() as usize)?;
+        // The locked js-sys byte_length getter narrows to u32. Reflect retains
+        // the complete JS number, including lengths at and above 2^32.
+        let size = js_sys::Reflect::get(&buffer, &wasm_bindgen::JsValue::from_str("byteLength"))
+            .map_err(|_| after_dispatch())?
+            .as_f64()
+            .ok_or_else(after_dispatch)?;
+        request.check_response_size_number(size)?;
         Ok(OwnedHttpResponse {
             status: response.status(),
             body: js_sys::Uint8Array::new(&buffer).to_vec(),
