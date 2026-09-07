@@ -22,4 +22,4 @@ wasm:
 check:
 	cargo check --target wasm32-unknown-unknown -Z build-std=panic_abort,std
 
-.PHONY: build check serve
+.PHONY: build check serve test-native build-wasm build-voting-wasm
