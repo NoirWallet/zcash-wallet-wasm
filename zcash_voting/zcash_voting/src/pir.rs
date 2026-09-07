@@ -349,6 +349,193 @@ mod tests {
     const ROUND_ID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
     const TEST_POLY_LEN: u32 = DEFAULT_YPIR_POLY_LEN as u32;
 
+    #[derive(Clone, Copy, Debug)]
+    enum AssetOutcome {
+        Valid,
+        Unavailable,
+        Malformed,
+        Oversized,
+        InvalidProtocol,
+    }
+
+    struct AssetTransport {
+        inner: RecordingTransport,
+        outcomes: [AssetOutcome; 2],
+        slow: usize,
+        completed: Mutex<Vec<usize>>,
+    }
+    impl Transport for AssetTransport {
+        fn get<'a>(&'a self, url: &'a str) -> TransportFuture<'a> {
+            Box::pin(async move {
+                let response = self.inner.get(url).await?;
+                let index = if url == "https://first/tier0" {
+                    0
+                } else if url == "https://first/params/tier1" {
+                    1
+                } else {
+                    return Ok(response);
+                };
+                if index == self.slow {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                self.completed.lock().unwrap().push(index);
+                match self.outcomes[index] {
+                    AssetOutcome::Valid => Ok(response),
+                    AssetOutcome::Unavailable => Ok(TransportResponse {
+                        status: 503,
+                        headers: vec![],
+                        body: b"untrusted diagnostic".to_vec(),
+                    }),
+                    AssetOutcome::Malformed => Ok(TransportResponse {
+                        body: vec![0],
+                        ..response
+                    }),
+                    AssetOutcome::Oversized => {
+                        Err(crate::platform::TransportError::ResponseTooLarge {
+                            limit: 64 * 1024 * 1024,
+                        }
+                        .into())
+                    }
+                    AssetOutcome::InvalidProtocol => {
+                        let mut response = response;
+                        if index == 0 {
+                            response.body[0] = 1;
+                        } else {
+                            let mut params: serde_json::Value =
+                                serde_json::from_slice(&response.body).unwrap();
+                            params["num_items"] = json!(0);
+                            response.body = serde_json::to_vec(&params).unwrap();
+                        }
+                        Ok(response)
+                    }
+                }
+            })
+        }
+        fn post<'a>(&'a self, _: &'a str, _: Vec<u8>) -> TransportFuture<'a> {
+            panic!("public asset validation must not query")
+        }
+    }
+
+    #[tokio::test]
+    async fn ordered_pir_assets_permanent_failure_dominates_in_both_completion_orders() {
+        for permanent in [
+            AssetOutcome::Malformed,
+            AssetOutcome::Oversized,
+            AssetOutcome::InvalidProtocol,
+        ] {
+            for index in 0..2 {
+                for slow in 0..2 {
+                    let mut outcomes = [AssetOutcome::Unavailable; 2];
+                    outcomes[index] = permanent;
+                    let transport = Arc::new(AssetTransport {
+                        inner: RecordingTransport::matching_root(),
+                        outcomes,
+                        slow,
+                        completed: Mutex::new(vec![]),
+                    });
+                    let result = OrderedSnapshotPir::connect(
+                        compiled_wallet_layout(),
+                        vec!["https://first".into(), "https://second".into()],
+                        transport.clone(),
+                        crate::Network::Testnet,
+                        &[0; 32],
+                        100,
+                    )
+                    .await;
+                    assert!(
+                        result.is_err(),
+                        "masked {permanent:?} at {index}, delayed {slow}"
+                    );
+                    assert_eq!(*transport.completed.lock().unwrap(), [1 - slow, slow]);
+                    assert_eq!(transport.inner.count_hits("/root"), 1);
+                    let error = result.err().unwrap().to_string();
+                    assert!(!error.contains("untrusted") && !error.contains("https://"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ordered_pir_assets_cancellation_drops_both_pending_loads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Active(Arc<AtomicUsize>);
+        impl Drop for Active {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        struct PendingAssets(RecordingTransport, Arc<AtomicUsize>);
+        impl Transport for PendingAssets {
+            fn get<'a>(&'a self, url: &'a str) -> TransportFuture<'a> {
+                Box::pin(async move {
+                    let response = self.0.get(url).await?;
+                    if !url.ends_with("/root") {
+                        self.1.fetch_add(1, Ordering::SeqCst);
+                        let _active = Active(self.1.clone());
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(response)
+                })
+            }
+            fn post<'a>(&'a self, _: &'a str, _: Vec<u8>) -> TransportFuture<'a> {
+                panic!("unexpected private query")
+            }
+        }
+        let active = Arc::new(AtomicUsize::new(0));
+        let transport = Arc::new(PendingAssets(
+            RecordingTransport::matching_root(),
+            active.clone(),
+        ));
+        let mut connecting = Box::pin(OrderedSnapshotPir::connect(
+            compiled_wallet_layout(),
+            vec!["https://first".into(), "https://second".into()],
+            transport.clone(),
+            crate::Network::Testnet,
+            &[0; 32],
+            100,
+        ));
+        assert!(futures_util::poll!(connecting.as_mut()).is_pending());
+        assert_eq!(active.load(Ordering::SeqCst), 2);
+        drop(connecting);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.0.count_hits("/root"), 1);
+    }
+
+    #[tokio::test]
+    async fn ordered_pir_assets_both_retryable_and_valid_success() {
+        for outcomes in [
+            [AssetOutcome::Unavailable; 2],
+            [AssetOutcome::Valid; 2],
+            [AssetOutcome::Valid, AssetOutcome::Unavailable],
+            [AssetOutcome::Unavailable, AssetOutcome::Valid],
+        ] {
+            for slow in 0..2 {
+                let transport = Arc::new(AssetTransport {
+                    inner: RecordingTransport::matching_root(),
+                    outcomes,
+                    slow,
+                    completed: Mutex::new(vec![]),
+                });
+                assert!(OrderedSnapshotPir::connect(
+                    compiled_wallet_layout(),
+                    vec!["https://first".into(), "https://second".into()],
+                    transport.clone(),
+                    crate::Network::Testnet,
+                    &[0; 32],
+                    100,
+                )
+                .await
+                .is_ok());
+                assert_eq!(*transport.completed.lock().unwrap(), [1 - slow, slow]);
+                let valid = outcomes.iter().all(|v| matches!(v, AssetOutcome::Valid));
+                assert_eq!(
+                    transport.inner.count_hits("/root"),
+                    if valid { 1 } else { 2 }
+                );
+            }
+        }
+    }
+
     #[test]
     fn ordered_pir_invalid_assembled_proof_blocks_retryable_sibling() {
         for invalid_first in [false, true] {

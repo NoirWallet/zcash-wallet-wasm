@@ -88,7 +88,7 @@ try {
           }
           return mode === 'all-fail' ? new Response('', {status:502}) : new Response(new Uint8Array([0]));
         };
-        await errorCode(()=>bindings.votingTestPirFallback(['https://first.example','https://second.example']), 'PIR_SNAPSHOT_MISMATCH');
+        await errorCode(()=>bindings.votingTestPirFallback(['https://first.example','https://second.example'],false), 'PIR_SNAPSHOT_MISMATCH');
         assert(queryCounts.get('first.example') === 2, 'first query batch not completed');
         const stopAtFirst = ['malformed','oversized','mixed'].includes(mode);
         assert(hits.includes('second.example/root') !== stopAtFirst, 'incorrect protocol failure fallback');
@@ -101,6 +101,46 @@ try {
         if (replacement >= 0) assert(hits.slice(replacement).every(hit=>hit.startsWith('second.example/')), 'endpoint order changed');
       }
     } finally { window.fetch = original; }
+  });
+  await test('PIR public assets complete and permanent errors dominate in either response order', async () => {
+    const original = window.fetch;
+    const layout = {pir_depth:19,tier0_layers:11,tier1_layers:8,poly_len:2048};
+    const root = {zcash_network:'test',nullifier_pool:'ironwood',dataset_version:2,circuit_root:'00'.repeat(32),pir_root:'00'.repeat(32),num_ranges:1,pir_layout:layout,pir_depth:19,tier1_rows:2048,tier1_row_bytes:24576,height:100};
+    const paths = ['/tier0','/params/tier1'];
+    const valid = index => index === 0 ? new Uint8Array(2047*32+2048*64) : JSON.stringify({num_items:2048,item_size_bits:24576*8,poly_len:2048});
+    const cases = [['valid','valid'],['unavailable','unavailable'],['valid','unavailable'],['unavailable','valid']];
+    for (const permanent of ['malformed','oversized','protocol']) cases.push([permanent,'unavailable'],['unavailable',permanent]);
+    try {
+      for (const outcomes of cases) for (const slow of [0,1]) {
+        const completed = [], roots = [];
+        window.fetch = async request => {
+          const {hostname,pathname} = new URL(request.url);
+          assert(request.method === 'GET', 'asset handshake dispatched private query');
+          if (pathname === '/root') { roots.push(hostname); return new Response(JSON.stringify(root)); }
+          const index = paths.indexOf(pathname);
+          assert(index >= 0, 'unexpected public path');
+          if (hostname === 'second.example') return new Response(valid(index));
+          if (index === slow) await new Promise(resolve=>setTimeout(resolve,10));
+          completed.push(index);
+          switch (outcomes[index]) {
+            case 'unavailable': return new Response('diagnostic must not escape',{status:503});
+            case 'malformed': return new Response(new Uint8Array([0]));
+            case 'oversized': return new Response('',{headers:{'Content-Length':String(64*1024*1024+1)}});
+            case 'protocol': {
+              if (index === 1) return new Response(JSON.stringify({num_items:0,item_size_bits:24576*8,poly_len:2048}));
+              const bytes=valid(index); bytes[0]=1; return new Response(bytes);
+            }
+            default: return new Response(valid(index));
+          }
+        };
+        const permanent = outcomes.some(value=>!['valid','unavailable'].includes(value));
+        const connect=()=>bindings.votingTestPirFallback(['https://first.example','https://second.example'],true);
+        if (permanent) await errorCode(connect,'PIR_SNAPSHOT_MISMATCH');
+        else assert(await connect(), 'valid public fallback failed');
+        assert(JSON.stringify(completed)===JSON.stringify([1-slow,slow]), 'did not complete both public loads');
+        assert(roots.length === (permanent || outcomes.every(value=>value==='valid') ? 1 : 2), 'masked permanent public asset failure');
+      }
+    } finally { window.fetch=original; }
   });
   const bytes = async name => new Uint8Array(await (await fetch(`fixtures/${name}`)).arrayBuffer());
   const metadata = await (await fetch('fixtures/metadata.json')).json();

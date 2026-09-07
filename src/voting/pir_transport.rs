@@ -79,7 +79,10 @@ pub async fn voting_test_pir(url: String, query: bool) -> Result<bool, wasm_bind
 
 #[cfg(debug_assertions)]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = votingTestPirFallback)]
-pub async fn voting_test_pir_fallback(urls: Vec<String>) -> Result<bool, wasm_bindgen::JsValue> {
+pub async fn voting_test_pir_fallback(
+    urls: Vec<String>,
+    handshake_only: bool,
+) -> Result<bool, wasm_bindgen::JsValue> {
     let mismatch =
         |_| super::types::VotingApiError::new(super::types::VotingErrorCode::PirSnapshotMismatch);
     let mut client = zcash_voting::pir::OrderedSnapshotPir::connect(
@@ -97,10 +100,12 @@ pub async fn voting_test_pir_fallback(urls: Vec<String>) -> Result<bool, wasm_bi
     )
     .await
     .map_err(mismatch)?;
-    client
-        .fetch_proofs(&[1.into(), 2.into()])
-        .await
-        .map_err(mismatch)?;
+    if !handshake_only {
+        client
+            .fetch_proofs(&[1.into(), 2.into()])
+            .await
+            .map_err(mismatch)?;
+    }
     Ok(true)
 }
 
