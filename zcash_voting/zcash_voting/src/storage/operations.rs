@@ -387,6 +387,7 @@ impl VotingDb {
         params: &VotingRoundParams,
         session_json: Option<&str>,
     ) -> Result<(), VotingError> {
+        self.validate_network(network)?;
         let conn = self.conn();
         let wallet_id = self.wallet_id();
         queries::insert_round(&conn, &wallet_id, network, params, session_json)
@@ -1853,7 +1854,7 @@ impl VotingDb {
             .map_err(|e| VotingError::Internal {
                 message: format!("failed to begin Keystone signature batch transaction: {e}"),
             })?;
-        let created_at = std::time::SystemTime::now()
+        let created_at = crate::clock::system_time_now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| VotingError::Internal {
                 message: format!("failed to read Keystone signature timestamp: {e}"),

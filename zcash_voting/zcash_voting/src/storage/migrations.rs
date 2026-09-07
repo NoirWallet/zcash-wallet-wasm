@@ -2,10 +2,9 @@ use rusqlite::Connection;
 
 use crate::VotingError;
 
-const CURRENT_VERSION: u32 = 17;
+const CURRENT_VERSION: u32 = 18;
 
-/// Schema version that `001_init.sql` produces, and the oldest version that can
-/// be upgraded in place.
+/// Oldest launched schema version that can be upgraded in place.
 ///
 /// Databases below this predate launch, so no user state is worth preserving
 /// and they are reset. At or above it, round state must survive: a wallet that
@@ -20,8 +19,8 @@ const LAUNCH_VERSION: u32 = 13;
 /// Entry `(from, sql)` moves a database from `user_version == from` to
 /// `from + 1`, and the entries must form an unbroken chain from
 /// [`LAUNCH_VERSION`] to [`CURRENT_VERSION`]. Every statement here MUST preserve
-/// existing rows; `001_init.sql` is updated alongside so a fresh database and a
-/// migrated one end up with the same schema.
+/// existing rows. The fresh schema combines `001_init.sql` (v17) and
+/// `002_wallet_owner.sql` so it matches an incrementally migrated database.
 const INCREMENTAL_MIGRATIONS: &[(u32, &str)] = &[
     (13, "ALTER TABLE rounds ADD COLUMN bundle_policy_json TEXT;"),
     // v15 replaces the bundle-scoped `imt_proofs` table with the bundle- and
@@ -117,9 +116,11 @@ BEGIN
        AND commitment_bundle_json IS NOT NEW.commitment_bundle_json;
 END;",
     ),
+    (17, include_str!("migrations/002_wallet_owner.sql")),
 ];
 
-const RESET_SQL: &str = "DROP TABLE IF EXISTS pir_proof_cache;
+const RESET_SQL: &str = "DROP TABLE IF EXISTS wallet_metadata;
+DROP TABLE IF EXISTS pir_proof_cache;
 DROP TABLE IF EXISTS ballot_intent;
 DROP TABLE IF EXISTS imt_proofs;
 DROP TABLE IF EXISTS helper_share_plans;
@@ -164,6 +165,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), VotingError> {
         tx.execute_batch(include_str!("migrations/001_init.sql"))
             .map_err(|e| VotingError::Internal {
                 message: format!("failed to create launch database schema: {}", e),
+            })?;
+        tx.execute_batch(include_str!("migrations/002_wallet_owner.sql"))
+            .map_err(|e| VotingError::Internal {
+                message: format!("failed to create wallet owner schema: {e}"),
             })?;
     } else {
         // Launched databases hold delegation state that cannot be rebuilt, so

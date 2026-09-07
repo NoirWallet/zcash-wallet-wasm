@@ -2,13 +2,30 @@ mod migrations;
 pub mod operations;
 pub mod queries;
 
-use std::{sync::Mutex, time::Duration};
+use std::sync::Mutex;
+#[cfg(target_arch = "wasm32")]
+use std::{
+    cell::{RefCell, RefMut},
+    rc::Rc,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{sync::MutexGuard, time::Duration};
 
 use rusqlite::Connection;
 
 use crate::types::{Network, VotingError};
 
+#[cfg(not(target_arch = "wasm32"))]
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(not(target_arch = "wasm32"))]
+type ConnectionOwner = Mutex<Connection>;
+#[cfg(target_arch = "wasm32")]
+type ConnectionOwner = Rc<RefCell<Connection>>;
+#[cfg(not(target_arch = "wasm32"))]
+type ConnectionGuard<'a> = MutexGuard<'a, Connection>;
+#[cfg(target_arch = "wasm32")]
+type ConnectionGuard<'a> = RefMut<'a, Connection>;
 
 /// Current phase of a voting round.
 ///
@@ -85,8 +102,9 @@ pub struct KeystoneSignatureBatchResult {
 /// Database handle for voting state. Wraps a SQLite connection and a
 /// wallet identifier that scopes all round data to a single wallet.
 pub struct VotingDb {
-    conn: Mutex<Connection>,
+    conn: ConnectionOwner,
     wallet_id: Mutex<String>,
+    browser_owner: Option<(String, Network)>,
 }
 
 impl VotingDb {
@@ -94,6 +112,12 @@ impl VotingDb {
     /// Runs migrations automatically.
     /// Call `set_wallet_id` before performing any round operations.
     pub fn open(path: &str) -> Result<Self, VotingError> {
+        #[cfg(target_arch = "wasm32")]
+        if path != ":memory:" {
+            return Err(VotingError::InvalidInput {
+                message: "browser voting databases must be in memory".into(),
+            });
+        }
         let mut conn = if path == ":memory:" {
             Connection::open_in_memory()
         } else {
@@ -103,11 +127,17 @@ impl VotingDb {
             message: format!("failed to open database: {}", e),
         })?;
 
+        #[cfg(not(target_arch = "wasm32"))]
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(|e| VotingError::Internal {
                 message: format!("failed to configure database busy timeout: {}", e),
             })?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+        #[cfg(not(target_arch = "wasm32"))]
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| VotingError::Internal {
+                message: format!("failed to set journal mode: {e}"),
+            })?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
             .map_err(|e| VotingError::Internal {
                 message: format!("failed to set pragmas: {}", e),
             })?;
@@ -115,13 +145,66 @@ impl VotingDb {
         migrations::migrate(&mut conn)?;
 
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: ConnectionOwner::new(conn.into()),
             wallet_id: Mutex::new(String::new()),
+            browser_owner: None,
         })
     }
 
+    /// Opens an account- and network-bound, in-memory database from owned bytes.
+    /// The input slice can be changed or dropped immediately after this returns.
+    pub fn open_browser(
+        wallet_id: &str,
+        network: Network,
+        bytes: Option<&[u8]>,
+    ) -> Result<Self, VotingError> {
+        if wallet_id.is_empty() {
+            return Err(VotingError::InvalidInput {
+                message: "wallet owner must not be empty".into(),
+            });
+        }
+        let mut conn = Connection::open_in_memory().map_err(browser_storage_error)?;
+        if let Some(bytes) = bytes.filter(|bytes| !bytes.is_empty()) {
+            conn.deserialize_read_exact(
+                rusqlite::MAIN_DB,
+                std::io::Cursor::new(bytes),
+                bytes.len(),
+                false,
+            )
+            .map_err(browser_storage_error)?;
+        }
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .map_err(browser_storage_error)?;
+        validate_browser_identity(&conn, wallet_id, network)?;
+        migrations::migrate(&mut conn)?;
+        validate_browser_identity(&conn, wallet_id, network)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO wallet_metadata (singleton, wallet_id, network) VALUES (1, ?1, ?2)",
+            rusqlite::params![wallet_id, queries::network_to_storage(network)],
+        ).map_err(browser_storage_error)?;
+        Ok(Self {
+            conn: ConnectionOwner::new(conn.into()),
+            wallet_id: Mutex::new(wallet_id.into()),
+            browser_owner: Some((wallet_id.into(), network)),
+        })
+    }
+
+    /// Returns an independent snapshot of all durable voting state.
+    pub fn serialize_bytes(&self) -> Result<Vec<u8>, VotingError> {
+        self.conn()
+            .serialize(rusqlite::MAIN_DB)
+            .map(|bytes| bytes.to_vec())
+            .map_err(|e| VotingError::Internal {
+                message: format!("failed to serialize voting database: {e}"),
+            })
+    }
+
     /// Set the wallet identifier used to scope all subsequent operations.
+    /// Panics if this would rebind a database opened with `open_browser`.
     pub fn set_wallet_id(&self, id: &str) {
+        if let Some((owner, _)) = &self.browser_owner {
+            assert_eq!(owner, id, "wallet owner mismatch");
+        }
         *self.wallet_id.lock().expect("wallet_id mutex poisoned") = id.to_string();
     }
 
@@ -140,9 +223,91 @@ impl VotingDb {
     }
 
     /// Get a lock on the underlying connection for query execution.
-    pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().expect("database mutex poisoned")
+    pub(crate) fn conn(&self) -> ConnectionGuard<'_> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.conn.lock().expect("database mutex poisoned")
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.conn.borrow_mut()
+        }
     }
+
+    pub(crate) fn validate_network(&self, network: Network) -> Result<(), VotingError> {
+        if self
+            .browser_owner
+            .as_ref()
+            .is_some_and(|(_, owner_network)| *owner_network != network)
+        {
+            return Err(VotingError::InvalidInput {
+                message: "network mismatch".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn browser_storage_error(error: rusqlite::Error) -> VotingError {
+    VotingError::Internal {
+        message: format!("invalid browser voting database: {error}"),
+    }
+}
+
+fn validate_browser_identity(
+    conn: &Connection,
+    wallet_id: &str,
+    network: Network,
+) -> Result<(), VotingError> {
+    // Inspect every wallet-bearing table, including orphaned legacy child rows,
+    // before migrations can reset a pre-launch database.
+    let mut tables = conn
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")
+        .map_err(browser_storage_error)?;
+    let names = tables
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(browser_storage_error)?;
+    for name in names {
+        let name = name.map_err(browser_storage_error)?;
+        let mut columns = conn
+            .prepare("SELECT name FROM pragma_table_info(?1)")
+            .map_err(browser_storage_error)?;
+        let columns = columns
+            .query_map([&name], |r| r.get::<_, String>(0))
+            .map_err(browser_storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(browser_storage_error)?;
+        let table = name.replace('"', "\"\"");
+        for (column, expected, message) in [
+            ("wallet_id", wallet_id, "wallet owner mismatch"),
+            (
+                "network",
+                queries::network_to_storage(network),
+                "network mismatch",
+            ),
+        ] {
+            if !columns.iter().any(|value| value == column) {
+                continue;
+            }
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE {column} != ?1 {} )",
+                if column == "wallet_id" && name != "wallet_metadata" {
+                    "AND wallet_id != ''"
+                } else {
+                    ""
+                }
+            );
+            let mismatch: bool = conn
+                .query_row(&sql, [expected], |r| r.get(0))
+                .map_err(browser_storage_error)?;
+            if mismatch {
+                return Err(VotingError::InvalidInput {
+                    message: message.into(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -173,7 +338,7 @@ mod tests {
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 17);
+        assert_eq!(version, 18);
     }
 
     #[test]

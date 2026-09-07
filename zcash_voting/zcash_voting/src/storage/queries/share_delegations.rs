@@ -630,7 +630,7 @@ fn record_share_delegation_inner(
             let ambiguous_json =
                 serialize_url_list(state.outcome_unknown_urls(), &[], "ambiguous_urls")?;
             let attempting_json = serialize_url_list(&[], &[], "attempting_urls")?;
-            let now = std::time::SystemTime::now()
+            let now = crate::clock::system_time_now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();

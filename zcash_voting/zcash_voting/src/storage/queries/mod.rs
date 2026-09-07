@@ -299,7 +299,7 @@ pub fn insert_round(
     params: &VotingRoundParams,
     session_json: Option<&str>,
 ) -> Result<(), VotingError> {
-    let now = std::time::SystemTime::now()
+    let now = crate::clock::system_time_now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
@@ -2208,7 +2208,7 @@ fn insert_witnesses(
     bundle_index: u32,
     witnesses: &[WitnessData],
 ) -> Result<(), VotingError> {
-    let now = std::time::SystemTime::now()
+    let now = crate::clock::system_time_now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
@@ -2580,7 +2580,7 @@ pub fn store_vote(
     choice: u32,
     commitment: &[u8],
 ) -> Result<(), VotingError> {
-    let now = std::time::SystemTime::now()
+    let now = crate::clock::system_time_now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
@@ -3117,7 +3117,7 @@ pub fn store_keystone_signature(
     sighash: &[u8],
     rk: &[u8],
 ) -> Result<(), VotingError> {
-    let now = std::time::SystemTime::now()
+    let now = crate::clock::system_time_now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();

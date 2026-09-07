@@ -1,3 +1,6 @@
+#[path = "storage_snapshot.rs"]
+mod storage_snapshot;
+
 use zcash_voting::{
     backend::pasta_curves::{
         group::{ff::PrimeField, Group, GroupEncoding},
@@ -39,13 +42,15 @@ fn db_with_confirmed_recovery(recovery: VoteRecoveryBundle) -> VotingDb {
     // Keep this adversarial fixture's committed vote delayed: a higher eligible
     // bundle owns the round-immediate designation even though it is not yet
     // committed in these transport-focused tests.
-    db.conn()
+    let snapshot = storage_snapshot::snapshot(&db);
+    snapshot
         .execute(
             "INSERT INTO bundles (round_id, wallet_id, bundle_index)
              VALUES (?1, ?2, 1)",
             rusqlite::params![ROUND_ID, WALLET_ID],
         )
         .unwrap();
+    let db = storage_snapshot::restore(snapshot, WALLET_ID);
     db.set_ballot_intent(
         ROUND_ID,
         PROPOSAL_ID,

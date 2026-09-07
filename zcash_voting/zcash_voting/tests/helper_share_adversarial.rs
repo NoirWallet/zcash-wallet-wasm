@@ -1,4 +1,4 @@
-#![cfg(feature = "test-fixtures")]
+#![cfg(all(feature = "test-fixtures", not(target_arch = "wasm32")))]
 
 #[path = "support/helper_fleet.rs"]
 mod helper_fleet;

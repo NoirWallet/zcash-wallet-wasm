@@ -1,4 +1,7 @@
-#![cfg(feature = "test-fixtures")]
+#![cfg(all(feature = "test-fixtures", not(target_arch = "wasm32")))]
+
+#[path = "support/storage_snapshot.rs"]
+mod storage_snapshot;
 
 use std::{sync::Arc, time::Duration};
 
@@ -111,7 +114,7 @@ fn db_with_bundle() -> VotingDb {
 }
 
 fn stored_confirmation_fields(db: &VotingDb) -> (Option<String>, Option<i64>) {
-    db.conn()
+    storage_snapshot::snapshot(db)
         .query_row(
             "SELECT tx_hash, vc_tree_position FROM votes
              WHERE round_id = ?1 AND wallet_id = ?2
@@ -195,7 +198,8 @@ fn downstream_fixture_does_not_repair_a_submitted_vote() {
     let fixture = recovery_fixture();
     insert_recovery_fixture(&db, &fixture).unwrap();
     record_submission(&db, ROUND_ID, 0, 1, "vote-tx").unwrap();
-    db.conn()
+    let snapshot = storage_snapshot::snapshot(&db);
+    snapshot
         .execute(
             "UPDATE votes SET commitment_bundle_json = NULL
              WHERE round_id = ?1 AND wallet_id = ?2
@@ -204,6 +208,7 @@ fn downstream_fixture_does_not_repair_a_submitted_vote() {
         )
         .unwrap();
 
+    let db = storage_snapshot::restore(snapshot, WALLET_ID);
     let err = insert_recovery_fixture(&db, &fixture).unwrap_err();
 
     assert!(
@@ -296,7 +301,8 @@ async fn downstream_fixture_replacement_clears_stale_share_tracking() {
 #[test]
 fn downstream_fixture_rolls_back_when_recovery_storage_fails() {
     let db = db_with_bundle();
-    db.conn()
+    let snapshot = storage_snapshot::snapshot(&db);
+    snapshot
         .execute_batch(
             "CREATE TRIGGER reject_fixture_recovery
              BEFORE UPDATE OF commitment_bundle_json ON votes
@@ -307,6 +313,7 @@ fn downstream_fixture_rolls_back_when_recovery_storage_fails() {
         )
         .unwrap();
 
+    let db = storage_snapshot::restore(snapshot, WALLET_ID);
     let err = insert_recovery_fixture(&db, &recovery_fixture()).unwrap_err();
 
     assert!(

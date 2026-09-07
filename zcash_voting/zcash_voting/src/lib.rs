@@ -9,6 +9,10 @@
 //! `confirmation`, `share`, and `session` rather than writing storage rows
 //! directly.
 
+// The upstream unit harness uses native wallet/network adapters. WASM runtime
+// coverage lives in integration tests, which compile the normal library.
+#![cfg(not(all(test, target_arch = "wasm32")))]
+
 #[cfg(target_arch = "wasm32")]
 extern crate rusqlite_browser as rusqlite;
 
@@ -27,6 +31,7 @@ compile_error!("enable exactly one of the `lrz` or `zakura` features");
 
 pub mod action;
 pub mod backend;
+mod clock;
 pub mod config;
 pub mod confirmation;
 pub mod delegate;
