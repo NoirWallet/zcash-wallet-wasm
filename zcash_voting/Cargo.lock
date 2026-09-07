@@ -4210,6 +4210,7 @@ version = "0.24.0"
 dependencies = [
  "base64",
  "bech32",
+ "bip32",
  "bls12_381",
  "bs58",
  "byteorder",
@@ -4229,6 +4230,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rayon",
  "sapling-crypto",
+ "secp256k1",
  "secrecy",
  "shardtree",
  "subtle",
@@ -4254,6 +4256,7 @@ dependencies = [
 name = "zcash_client_sqlite"
 version = "0.22.0"
 dependencies = [
+ "bip32",
  "bitflags 2.13.1",
  "bs58",
  "byteorder",
@@ -4275,6 +4278,7 @@ dependencies = [
  "sapling-crypto",
  "schemerz",
  "schemerz-rusqlite",
+ "secp256k1",
  "secrecy",
  "shardtree",
  "static_assertions",
@@ -4310,6 +4314,7 @@ name = "zcash_keys"
 version = "0.16.1"
 dependencies = [
  "bech32",
+ "bip32",
  "blake2b_simd",
  "bls12_381",
  "bs58",
@@ -4384,6 +4389,7 @@ dependencies = [
  "rand_core 0.6.4",
  "redjubjub",
  "sapling-crypto",
+ "secp256k1",
  "sha2 0.10.9",
  "zcash_encoding",
  "zcash_note_encryption",
@@ -4503,6 +4509,7 @@ dependencies = [
  "wasm-bindgen-test",
  "zakura-wallet-lib",
  "zcash_client_backend",
+ "zcash_client_sqlite",
  "zcash_keys",
  "zcash_note_encryption",
  "zcash_primitives",

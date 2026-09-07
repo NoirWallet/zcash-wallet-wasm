@@ -156,7 +156,7 @@ fn note_matches_stored_identity(
 }
 
 /// Reconstruct an `orchard::Note` from raw wallet DB fields.
-fn reconstruct_note(
+pub(crate) fn reconstruct_note(
     full_note: &NoteInfo,
     network: &Network,
 ) -> Result<(orchard::Note, FullViewingKey), VotingError> {

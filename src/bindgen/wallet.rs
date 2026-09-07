@@ -61,6 +61,12 @@ pub struct WebWallet {
 }
 
 impl WebWallet {
+    #[cfg(feature = "voting")]
+    #[allow(dead_code)]
+    pub(crate) fn shared_inner(&self) -> MemoryWallet<tonic_web_wasm_client::Client> {
+        self.inner.clone()
+    }
+
     pub fn client(&self) -> CompactTxStreamerClient<tonic_web_wasm_client::Client> {
         self.inner.client.clone()
     }

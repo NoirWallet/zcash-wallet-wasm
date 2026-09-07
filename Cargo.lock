@@ -4227,6 +4227,7 @@ dependencies = [
 name = "zcash_client_sqlite"
 version = "0.22.0"
 dependencies = [
+ "bip32",
  "bitflags",
  "bs58",
  "byteorder",
@@ -4248,6 +4249,7 @@ dependencies = [
  "sapling-crypto",
  "schemerz",
  "schemerz-rusqlite",
+ "secp256k1 0.29.1",
  "secrecy 0.8.0",
  "shardtree",
  "static_assertions",
@@ -4494,6 +4496,7 @@ dependencies = [
  "voting-crypto-deps",
  "zakura-wallet-lib",
  "zcash_client_backend",
+ "zcash_client_sqlite",
  "zcash_keys",
  "zcash_primitives",
  "zcash_protocol",

@@ -1559,7 +1559,13 @@ mod tests {
         assert_eq!(prepared.bundle_note_infos.len(), 2);
         assert_eq!(prepared.bundle_note_infos[0].position, 3);
         assert_eq!(prepared.bundle_note_infos[1].position, 7);
-        assert_eq!(prepared.anchor_tree_state_bytes, vec![0xAA, 0xBB]);
+        assert_eq!(
+            prepared.anchor_tree_state_bytes,
+            crate::selection::test_snapshot_tree_state(
+                REGTEST_NU6_3_SNAPSHOT_HEIGHT,
+                &prepared.bundle_note_infos
+            )
+        );
         assert_eq!(prepared.network, Network::Regtest);
         assert_eq!(prepared.round_name, "Demo Round");
         assert_eq!(
@@ -1847,7 +1853,15 @@ mod tests {
             network: Network::Regtest,
             round_params: round_params.clone(),
             resolved_round_name: "Demo Round".to_string(),
-            anchor_tree_state_bytes: vec![0xAA, 0xBB],
+            anchor_tree_state_bytes: crate::selection::test_snapshot_tree_state(
+                REGTEST_NU6_3_SNAPSHOT_HEIGHT,
+                &crate::selection::select_snapshot_note_infos(
+                    &wallet_db,
+                    &account_uuid.expose_uuid().to_string(),
+                    REGTEST_NU6_3_SNAPSHOT_HEIGHT,
+                )
+                .unwrap(),
+            ),
             branch_id_provider: LightwalletdBranchIdProvider::resolved(u32::from(BranchId::Nu6_3)),
         };
         let wallet_inputs = gather_delegation_wallet_inputs(GatherDelegationWalletParams {
@@ -2341,18 +2355,46 @@ mod tests {
             voting_crypto_deps::rand::rngs::OsRng,
         );
         let hotkey = test_regtest_voting_hotkey();
+        let selected = crate::selection::select_snapshot_note_infos(
+            &db,
+            &account_uuid.expose_uuid().to_string(),
+            REGTEST_NU6_3_SNAPSHOT_HEIGHT,
+        )
+        .unwrap();
+        let tree_state_bytes =
+            crate::selection::test_snapshot_tree_state(REGTEST_NU6_3_SNAPSHOT_HEIGHT, &selected);
         let inputs = gather_delegation_wallet_inputs(GatherDelegationWalletParams {
             wallet_db: &db,
             account_uuid: &account_uuid.expose_uuid().to_string(),
             voting_hotkey: &hotkey,
             snapshot_height: REGTEST_NU6_3_SNAPSHOT_HEIGHT,
             scanned_height: REGTEST_NU6_3_SNAPSHOT_HEIGHT,
-            anchor_tree_state_bytes: vec![0xAA, 0xBB],
+            anchor_tree_state_bytes: tree_state_bytes.clone(),
             resolved_round_name: "Demo Round".to_string(),
         })
         .unwrap();
 
-        assert_eq!(inputs.anchor_tree_state_bytes, vec![0xAA, 0xBB]);
+        let parts = crate::selection::gather_delegation_wallet_inputs_from_parts(
+            crate::selection::GatherDelegationWalletInputs {
+                network: Network::Regtest,
+                scanned_height: REGTEST_NU6_3_SNAPSHOT_HEIGHT,
+                snapshot_height: REGTEST_NU6_3_SNAPSHOT_HEIGHT,
+                anchor_tree_state_bytes: tree_state_bytes.clone(),
+                round_note_infos: selected,
+                account_keys: load_account_keys(&db, &account_uuid.expose_uuid().to_string())
+                    .unwrap(),
+                voting_hotkey: &hotkey,
+                resolved_round_name: "Demo Round".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(inputs.round_note_infos, parts.round_note_infos);
+        assert_eq!(inputs.delegation_keys, parts.delegation_keys);
+        assert_eq!(
+            inputs.anchor_tree_state_bytes,
+            parts.anchor_tree_state_bytes
+        );
+        assert_eq!(inputs.anchor_tree_state_bytes, tree_state_bytes);
         assert_eq!(inputs.round_note_infos.len(), 2);
         assert_eq!(inputs.round_note_infos[0].position, 3);
         assert_eq!(inputs.round_note_infos[1].position, 7);

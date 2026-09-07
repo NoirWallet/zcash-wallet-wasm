@@ -19,6 +19,111 @@ use zcash_client_backend::proto::service::TreeState;
 use zcash_client_sqlite::WalletDb;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
+pub(crate) fn snapshot_frontier(
+    bytes: &[u8],
+    network: Network,
+    height: u64,
+) -> Result<incrementalmerkletree::frontier::NonEmptyFrontier<MerkleHashOrchard>, VotingError> {
+    let invalid = |message: &str| VotingError::InvalidInput {
+        message: message.into(),
+    };
+    let height32 =
+        u32::try_from(height).map_err(|_| invalid("snapshot_height does not fit in u32"))?;
+    VotingShieldedProtocol::for_height(&network, BlockHeight::from_u32(height32))?;
+    let state = TreeState::decode(bytes).map_err(|_| invalid("invalid TreeState protobuf"))?;
+    let expected = match network {
+        Network::Mainnet => "main",
+        Network::Testnet => "test",
+        Network::Regtest => "regtest",
+    };
+    if state.network != expected {
+        return Err(invalid("TreeState network does not match voting network"));
+    }
+    if state.height != height {
+        return Err(invalid(
+            "cached TreeState height does not match round snapshot_height",
+        ));
+    }
+    let tree = state
+        .ironwood_tree()
+        .map_err(|_| invalid("invalid Ironwood TreeState frontier"))?;
+    tree.to_frontier()
+        .take()
+        .ok_or_else(|| invalid("empty ironwood frontier at snapshot height"))
+}
+
+/// Validate the supplied notes, historical frontier and paths, then atomically
+/// replace the tree state and bundle witnesses. Repeating identical inputs is
+/// idempotent; any validation or write failure leaves both caches unchanged.
+pub fn store_tree_state_and_witnesses(
+    db: &VotingDb,
+    round_id: &str,
+    bundle_index: u32,
+    tree_state_bytes: &[u8],
+    notes: &[NoteInfo],
+    witnesses: &[WitnessData],
+) -> Result<(), VotingError> {
+    let invalid = |message: &str| VotingError::InvalidInput {
+        message: message.into(),
+    };
+    let wallet_id = db.wallet_id();
+    let mut conn = db.conn();
+    let tx = conn
+        .transaction()
+        .map_err(|_| invalid("could not start witness storage transaction"))?;
+    let (params, network) = queries::load_round_params_with_network(&tx, round_id, &wallet_id)?;
+    let frontier = snapshot_frontier(tree_state_bytes, network, params.snapshot_height)?;
+    let root = frontier
+        .root(Some((orchard::NOTE_COMMITMENT_TREE_DEPTH as u8).into()))
+        .to_bytes();
+    if params.nc_root != root {
+        return Err(invalid(
+            "cached TreeState ironwood root does not match round nc_root",
+        ));
+    }
+    crate::selection::validate_snapshot_notes(notes, network, frontier.position().into())?;
+    if notes.is_empty() || notes.len() != witnesses.len() {
+        return Err(invalid("witness count does not match voting notes"));
+    }
+    let expected: std::collections::BTreeMap<_, _> =
+        notes.iter().map(|n| (n.position, &n.commitment)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for witness in witnesses {
+        if !seen.insert(witness.position)
+            || expected.get(&witness.position).copied() != Some(&witness.note_commitment)
+            || witness.root != root
+            || !verify_witness(witness)?
+        {
+            return Err(invalid(
+                "voting witness does not match note and snapshot root",
+            ));
+        }
+    }
+    let mut bundle_positions =
+        queries::load_bundle_note_positions(&tx, round_id, &wallet_id, bundle_index)?;
+    bundle_positions.sort_unstable();
+    if bundle_positions != expected.keys().copied().collect::<Vec<_>>() {
+        return Err(invalid(
+            "witness positions do not match bundle note positions",
+        ));
+    }
+    queries::store_tree_state(
+        &tx,
+        round_id,
+        &wallet_id,
+        params.snapshot_height,
+        tree_state_bytes,
+    )?;
+    tx.execute(
+        "DELETE FROM witnesses WHERE round_id = ?1 AND wallet_id = ?2 AND bundle_index = ?3",
+        rusqlite::params![round_id, wallet_id, bundle_index],
+    )
+    .map_err(|_| invalid("could not replace voting witnesses"))?;
+    queries::store_witnesses(&tx, round_id, &wallet_id, bundle_index, witnesses)?;
+    tx.commit()
+        .map_err(|_| invalid("could not commit voting witnesses"))
+}
+
 /// Persist a voting snapshot tree state, generate shielded note witnesses, and cache them.
 ///
 /// SDK boundary layers provide the already-open wallet database because wallet
@@ -39,9 +144,21 @@ where
     P: zcash_protocol::consensus::Parameters,
 {
     validate_wallet_db_network_for_round(db, round_id, wallet_db)?;
-    db.store_tree_state(round_id, tree_state_bytes)?;
-    let witnesses = generate_note_witnesses(db, round_id, notes, wallet_db)?;
-    db.replace_bundle_witnesses(round_id, bundle_index, &witnesses)?;
+    let witnesses = generate_note_witnesses_with_tree_state(
+        db,
+        round_id,
+        notes,
+        wallet_db,
+        Some(tree_state_bytes),
+    )?;
+    store_tree_state_and_witnesses(
+        db,
+        round_id,
+        bundle_index,
+        tree_state_bytes,
+        notes,
+        &witnesses,
+    )?;
     Ok(witnesses)
 }
 
@@ -62,15 +179,34 @@ where
     C: Borrow<rusqlite::Connection>,
     P: zcash_protocol::consensus::Parameters,
 {
+    generate_note_witnesses_with_tree_state(db, round_id, notes, wallet_db, None)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn generate_note_witnesses_with_tree_state<C, P, CL, R>(
+    db: &VotingDb,
+    round_id: &str,
+    notes: &[NoteInfo],
+    wallet_db: &WalletDb<C, P, CL, R>,
+    supplied_tree_state: Option<&[u8]>,
+) -> Result<Vec<WitnessData>, VotingError>
+where
+    C: Borrow<rusqlite::Connection>,
+    P: Parameters,
+{
     let (tree_state_bytes, params, stored_network) = {
         let wallet_id = db.wallet_id();
         let conn = db.conn();
-        let tree_state_bytes = queries::load_tree_state(&conn, round_id, &wallet_id)?;
+        let tree_state_bytes = match supplied_tree_state {
+            Some(bytes) => bytes.to_vec(),
+            None => queries::load_tree_state(&conn, round_id, &wallet_id)?,
+        };
         let (params, stored_network) =
             queries::load_round_params_with_network(&conn, round_id, &wallet_id)?;
         (tree_state_bytes, params, stored_network)
     };
     validate_wallet_network(stored_network, wallet_db)?;
+    snapshot_frontier(&tree_state_bytes, stored_network, params.snapshot_height)?;
 
     let tree_state =
         TreeState::decode(tree_state_bytes.as_slice()).map_err(|e| VotingError::Internal {
@@ -239,6 +375,11 @@ fn validate_cached_tree_state_for_round(
 /// Returns true if the computed root matches the expected root in the witness.
 /// Uses the level-aware Sinsemilla hash shared by supported shielded note trees.
 pub fn verify_witness(witness: &WitnessData) -> Result<bool, VotingError> {
+    if witness.position >= (1u64 << orchard::NOTE_COMMITMENT_TREE_DEPTH) {
+        return Err(VotingError::InvalidInput {
+            message: "witness position exceeds tree depth".into(),
+        });
+    }
     if witness.note_commitment.len() != 32 {
         return Err(VotingError::InvalidInput {
             message: format!(
@@ -381,7 +522,12 @@ mod tests {
         >,
     ) -> TreeState {
         TreeState {
-            network: "test".to_string(),
+            network: if ironwood_frontier.is_some() {
+                "regtest"
+            } else {
+                "test"
+            }
+            .to_string(),
             height,
             hash: String::new(),
             time: 0,
@@ -409,17 +555,36 @@ mod tests {
     }
 
     fn note(position: u64) -> NoteInfo {
-        NoteInfo {
-            commitment: merkle_hash(position + 1).to_bytes().to_vec(),
-            nullifier: vec![0; 32],
-            value: 1,
+        let ufvk = crate::backend::zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            &VotingNetwork::Regtest,
+            &[17; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap()
+        .to_unified_full_viewing_key();
+        let rho =
+            orchard::note::Rho::from_bytes(&pallas::Base::from(position + 1).to_repr()).unwrap();
+        let rseed = (0..=255)
+            .find_map(|b| orchard::note::RandomSeed::from_bytes([b; 32], &rho).into_option())
+            .unwrap();
+        let note = orchard::Note::from_parts(
+            ufvk.orchard()
+                .unwrap()
+                .address_at(0u32, zip32::Scope::External),
+            orchard::value::NoteValue::from_raw(1),
+            rho,
+            rseed,
+            orchard::NoteVersion::V3,
+        )
+        .unwrap();
+        NoteInfo::from_orchard_note(
+            &note,
             position,
-            diversifier: vec![0; 11],
-            rho: vec![0; 32],
-            rseed: vec![0; 32],
-            scope: 0,
-            ufvk_str: "ufvk".to_string(),
-        }
+            zip32::Scope::External,
+            &ufvk,
+            &VotingNetwork::Regtest,
+        )
+        .unwrap()
     }
 
     fn voting_db_with_tree_state(
@@ -508,7 +673,12 @@ mod tests {
             .max()
             .unwrap_or(2);
         let leaf_count = max_position + 3;
-        let leaves = (1u64..=leaf_count).map(merkle_hash).collect::<Vec<_>>();
+        let leaves = (0..leaf_count)
+            .map(|position| {
+                MerkleHashOrchard::from_bytes(&note(position).commitment.try_into().unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
         let mut frontier = Frontier::empty();
         let mut wallet_db = WalletDb::from_connection(
             rusqlite::Connection::open_in_memory().unwrap(),
@@ -595,6 +765,49 @@ mod tests {
             assert_eq!(stored_witness.auth_path, witness.auth_path);
             assert!(verify_witness(witness).expect("stored witness is parseable"));
         }
+        let parts_db = VotingDb::open_in_memory().unwrap();
+        parts_db.set_wallet_id(WALLET_ID);
+        parts_db
+            .init_round(crate::Network::Regtest, &params, None)
+            .unwrap();
+        queries::insert_bundle(&parts_db.conn(), ROUND_ID, WALLET_ID, 0, &[1, 2]).unwrap();
+        store_tree_state_and_witnesses(
+            &parts_db,
+            ROUND_ID,
+            0,
+            &tree_state.encode_to_vec(),
+            &notes,
+            &witnesses,
+        )
+        .unwrap();
+        let from_parts = queries::load_witnesses(&parts_db.conn(), ROUND_ID, WALLET_ID, 0).unwrap();
+        for (native, parts) in stored.iter().zip(&from_parts) {
+            assert_eq!(native.note_commitment, parts.note_commitment);
+            assert_eq!(native.auth_path, parts.auth_path);
+            assert_eq!(native.root, parts.root);
+            assert_eq!(native.position, parts.position);
+        }
+        // Inject a failure after the tree UPDATE and witness DELETE. The whole
+        // operation must roll back, retaining both previously committed caches.
+        db.conn().execute_batch("CREATE TEMP TRIGGER fail_witness BEFORE INSERT ON witnesses BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        let mut replacement = tree_state.clone();
+        replacement.time += 1;
+        assert!(store_tree_state_and_witnesses(
+            &db,
+            ROUND_ID,
+            0,
+            &replacement.encode_to_vec(),
+            &notes,
+            &witnesses
+        )
+        .is_err());
+        assert_eq!(
+            queries::load_tree_state(&db.conn(), ROUND_ID, WALLET_ID).unwrap(),
+            tree_state.encode_to_vec()
+        );
+        let retained = queries::load_witnesses(&db.conn(), ROUND_ID, WALLET_ID, 0).unwrap();
+        assert_eq!(retained.len(), stored.len());
+        assert_eq!(retained[0].auth_path, stored[0].auth_path);
     }
 
     #[test]

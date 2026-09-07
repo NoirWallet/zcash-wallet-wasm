@@ -46,9 +46,9 @@ mod http_transport;
 pub mod lwd;
 pub mod note_bundling;
 pub mod phases;
-pub mod platform;
 pub mod pir;
 pub mod pir_snapshot;
+pub mod platform;
 pub mod precompute;
 pub mod prelude;
 pub mod recovery;
@@ -181,3 +181,5 @@ pub fn warm_proving_caches() {
             .expect("proving cache warm-up thread panicked");
     }
 }
+pub use selection::{gather_delegation_wallet_inputs_from_parts, GatherDelegationWalletInputs};
+pub use witness::store_tree_state_and_witnesses;

@@ -132,3 +132,7 @@ pub use crate::{warm_proving_caches, warm_zkp2_proving_cache};
 pub use crate::precompute::delegation_pir;
 
 pub use crate::precompute::{reset_vote_tree, reset_voting_session_state, van_witness};
+pub use crate::selection::{
+    gather_delegation_wallet_inputs_from_parts, GatherDelegationWalletInputs,
+};
+pub use crate::witness::store_tree_state_and_witnesses;

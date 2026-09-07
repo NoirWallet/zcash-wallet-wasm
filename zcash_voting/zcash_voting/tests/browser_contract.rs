@@ -3,6 +3,236 @@
 #[path = "support/browser_storage_cases.rs"]
 mod browser_storage_cases;
 
+mod wallet_inputs {
+    use incrementalmerkletree::{
+        frontier::{CommitmentTree, Frontier},
+        Hashable, Level,
+    };
+    use orchard::{
+        note::{ExtractedNoteCommitment, RandomSeed, Rho},
+        tree::MerkleHashOrchard,
+    };
+    use prost::Message;
+    use zcash_client_backend::proto::service::TreeState;
+    use zcash_voting::storage::VotingDb;
+    use zcash_voting::{
+        backend::{orchard, zcash_client_backend, zcash_keys, zcash_primitives},
+        delegate::DelegationAccountKeys,
+        selection::{DelegationWalletInputs, GatherDelegationWalletInputs},
+        store_tree_state_and_witnesses, Network, NoteInfo, VotingHotkey, VotingRoundParams,
+        WitnessData,
+    };
+    const HEIGHT: u64 = 100;
+    const ROUND: &str = "wallet-inputs-round";
+
+    fn fixture() -> (NoteInfo, DelegationAccountKeys, TreeState, WitnessData) {
+        let ufvk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            &Network::Regtest,
+            &[17; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap()
+        .to_unified_full_viewing_key();
+        let fvk = ufvk.orchard().unwrap();
+        let rho = Rho::from_bytes(&[1; 32]).unwrap();
+        let seed = (0..=255)
+            .find_map(|b| RandomSeed::from_bytes([b; 32], &rho).into_option())
+            .unwrap();
+        let note = orchard::Note::from_parts(
+            fvk.address_at(0u32, zip32::Scope::External),
+            orchard::value::NoteValue::from_raw(zcash_voting::governance::BALLOT_DIVISOR * 2),
+            rho,
+            seed,
+            orchard::NoteVersion::V3,
+        )
+        .unwrap();
+        let cmx: ExtractedNoteCommitment = note.commitment().into();
+        let mut frontier = Frontier::<MerkleHashOrchard, 32>::empty();
+        frontier.append(MerkleHashOrchard::from_cmx(&cmx));
+        let mut tree_bytes = Vec::new();
+        zcash_primitives::merkle_tree::write_commitment_tree(
+            &CommitmentTree::from_frontier(&frontier),
+            &mut tree_bytes,
+        )
+        .unwrap();
+        let state = TreeState {
+            network: "regtest".into(),
+            height: HEIGHT,
+            ironwood_tree: hex::encode(tree_bytes),
+            ..TreeState::default()
+        };
+        let info =
+            NoteInfo::from_orchard_note(&note, 0, zip32::Scope::External, &ufvk, &Network::Regtest)
+                .unwrap();
+        let keys = DelegationAccountKeys {
+            account_index: 0,
+            orchard_fvk_bytes: fvk.to_bytes(),
+            seed_fingerprint: [0; 32],
+        };
+        let witness = WitnessData {
+            position: 0,
+            note_commitment: info.commitment.clone(),
+            root: frontier.root().to_bytes().to_vec(),
+            auth_path: (0..32)
+                .map(|level| {
+                    MerkleHashOrchard::empty_root(Level::from(level))
+                        .to_bytes()
+                        .to_vec()
+                })
+                .collect(),
+        };
+        (info, keys, state, witness)
+    }
+
+    fn gather(
+        note: NoteInfo,
+        keys: DelegationAccountKeys,
+        state: TreeState,
+        hotkey: &VotingHotkey,
+    ) -> Result<DelegationWalletInputs, zcash_voting::VotingError> {
+        DelegationWalletInputs::from_parts(GatherDelegationWalletInputs {
+            network: Network::Regtest,
+            scanned_height: HEIGHT,
+            snapshot_height: HEIGHT,
+            anchor_tree_state_bytes: state.encode_to_vec(),
+            round_note_infos: vec![note],
+            account_keys: keys,
+            voting_hotkey: hotkey,
+            resolved_round_name: "fixture".into(),
+        })
+    }
+
+    #[test]
+    fn validates_note_identity_network_position_and_tree_height() {
+        let (note, keys, state, _) = fixture();
+        let hotkey = VotingHotkey::from_stored_secret(&[0x77; 64], Network::Regtest).unwrap();
+        assert!(gather(note.clone(), keys.clone(), state.clone(), &hotkey).is_ok());
+        for field in [
+            "commitment",
+            "nullifier",
+            "rho",
+            "rseed",
+            "scope",
+            "position",
+            "ufvk",
+            "value",
+        ] {
+            let mut invalid = note.clone();
+            match field {
+                "commitment" => invalid.commitment[0] ^= 1,
+                "nullifier" => invalid.nullifier[0] ^= 1,
+                "rho" => invalid.rho.clear(),
+                "rseed" => invalid.rseed.clear(),
+                "scope" => invalid.scope = 2,
+                "position" => invalid.position = 1u64 << 32,
+                "ufvk" => invalid.ufvk_str.clear(),
+                _ => invalid.value += 1,
+            }
+            assert!(
+                gather(invalid, keys.clone(), state.clone(), &hotkey).is_err(),
+                "{field}"
+            );
+        }
+        let mut wrong_keys = keys.clone();
+        wrong_keys.orchard_fvk_bytes[0] ^= 1;
+        assert!(gather(note.clone(), wrong_keys, state.clone(), &hotkey).is_err());
+        let mut invalid_account = keys.clone();
+        invalid_account.account_index = u32::MAX;
+        assert!(gather(note.clone(), invalid_account, state.clone(), &hotkey).is_err());
+        let mut stale = state.clone();
+        stale.height -= 1;
+        assert!(gather(note.clone(), keys.clone(), stale, &hotkey).is_err());
+        let mut wrong_network = state.clone();
+        wrong_network.network = "test".into();
+        assert!(gather(note.clone(), keys.clone(), wrong_network, &hotkey).is_err());
+        let wrong_hotkey = VotingHotkey::from_stored_secret(&[0x77; 64], Network::Testnet).unwrap();
+        assert!(gather(note, keys, state, &wrong_hotkey).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_paths_without_writes_and_retries_complete_cache() {
+        let (note, _, state, witness) = fixture();
+        let db = VotingDb::open_browser("wallet-inputs", Network::Regtest, None).unwrap();
+        db.init_round(
+            Network::Regtest,
+            &VotingRoundParams {
+                vote_round_id: ROUND.into(),
+                snapshot_height: HEIGHT,
+                nc_root: witness.root.clone(),
+                ea_pk: vec![1; 32],
+                nullifier_imt_root: vec![2; 32],
+            },
+            None,
+        )
+        .unwrap();
+        db.ensure_bundles_with_policy(ROUND, &[note.clone()], Default::default())
+            .unwrap();
+        let before = db.serialize_bytes().unwrap();
+        for field in ["root", "path", "position", "commitment", "length"] {
+            let mut invalid = witness.clone();
+            match field {
+                "root" => invalid.root[0] ^= 1,
+                "path" => invalid.auth_path[0][0] ^= 1,
+                "position" => invalid.position = 1u64 << 32,
+                "commitment" => invalid.note_commitment[0] ^= 1,
+                _ => {
+                    invalid.auth_path.pop();
+                }
+            }
+            assert!(
+                store_tree_state_and_witnesses(
+                    &db,
+                    ROUND,
+                    0,
+                    &state.encode_to_vec(),
+                    &[note.clone()],
+                    &[invalid]
+                )
+                .is_err(),
+                "{field}"
+            );
+            assert_eq!(db.serialize_bytes().unwrap(), before);
+        }
+        for _ in 0..2 {
+            store_tree_state_and_witnesses(
+                &db,
+                ROUND,
+                0,
+                &state.encode_to_vec(),
+                &[note.clone()],
+                &[witness.clone()],
+            )
+            .unwrap();
+        }
+        assert!(db.has_complete_witnesses(ROUND, 0, &[note]).unwrap());
+    }
+}
+
+#[test]
+fn wallet_inputs_reject_unsynced_parts_before_construction() {
+    use zcash_voting::{
+        delegate::DelegationAccountKeys,
+        selection::{gather_delegation_wallet_inputs_from_parts, GatherDelegationWalletInputs},
+        Network, VotingHotkey,
+    };
+    let hotkey = VotingHotkey::from_stored_secret(&[0x77; 64], Network::Testnet).unwrap();
+    let result = gather_delegation_wallet_inputs_from_parts(GatherDelegationWalletInputs {
+        network: Network::Testnet,
+        scanned_height: 1,
+        snapshot_height: 2,
+        anchor_tree_state_bytes: Vec::new(),
+        round_note_infos: Vec::new(),
+        account_keys: DelegationAccountKeys {
+            account_index: 0,
+            orchard_fvk_bytes: [0; 96],
+            seed_fingerprint: [0; 32],
+        },
+        voting_hotkey: &hotkey,
+        resolved_round_name: "fixture".into(),
+    });
+    assert!(result.unwrap_err().to_string().contains("not synced"));
+}
+
 mod transport {
     use zcash_voting::platform::{
         HttpTransport, OwnedHttpRequest, OwnedHttpResponse, RequestKind, TransportError,

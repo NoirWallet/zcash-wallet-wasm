@@ -36,6 +36,158 @@ pub struct DelegationWalletInputs {
     pub delegation_keys: DelegationKeys,
 }
 
+/// Owned wallet snapshot metadata supplied by non-SQLite wallet adapters.
+pub struct GatherDelegationWalletInputs<'a> {
+    pub network: Network,
+    pub scanned_height: u64,
+    pub snapshot_height: u64,
+    pub anchor_tree_state_bytes: Vec<u8>,
+    pub round_note_infos: Vec<NoteInfo>,
+    pub account_keys: crate::delegate::DelegationAccountKeys,
+    pub voting_hotkey: &'a VotingHotkey,
+    pub resolved_round_name: String,
+}
+
+impl DelegationWalletInputs {
+    /// Validate and construct delegation inputs without accessing a wallet DB.
+    pub fn from_parts(input: GatherDelegationWalletInputs<'_>) -> Result<Self, VotingError> {
+        gather_delegation_wallet_inputs_from_parts(input)
+    }
+}
+
+/// Validate all owned snapshot inputs before constructing delegation keys.
+pub fn gather_delegation_wallet_inputs_from_parts(
+    input: GatherDelegationWalletInputs<'_>,
+) -> Result<DelegationWalletInputs, VotingError> {
+    construct_wallet_inputs(
+        input.network,
+        input.scanned_height,
+        input.snapshot_height,
+        input.anchor_tree_state_bytes,
+        input.round_note_infos,
+        input.account_keys,
+        GatherDelegationTarget::Hotkey(input.voting_hotkey),
+        input.resolved_round_name,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn construct_wallet_inputs(
+    network: Network,
+    scanned_height: u64,
+    snapshot_height: u64,
+    anchor_tree_state_bytes: Vec<u8>,
+    mut round_note_infos: Vec<NoteInfo>,
+    account: crate::delegate::DelegationAccountKeys,
+    target: GatherDelegationTarget<'_>,
+    round_name: String,
+) -> Result<DelegationWalletInputs, VotingError> {
+    if scanned_height < snapshot_height {
+        return Err(VotingError::InvalidInput { message: format!("wallet is not synced to voting snapshot height {snapshot_height}. Fully scanned height is {scanned_height}.") });
+    }
+    if u32::try_from(scanned_height).is_err() || u32::try_from(snapshot_height).is_err() {
+        return Err(VotingError::InvalidInput {
+            message: "wallet snapshot heights do not fit in u32".into(),
+        });
+    }
+    if network != target.network() {
+        return Err(VotingError::InvalidInput {
+            message: target.network_mismatch_message().into(),
+        });
+    }
+    zip32::AccountId::try_from(account.account_index).map_err(|_| VotingError::InvalidInput {
+        message: "invalid voting account derivation index".into(),
+    })?;
+    if round_note_infos.is_empty() {
+        return Err(VotingError::InvalidInput {
+            message: "no spendable voting notes at snapshot".into(),
+        });
+    }
+    let frontier =
+        crate::witness::snapshot_frontier(&anchor_tree_state_bytes, network, snapshot_height)?;
+    validate_snapshot_notes(&round_note_infos, network, u64::from(frontier.position()))?;
+    for info in &round_note_infos {
+        let (_, fvk) = crate::zkp1::reconstruct_note(info, &network).map_err(|_| {
+            VotingError::InvalidInput {
+                message: "invalid Ironwood voting note identity".into(),
+            }
+        })?;
+        if fvk.to_bytes() != account.orchard_fvk_bytes {
+            return Err(VotingError::InvalidInput {
+                message: "voting note does not belong to supplied account".into(),
+            });
+        }
+    }
+    round_note_infos.sort_by_key(|note| note.position);
+    let delegation_keys = target.into_delegation_keys(
+        account.orchard_fvk_bytes.to_vec(),
+        account.seed_fingerprint,
+        account.account_index,
+        round_name,
+    )?;
+    Ok(DelegationWalletInputs {
+        anchor_tree_state_bytes,
+        round_note_infos,
+        delegation_keys,
+    })
+}
+
+pub(crate) fn validate_snapshot_notes(
+    notes: &[NoteInfo],
+    network: Network,
+    last_position: u64,
+) -> Result<(), VotingError> {
+    let mut positions = std::collections::BTreeSet::new();
+    for note in notes {
+        if note.position > last_position
+            || note.position >= (1u64 << orchard::NOTE_COMMITMENT_TREE_DEPTH)
+            || !positions.insert(note.position)
+        {
+            return Err(VotingError::InvalidInput {
+                message: "invalid or duplicate voting note position".into(),
+            });
+        }
+        crate::zkp1::reconstruct_note(note, &network).map_err(|_| VotingError::InvalidInput {
+            message: "invalid Ironwood voting note identity".into(),
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn test_snapshot_tree_state(height: u64, notes: &[NoteInfo]) -> Vec<u8> {
+    use incrementalmerkletree::{
+        frontier::{CommitmentTree, Frontier},
+        Hashable,
+    };
+    use orchard::tree::MerkleHashOrchard;
+    use prost::Message;
+    let mut frontier = Frontier::<MerkleHashOrchard, 32>::empty();
+    for position in 0..=notes.iter().map(|n| n.position).max().unwrap_or(0) {
+        let leaf = notes
+            .iter()
+            .find(|n| n.position == position)
+            .map(|n| {
+                MerkleHashOrchard::from_bytes(&n.commitment.clone().try_into().unwrap()).unwrap()
+            })
+            .unwrap_or_else(MerkleHashOrchard::empty_leaf);
+        frontier.append(leaf);
+    }
+    let mut bytes = Vec::new();
+    zcash_primitives::merkle_tree::write_commitment_tree(
+        &CommitmentTree::from_frontier(&frontier),
+        &mut bytes,
+    )
+    .unwrap();
+    TreeState {
+        network: "regtest".into(),
+        height,
+        ironwood_tree: hex::encode(bytes),
+        ..TreeState::default()
+    }
+    .encode_to_vec()
+}
+
 /// Parameters for gathering delegation inputs from a caller-opened wallet DB.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct GatherDelegationWalletParams<'a, C, P, CL, R> {
@@ -229,13 +381,11 @@ where
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 enum GatherDelegationTarget<'a> {
     Hotkey(&'a VotingHotkey),
     RoundBound(&'a RoundBoundVotingHotkeyTarget),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl GatherDelegationTarget<'_> {
     fn network(&self) -> Network {
         match self {
@@ -316,18 +466,16 @@ where
         params.snapshot_height,
     )?;
     let account = load_account_keys(params.wallet_db, params.account_uuid)?;
-    let delegation_keys = params.target.into_delegation_keys(
-        account.orchard_fvk_bytes.to_vec(),
-        account.seed_fingerprint,
-        account.account_index,
-        params.resolved_round_name,
-    )?;
-
-    Ok(DelegationWalletInputs {
-        anchor_tree_state_bytes: params.anchor_tree_state_bytes,
+    construct_wallet_inputs(
+        params.target.network(),
+        params.scanned_height,
+        params.snapshot_height,
+        params.anchor_tree_state_bytes,
         round_note_infos,
-        delegation_keys,
-    })
+        account,
+        params.target,
+        params.resolved_round_name,
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -924,7 +1072,10 @@ mod tests {
                 voting_target: &voting_target,
                 snapshot_height,
                 scanned_height: snapshot_height,
-                anchor_tree_state_bytes: vec![0xAA, 0xBB],
+                anchor_tree_state_bytes: test_snapshot_tree_state(
+                    snapshot_height,
+                    &select_snapshot_note_infos(&db, &account_uuid, snapshot_height).unwrap(),
+                ),
                 resolved_round_name: "Demo Round".to_string(),
             })
             .unwrap();
