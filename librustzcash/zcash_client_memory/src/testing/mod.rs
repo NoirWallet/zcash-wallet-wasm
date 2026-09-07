@@ -40,6 +40,9 @@ mod transparent;
 #[cfg(feature = "transparent-inputs")]
 mod locking;
 
+#[cfg(feature = "orchard")]
+mod ordinary;
+
 /// A test data store factory for in-memory databases
 /// Very simple implementation just creates a new MemoryWalletDb
 pub(crate) struct TestMemDbFactory;

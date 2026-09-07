@@ -6,7 +6,8 @@ use zcash_client_backend::{
 };
 use zcash_client_backend::{
     data_api::{
-        AccountMeta, InputSource, NoteFilter, PoolMeta, ReceivedNotes, TargetValue, WalletRead,
+        AccountMeta, InputSource, MaxSpendMode, NoteFilter, PoolMeta, ReceivedNotes, TargetValue,
+        WalletRead,
         locking::LockFilter,
         wallet::{ConfirmationsPolicy, TargetHeight},
     },
@@ -180,6 +181,60 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
             &ironwood_eligible_notes,
             |note| self.note_transaction_heights(&note.txid),
         )
+    }
+
+    fn select_single_spendable_note(
+        &self,
+        account: Self::AccountId,
+        value: Zatoshis,
+        sources: &[ShieldedPool],
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+        exclude: &[Self::NoteRef],
+        lock_filter: LockFilter<'_>,
+    ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
+        for pool in sources {
+            let eligible = self.select_spendable_notes_from_pool(
+                account,
+                TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
+                pool,
+                target_height,
+                confirmations_policy,
+                exclude,
+                lock_filter,
+            )?;
+            // Eligibility is ordered by lock tier, then age. Reducing by age alone loses the tier.
+            if let Some(note) = eligible.into_iter().find(|note| note.note.value() >= value) {
+                let selected = [note];
+                return to_spendable_notes(
+                    if *pool == ShieldedPool::Sapling {
+                        &selected
+                    } else {
+                        &[]
+                    },
+                    #[cfg(feature = "orchard")]
+                    if *pool == ShieldedPool::Orchard {
+                        &selected
+                    } else {
+                        &[]
+                    },
+                    #[cfg(feature = "orchard")]
+                    if *pool == ShieldedPool::Ironwood {
+                        &selected
+                    } else {
+                        &[]
+                    },
+                    |note| self.note_transaction_heights(&note.txid),
+                );
+            }
+        }
+        Ok(ReceivedNotes::new(
+            vec![],
+            #[cfg(feature = "orchard")]
+            vec![],
+            #[cfg(feature = "orchard")]
+            vec![],
+        ))
     }
 
     fn select_unspent_notes(
@@ -526,7 +581,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .into_iter()
             .take_while(|note| {
                 let take = match target_value {
-                    TargetValue::AtLeast(target) => value_acc <= target,
+                    TargetValue::AtLeast(target) => value_acc < target,
                     TargetValue::AllFunds(_) => true,
                 };
                 value_acc = (value_acc + note.note.value()).expect("value overflow");

@@ -31,7 +31,7 @@ use zcash_client_backend::data_api::wallet::input_selection::{
 };
 use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, SpendingKeys, TargetHeight, create_pczt_from_proposal,
-    create_proposed_transactions, extract_and_store_transaction_from_pczt,
+    create_proposed_transactions, extract_and_store_transaction_from_pczt, ordinary,
     propose_send_max_transfer, propose_send_max_transparent_transfer, propose_shielding,
     propose_transfer,
 };
@@ -610,6 +610,26 @@ where
     /// outputs while allowing zero-confirmation shielding of transparent UTXOs.
     fn confirmations_policy(&self) -> ConfirmationsPolicy {
         ConfirmationsPolicy::default()
+    }
+
+    fn transfer_confirmations_policy(
+        &self,
+        db: &W,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<ConfirmationsPolicy, Error> {
+        expiry_delta_blocks
+            .map(validate_expiry_delta_blocks)
+            .transpose()?;
+        if expiry_delta_blocks.is_some() {
+            ordinary::confirmations_policy(db, &self.network, self.confirmations_policy())?
+                .ok_or_else(|| {
+                    Error::Generic(
+                        "Wallet must be synced to an ordinary anchor for custom expiry".into(),
+                    )
+                })
+        } else {
+            Ok(self.confirmations_policy())
+        }
     }
 
     pub fn new(db: W, client: T, network: Network) -> Result<Self, Error> {
@@ -1807,6 +1827,7 @@ where
         fee_rule: FeeRuleT,
         funding_source: TransferFundingSource,
         allow_send_max_fallback: bool,
+        expiry_delta_blocks: Option<u32>,
     ) -> Result<
         zcash_client_backend::proposal::Proposal<FeeRuleT, <W as InputSource>::NoteRef>,
         Error,
@@ -1844,14 +1865,20 @@ where
         let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
 
-        match propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+        let confirmations_policy = self.transfer_confirmations_policy(&*db, expiry_delta_blocks)?;
+        let propose = if expiry_delta_blocks.is_some() {
+            ordinary::propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>
+        } else {
+            propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>
+        };
+        match propose(
             &mut *db,
             &self.network,
             account_id,
             &input_selector,
             &change_strategy,
             request,
-            self.confirmations_policy(),
+            confirmations_policy,
             &spend_policy,
             None,
             None,
@@ -1873,7 +1900,7 @@ where
                             to_address,
                             memo,
                             MaxSpendMode::MaxSpendable,
-                            self.confirmations_policy(),
+                            confirmations_policy,
                             &Default::default(),
                             None,
                         )
@@ -1919,6 +1946,7 @@ where
                         dynamic_zip317_fee_rule(marginal_fee_zats)?,
                         funding_source,
                         allow_exact_send_max_fallback(funding_source, true),
+                        expiry_delta_blocks,
                     )
                     .await?;
                 transfer_estimate_from_proposal(&proposal)
@@ -1933,6 +1961,7 @@ where
                         StandardFeeRule::Zip317,
                         funding_source,
                         false,
+                        expiry_delta_blocks,
                     )
                     .await?;
                 transfer_estimate_from_proposal(&proposal)
@@ -1981,6 +2010,7 @@ where
                         dynamic_zip317_fee_rule(marginal_fee_zats)?,
                         funding_source,
                         allow_exact_send_max_fallback(funding_source, true),
+                        expiry_delta_blocks,
                     )
                     .await?;
                 self.execute_unified_transfer(usk, proposal, expiry_delta_blocks)
@@ -1996,6 +2026,7 @@ where
                         StandardFeeRule::Zip317,
                         funding_source,
                         false,
+                        expiry_delta_blocks,
                     )
                     .await?;
                 self.execute_unified_transfer(usk, proposal, expiry_delta_blocks)
@@ -2447,14 +2478,20 @@ where
         .map_err(|e| Error::Zip321(e.with_index(0)))?;
         let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
-        let proposal = match propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+        let confirmations_policy = self.transfer_confirmations_policy(&*db, expiry_delta_blocks)?;
+        let propose = if expiry_delta_blocks.is_some() {
+            ordinary::propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>
+        } else {
+            propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>
+        };
+        let proposal = match propose(
             &mut *db,
             &self.network,
             account_id,
             &input_selector,
             &change_strategy,
             request,
-            self.confirmations_policy(),
+            confirmations_policy,
             &spend_policy,
             None,
             None,
@@ -2475,7 +2512,7 @@ where
                         to_address,
                         memo,
                         MaxSpendMode::MaxSpendable,
-                        self.confirmations_policy(),
+                        confirmations_policy,
                         &Default::default(),
                         None,
                     )
@@ -2581,6 +2618,7 @@ where
             )));
         }
 
+        let confirmations_policy = self.transfer_confirmations_policy(&*db, expiry_delta_blocks)?;
         let proposal = propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
             &mut *db,
             &self.network,
@@ -2590,7 +2628,7 @@ where
             to_address,
             memo,
             MaxSpendMode::MaxSpendable,
-            self.confirmations_policy(),
+            confirmations_policy,
             &Default::default(),
             None,
         )

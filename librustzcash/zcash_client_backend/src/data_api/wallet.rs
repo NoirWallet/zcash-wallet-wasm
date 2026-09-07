@@ -129,6 +129,7 @@ use {
 };
 
 pub mod input_selection;
+pub mod ordinary;
 use input_selection::{
     GreedyInputSelector, GreedyInputSelectorError, InputSelector, InputSelectorError,
 };
