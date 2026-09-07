@@ -13,7 +13,7 @@ wasm-opt = ["-O4", "-O4", "--enable-threads", "--enable-bulk-memory", "--enable-
 default = ["wasm-parallel"]
 multicore = ["zcash_proofs/multicore", "zcash_primitives/multicore", "zcash_client_memory/multicore", "orchard/multicore"]
 wasm-parallel = ["wasm-bindgen-rayon", "multicore"]
-voting = ["dep:zcash_voting"]
+voting = ["dep:zcash_voting", "dep:futures-channel", "dep:web-sys"]
 
 [dependencies.zcash_voting]
 path = "./zcash_voting/zcash_voting"
@@ -82,6 +82,13 @@ tonic = { version = "0.14", default-features = false, features = [
 
 prost = "0.14"
 futures-util = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-channel = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "AbortController", "AbortSignal", "Headers", "Request", "RequestInit",
+    "RequestCredentials", "RequestMode", "RequestRedirect", "Response", "Window",
+] }
 
 [dev-dependencies]
 rand_core = "0.6"

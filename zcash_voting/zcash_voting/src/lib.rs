@@ -46,6 +46,7 @@ mod http_transport;
 pub mod lwd;
 pub mod note_bundling;
 pub mod phases;
+pub mod platform;
 pub mod pir;
 pub mod pir_snapshot;
 pub mod precompute;

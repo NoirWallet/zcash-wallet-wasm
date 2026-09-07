@@ -3,6 +3,118 @@
 #[path = "support/browser_storage_cases.rs"]
 mod browser_storage_cases;
 
+mod transport {
+    use zcash_voting::platform::{
+        HttpTransport, OwnedHttpRequest, OwnedHttpResponse, RequestKind, TransportError,
+        TransportFuture,
+    };
+
+    fn request(kind: RequestKind) -> OwnedHttpRequest {
+        OwnedHttpRequest {
+            method: if kind == RequestKind::Idempotent {
+                "GET"
+            } else {
+                "POST"
+            }
+            .into(),
+            url: "https://example.com/vote".into(),
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: Vec::new(),
+            timeout_ms: 30_000,
+            max_response_bytes: 4,
+            kind,
+        }
+    }
+
+    #[test]
+    fn invalid_request_is_definite_before_dispatch() {
+        for url in [
+            "not a URL",
+            "/relative",
+            "ftp://example.com",
+            "https://user:pass@example.com",
+            "https://example.com/\n",
+        ] {
+            let mut req = request(RequestKind::NonIdempotent);
+            req.url = url.into();
+            assert_eq!(req.validate(), Err(TransportError::Definite), "{url:?}");
+        }
+        let mut req = request(RequestKind::NonIdempotent);
+        req.method = "bad method".into();
+        assert_eq!(req.validate(), Err(TransportError::Definite));
+        req.method = "TRACE".into();
+        assert_eq!(req.validate(), Err(TransportError::Definite));
+        req.method = "POST".into();
+        req.headers
+            .push(("X-Test".into(), "value\r\ninjected: true".into()));
+        assert_eq!(req.validate(), Err(TransportError::Definite));
+        req.headers.pop();
+        for timeout in [0, u32::MAX] {
+            req.timeout_ms = timeout;
+            assert_eq!(req.validate(), Err(TransportError::Definite));
+        }
+        let mut get = request(RequestKind::Idempotent);
+        get.body.push(1);
+        assert_eq!(get.validate(), Err(TransportError::Definite));
+        assert_eq!(request(RequestKind::Idempotent).validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejected_get_is_retryable_but_dispatched_post_is_ambiguous() {
+        let get = TransportError::after_dispatch(RequestKind::Idempotent);
+        assert_eq!(get, TransportError::Definite);
+        assert!(get.is_safe_to_retry());
+        let post = TransportError::after_dispatch(RequestKind::NonIdempotent);
+        assert_eq!(post, TransportError::Ambiguous);
+        assert!(!post.is_safe_to_retry());
+    }
+
+    #[test]
+    fn limits_apply_to_headers_and_actual_bytes_without_erasing_post_ambiguity() {
+        for kind in [RequestKind::Idempotent, RequestKind::NonIdempotent] {
+            let req = request(kind);
+            let oversized = if kind == RequestKind::Idempotent {
+                TransportError::ResponseTooLarge { limit: 4 }
+            } else {
+                TransportError::Ambiguous
+            };
+            assert_eq!(req.check_response_size(4), Ok(()));
+            assert_eq!(req.check_response_size(5), Err(oversized.clone()));
+            for length in ["5", " 5 ", "9999999999999999999999999999999999999999999"] {
+                assert_eq!(
+                    req.check_content_length(Some(length)),
+                    Err(oversized.clone())
+                );
+            }
+            for length in [
+                None,
+                Some("4"),
+                Some(""),
+                Some("invalid"),
+                Some("-1"),
+                Some("+5"),
+                Some("4, 5"),
+            ] {
+                assert_eq!(req.check_content_length(length), Ok(()));
+                // An absent, invalid or understated header cannot bypass the body limit.
+                assert_eq!(req.check_response_size(5), Err(oversized.clone()));
+            }
+        }
+        assert!(!TransportError::ResponseTooLarge { limit: 4 }.is_safe_to_retry());
+    }
+
+    #[test]
+    fn owned_boundary_is_send_and_transport_is_object_safe() {
+        fn send<T: Send>() {}
+        fn object_safe(_: Option<&dyn HttpTransport>) {}
+        send::<OwnedHttpRequest>();
+        send::<OwnedHttpResponse>();
+        send::<TransportError>();
+        send::<TransportFuture>();
+        object_safe(None);
+    }
+}
+
 #[test]
 fn browser_db_file_backed_wal_snapshot_preserves_pending_rows() {
     use rusqlite::Connection;

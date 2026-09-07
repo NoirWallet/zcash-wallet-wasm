@@ -673,6 +673,8 @@ pub fn resolve_dynamic_voting_config_from_attempts(
 /// healthy later mirror unused. Wallets with their own networking stack should
 /// apply an equivalent per-attempt deadline before reporting a fetch failure to
 /// [`resolve_dynamic_voting_config_from_attempts`].
+/// Browser hosts using [`crate::platform::HttpTransport`] supply that deadline
+/// in each owned request; it must cover response headers and the complete body.
 pub const DYNAMIC_MIRROR_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Lazily fetch and resolve dynamic config mirrors, bounding each attempt.
