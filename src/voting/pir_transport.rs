@@ -30,7 +30,13 @@ fn pir_request(
         kind: zcash_voting::platform::RequestKind::Idempotent,
     });
     Box::pin(async move {
-        let response = response.await?;
+        let response = match response.await {
+            Ok(response) => response,
+            Err(error) if error.is_safe_to_retry() => {
+                return Err(zcash_voting::pir::RetryableTransportError.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(zcash_voting::pir::TransportResponse {
             status: response.status,
             headers: vec![],
@@ -69,6 +75,33 @@ pub async fn voting_test_pir(url: String, query: bool) -> Result<bool, wasm_bind
     } else {
         Ok(true)
     }
+}
+
+#[cfg(debug_assertions)]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = votingTestPirFallback)]
+pub async fn voting_test_pir_fallback(urls: Vec<String>) -> Result<bool, wasm_bindgen::JsValue> {
+    let mismatch =
+        |_| super::types::VotingApiError::new(super::types::VotingErrorCode::PirSnapshotMismatch);
+    let mut client = zcash_voting::pir::OrderedSnapshotPir::connect(
+        zcash_voting::wire::PirLayout {
+            pir_depth: 19,
+            tier0_layers: 11,
+            tier1_layers: 8,
+            poly_len: 2048,
+        },
+        urls,
+        std::sync::Arc::new(BrowserFetchTransport),
+        zcash_voting::Network::Testnet,
+        &[0; 32],
+        100,
+    )
+    .await
+    .map_err(mismatch)?;
+    client
+        .fetch_proofs(&[1.into(), 2.into()])
+        .await
+        .map_err(mismatch)?;
+    Ok(true)
 }
 
 #[cfg(debug_assertions)]

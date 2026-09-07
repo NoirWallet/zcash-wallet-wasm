@@ -34,7 +34,9 @@ pub fn select_pir_endpoint(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use pir_client::PirClientBlocking;
-pub use pir_client::{ImtProofData, PirClient, Transport, TransportFuture, TransportResponse};
+pub use pir_client::{
+    ImtProofData, PirClient, RetryableTransportError, Transport, TransportFuture, TransportResponse,
+};
 pub use pir_types::PirLayout as NegotiatedPirLayout;
 
 /// Bind the client's actual handshake to the trusted round before any private query.
@@ -46,22 +48,171 @@ pub async fn connect_pir_for_snapshot(
     root: &[u8],
     height: u64,
 ) -> Result<PirClient, VotingError> {
-    let invalid = || VotingError::InvalidInput {
+    connect_snapshot(layout, endpoint, transport, network, root, height)
+        .await
+        .map_err(|_| snapshot_identity_error())
+}
+
+fn snapshot_identity_error() -> VotingError {
+    VotingError::InvalidInput {
         message: "PIR snapshot identity mismatch".into(),
-    };
-    if network != crate::Network::Testnet || root.len() != 32 || height == 0 {
-        return Err(invalid());
     }
+}
+
+async fn connect_snapshot(
+    layout: PirLayout,
+    endpoint: &str,
+    transport: Arc<dyn Transport>,
+    network: crate::Network,
+    root: &[u8],
+    height: u64,
+) -> anyhow::Result<PirClient> {
+    if network != crate::Network::Testnet || root.len() != 32 || height == 0 {
+        return Err(snapshot_identity_error().into());
+    }
+    let endpoint = normalize_endpoint_url(endpoint);
+    anyhow::ensure!(!endpoint.is_empty(), "PIR endpoint missing");
+    let negotiated = negotiated_pir_layout(layout)?;
     let bound = SnapshotTransport {
         inner: transport,
-        root_url: format!("{}/root", normalize_endpoint_url(endpoint)),
-        layout: negotiated_pir_layout(layout)?,
+        root_url: format!("{endpoint}/root"),
+        layout: negotiated,
         root: root.to_vec(),
         height,
     };
-    connect_pir(layout, endpoint, Arc::new(bound))
+    PirClient::with_transport(&endpoint, negotiated, Arc::new(bound)).await
+}
+
+/// Ordered authenticated endpoints for one round. A replacement is connected
+/// and fully bound before the unchanged client generates any private query.
+/// Callers supply only endpoint URLs in the authenticated configuration order.
+pub struct OrderedSnapshotPir {
+    layout: PirLayout,
+    endpoints: std::vec::IntoIter<String>,
+    transport: Arc<dyn Transport>,
+    network: crate::Network,
+    root: Vec<u8>,
+    height: u64,
+    attempted: usize,
+    client: Option<PirClient>,
+}
+
+impl OrderedSnapshotPir {
+    pub async fn connect(
+        layout: PirLayout,
+        endpoints: Vec<String>,
+        transport: Arc<dyn Transport>,
+        network: crate::Network,
+        root: &[u8],
+        height: u64,
+    ) -> Result<Self, VotingError> {
+        let mut selected = Self {
+            layout,
+            endpoints: endpoints.into_iter(),
+            transport,
+            network,
+            root: root.to_vec(),
+            height,
+            attempted: 0,
+            client: None,
+        };
+        selected.next_endpoint().await?;
+        Ok(selected)
+    }
+
+    async fn next_endpoint(&mut self) -> Result<(), VotingError> {
+        self.client = None;
+        for endpoint in self.endpoints.by_ref() {
+            self.attempted += 1;
+            match connect_snapshot(
+                self.layout,
+                &endpoint,
+                self.transport.clone(),
+                self.network,
+                &self.root,
+                self.height,
+            )
+            .await
+            {
+                Ok(client) => {
+                    self.client = Some(client);
+                    return Ok(());
+                }
+                Err(error) if error.is::<RetryableTransportError>() => continue,
+                Err(_) => return Err(snapshot_identity_error()),
+            }
+        }
+        Err(VotingError::Internal {
+            message: format!("PIR unavailable after {} endpoints", self.attempted),
+        })
+    }
+
+    pub async fn fetch_proofs(
+        &mut self,
+        nullifiers: &[crate::backend::pasta_curves::pallas::Base],
+    ) -> Result<Vec<ImtProofData>, VotingError> {
+        self.fetch_with(|client| {
+            let nullifiers = nullifiers.to_vec();
+            Box::pin(async move {
+                let results = futures_util::future::join_all(
+                    nullifiers
+                        .iter()
+                        .map(|&nullifier| client.fetch_proof(nullifier)),
+                )
+                .await;
+                verify_pir_batch(&nullifiers, results)
+            })
+        })
         .await
-        .map_err(|_| invalid())
+    }
+
+    async fn fetch_with<T>(
+        &mut self,
+        query: impl for<'a> Fn(
+            &'a PirClient,
+        ) -> futures_util::future::LocalBoxFuture<'a, anyhow::Result<T>>,
+    ) -> Result<T, VotingError> {
+        loop {
+            let client = self.client.as_ref().ok_or_else(snapshot_identity_error)?;
+            match query(client).await {
+                Ok(result) => return Ok(result),
+                Err(error) if error.is::<RetryableTransportError>() => self.next_endpoint().await?,
+                Err(_) => {
+                    return Err(VotingError::InvalidInput {
+                        message: "PIR retrieval failed".into(),
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn verify_pir_batch(
+    nullifiers: &[crate::backend::pasta_curves::pallas::Base],
+    results: Vec<anyhow::Result<ImtProofData>>,
+) -> anyhow::Result<Vec<ImtProofData>> {
+    anyhow::ensure!(
+        nullifiers.len() == results.len(),
+        "PIR result count mismatch"
+    );
+    let mut proofs = Vec::with_capacity(results.len());
+    let mut retryable = None;
+    // All requests have completed. Even an assembled Ok proof must verify
+    // before a retryable sibling is allowed to trigger endpoint fallback.
+    for (&nullifier, result) in nullifiers.iter().zip(results) {
+        match result {
+            Ok(proof) => {
+                anyhow::ensure!(proof.verify(nullifier), "PIR proof verification failed");
+                proofs.push(proof);
+            }
+            Err(error) if error.is::<RetryableTransportError>() => retryable = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    match retryable {
+        Some(error) => Err(error),
+        None => Ok(proofs),
+    }
 }
 
 struct SnapshotTransport {
@@ -75,6 +226,9 @@ impl Transport for SnapshotTransport {
     fn get<'a>(&'a self, url: &'a str) -> TransportFuture<'a> {
         Box::pin(async move {
             let response = self.inner.get(url).await?;
+            if !(200..300).contains(&response.status) {
+                return Err(RetryableTransportError.into());
+            }
             if url == self.root_url {
                 let info: pir_types::RootInfo = serde_json::from_slice(&response.body)?;
                 anyhow::ensure!(
@@ -195,11 +349,222 @@ mod tests {
     const ROUND_ID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
     const TEST_POLY_LEN: u32 = DEFAULT_YPIR_POLY_LEN as u32;
 
+    #[test]
+    fn ordered_pir_invalid_assembled_proof_blocks_retryable_sibling() {
+        for invalid_first in [false, true] {
+            let proof = ImtProofData {
+                root: 0.into(),
+                nf_bounds: [0.into(), 1.into(), 3.into()],
+                leaf_pos: 0,
+                path: [0.into(); 29],
+            };
+            let mut results = vec![Err(RetryableTransportError.into()), Ok(proof)];
+            if invalid_first {
+                results.reverse();
+            }
+            let error = verify_pir_batch(&[2.into(), 2.into()], results).unwrap_err();
+            assert!(!error.is::<RetryableTransportError>());
+            assert_eq!(error.to_string(), "PIR proof verification failed");
+        }
+    }
+
+    #[test]
+    fn ordered_pir_accepts_valid_proofs_in_request_order() {
+        use voting_circuits::delegation::{ImtProvider, SpacedLeafImtProvider};
+        let imt = SpacedLeafImtProvider::new();
+        let nullifiers = [1.into(), 4.into()];
+        let results = nullifiers
+            .iter()
+            .map(|&nf| {
+                let proof = imt.non_membership_proof(nf).unwrap();
+                Ok(ImtProofData {
+                    root: proof.root,
+                    nf_bounds: proof.nf_bounds,
+                    leaf_pos: proof.leaf_pos,
+                    path: proof.path,
+                })
+            })
+            .collect();
+        let proofs = verify_pir_batch(&nullifiers, results).unwrap();
+        assert_eq!(proofs.len(), 2);
+        for (proof, nf) in proofs.iter().zip(nullifiers) {
+            assert!(proof.verify(nf));
+        }
+    }
+
+    #[tokio::test]
+    async fn ordered_pir_revalidates_replacement_before_success() {
+        let transport = Arc::new(RecordingTransport::matching_root());
+        let mut client = OrderedSnapshotPir::connect(
+            compiled_wallet_layout(),
+            vec!["https://first".into(), "https://second".into()],
+            transport.clone(),
+            crate::Network::Testnet,
+            &[0; 32],
+            100,
+        )
+        .await
+        .unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = client
+            .fetch_with(|_| {
+                let attempt = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let roots = transport.count_hits("/root");
+                Box::pin(async move {
+                    assert_eq!(roots, attempt + 1, "query before replacement handshake");
+                    if attempt == 0 {
+                        Err(pir_client::RetryableTransportError.into())
+                    } else {
+                        Ok(17u32)
+                    }
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, 17);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(transport.count_hits("/tier0"), 2);
+        assert_eq!(transport.count_hits("/params/tier1"), 2);
+        let hits = transport.urls.lock().unwrap();
+        assert!(hits[..3]
+            .iter()
+            .all(|url| url.starts_with("https://first/")));
+        assert!(hits[3..]
+            .iter()
+            .all(|url| url.starts_with("https://second/")));
+    }
+
+    #[tokio::test]
+    async fn ordered_pir_skips_unavailable_replacement_handshake_without_querying_it() {
+        let transport = Arc::new(RecordingTransport::matching_root());
+        transport.gets.lock().unwrap().insert(
+            "https://second/root".into(),
+            TransportResponse {
+                status: 503,
+                headers: vec![],
+                body: b"untrusted diagnostic".to_vec(),
+            },
+        );
+        let mut client = OrderedSnapshotPir::connect(
+            compiled_wallet_layout(),
+            vec![
+                "https://first".into(),
+                "https://second".into(),
+                "https://third".into(),
+            ],
+            transport.clone(),
+            crate::Network::Testnet,
+            &[0; 32],
+            100,
+        )
+        .await
+        .unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        client
+            .fetch_with(|_| {
+                let attempt = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let roots = transport.count_hits("/root");
+                Box::pin(async move {
+                    if attempt == 0 {
+                        Err(RetryableTransportError.into())
+                    } else {
+                        assert_eq!(roots, 3);
+                        Ok(())
+                    }
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let urls = transport.urls.lock().unwrap();
+        assert_eq!(
+            urls.iter()
+                .filter(|url| url.starts_with("https://second/"))
+                .count(),
+            1
+        );
+        assert!(urls[4..]
+            .iter()
+            .all(|url| url.starts_with("https://third/")));
+    }
+
+    #[tokio::test]
+    async fn ordered_pir_exhausts_transport_failures_but_stops_on_protocol_errors() {
+        for retryable in [true, false] {
+            let transport = Arc::new(RecordingTransport::matching_root());
+            let mut client = OrderedSnapshotPir::connect(
+                compiled_wallet_layout(),
+                vec!["https://first".into(), "https://second".into()],
+                transport.clone(),
+                crate::Network::Testnet,
+                &[0; 32],
+                100,
+            )
+            .await
+            .unwrap();
+            let error = client
+                .fetch_with::<()>(|_| {
+                    Box::pin(async move {
+                        if retryable {
+                            Err(pir_client::RetryableTransportError.into())
+                        } else {
+                            Err(anyhow::anyhow!("private protocol material must not escape"))
+                        }
+                    })
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(transport.count_hits("/root"), if retryable { 2 } else { 1 });
+            assert!(!error.to_string().contains("private"));
+            assert!(!error.to_string().contains("https://"));
+            if retryable {
+                assert!(error.to_string().contains("2 endpoints"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ordered_pir_rejects_changed_identity_before_replacement_query() {
+        let transport = Arc::new(RecordingTransport::matching_root());
+        let mut client = OrderedSnapshotPir::connect(
+            compiled_wallet_layout(),
+            vec![
+                "https://first".into(),
+                "https://second".into(),
+                "https://third".into(),
+            ],
+            transport.clone(),
+            crate::Network::Testnet,
+            &[0; 32],
+            100,
+        )
+        .await
+        .unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let error = client
+            .fetch_with::<()>(|_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut gets = transport.gets.lock().unwrap();
+                let root = gets.get_mut("/root").unwrap();
+                let mut value: serde_json::Value = serde_json::from_slice(&root.body).unwrap();
+                value["height"] = json!(101);
+                root.body = serde_json::to_vec(&value).unwrap();
+                Box::pin(async { Err(pir_client::RetryableTransportError.into()) })
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("identity mismatch"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(transport.count_hits("/root"), 2);
+        assert_eq!(transport.count_hits("/tier0"), 1);
+    }
+
     #[derive(Default)]
     struct RecordingTransport {
         gets: Mutex<HashMap<String, TransportResponse>>,
         hits: Mutex<Vec<String>>,
         posts: Mutex<usize>,
+        urls: Mutex<Vec<String>>,
     }
 
     impl RecordingTransport {
@@ -267,12 +632,12 @@ mod tests {
     impl Transport for RecordingTransport {
         fn get<'a>(&'a self, url: &'a str) -> TransportFuture<'a> {
             Box::pin(async move {
+                self.urls.lock().unwrap().push(url.to_owned());
                 let path = request_path(url);
                 self.hits.lock().unwrap().push(path.to_owned());
-                self.gets
-                    .lock()
-                    .unwrap()
-                    .get(path)
+                let gets = self.gets.lock().unwrap();
+                gets.get(url)
+                    .or_else(|| gets.get(path))
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("unexpected GET {path}"))
             })

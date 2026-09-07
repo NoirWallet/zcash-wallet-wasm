@@ -34,7 +34,7 @@ pub use imt_tree::ImtProofData;
 
 mod transport;
 pub use pir_types::{PirLayout, COMPILED_PIR_LAYOUT};
-pub use transport::{Transport, TransportFuture, TransportResponse};
+pub use transport::{RetryableTransportError, Transport, TransportFuture, TransportResponse};
 
 use pir_types::tier0::Tier0Data;
 use pir_types::tier1::Tier1Row;
@@ -249,7 +249,7 @@ impl PirClient {
         let root_resp = transport
             .get(&root_url)
             .await
-            .map_err(|e| anyhow::anyhow!("connect root fetch failed: {e}"))?;
+            .context("connect root fetch failed")?;
         let root_info: RootInfo =
             serde_json::from_slice(&body_for_status(root_resp, "GET /root failed")?)
                 .context("parse /root response")?;
@@ -277,7 +277,7 @@ impl PirClient {
 
         let (tier0_resp, tier1_resp) =
             futures::try_join!(transport.get(&tier0_url), transport.get(&tier1_url))
-                .map_err(|e| anyhow::anyhow!("connect data fetch failed: {e}"))?;
+                .context("connect data fetch failed")?;
         let tier1_scenario: YpirScenario =
             serde_json::from_slice(&body_for_status(tier1_resp, "GET /params/tier1 failed")?)
                 .context("parse /params/tier1 response")?;
@@ -533,7 +533,7 @@ impl PirClient {
         let resp = match send_result {
             Ok(r) => r,
             Err(e) => {
-                log::warn!("YPIR {} send error: {:?}", tier_name, e);
+                log::warn!("YPIR request failed");
                 return Err(e);
             }
         };
@@ -545,12 +545,7 @@ impl PirClient {
         let status = resp.status;
         let response_bytes = resp.body;
         if !is_success(status) {
-            anyhow::bail!(
-                "{} query failed: HTTP {} body={}",
-                tier_name,
-                status,
-                String::from_utf8_lossy(&response_bytes)
-            );
+            return Err(RetryableTransportError.into());
         }
         let rtt_ms = t1.elapsed().as_secs_f64() * 1000.0;
         let download_from_server_ms = (rtt_ms - send_ms).max(0.0);

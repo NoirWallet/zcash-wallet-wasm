@@ -488,24 +488,16 @@ impl VotingSessionInner {
                     &tree,
                 )
                 .map_err(mismatch)?;
-                let mut client = None;
-                for endpoint in &round.pir_urls {
-                    if let Ok(connected) = zcash_voting::pir::connect_pir_for_snapshot(
-                        round.pir_layout,
-                        endpoint,
-                        std::sync::Arc::new(self.transport),
-                        Network::Testnet,
-                        &round.params.nullifier_imt_root,
-                        round.params.snapshot_height,
-                    )
-                    .await
-                    {
-                        client = Some(connected);
-                        break;
-                    }
-                }
-                let client = client
-                    .ok_or_else(|| VotingApiError::new(VotingErrorCode::PirSnapshotMismatch))?;
+                let mut client = zcash_voting::pir::OrderedSnapshotPir::connect(
+                    round.pir_layout,
+                    round.pir_urls.clone(),
+                    std::sync::Arc::new(self.transport),
+                    Network::Testnet,
+                    &round.params.nullifier_imt_root,
+                    round.params.snapshot_height,
+                )
+                .await
+                .map_err(mismatch)?;
                 self.cached_round_at(&round.summary.round_id, now_secs()?)?;
                 let eligibility =
                     config::check_eligibility(&self.wallet, self.account_id, &round).await?;
@@ -598,20 +590,14 @@ impl VotingSessionInner {
                 }
                 for (index, notes) in bundles.iter().enumerate() {
                     self.cached_round_at(&round.summary.round_id, now_secs()?)?;
-                    let client = &client;
+                    let client = &mut client;
                     self.db
                         .precompute_delegation_pir_async(
                             &round.summary.round_id,
                             index as u32,
                             notes,
                             Network::Testnet,
-                            |nullifiers| async move {
-                                client.fetch_proofs(&nullifiers).await.map_err(|_| {
-                                    zcash_voting::VotingError::InvalidInput {
-                                        message: "PIR retrieval failed".into(),
-                                    }
-                                })
-                            },
+                            |nullifiers| async move { client.fetch_proofs(&nullifiers).await },
                         )
                         .await
                         .map_err(mismatch)?;

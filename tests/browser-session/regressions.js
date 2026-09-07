@@ -61,6 +61,47 @@ try {
       assert(hits.includes('/tier1/query'), 'private request path was not exercised');
     } finally { window.fetch=original; }
   });
+  await test('PIR query fallback is ordered, independently bound, and cannot mask corruption', async () => {
+    const original = window.fetch;
+    const layout = {pir_depth:19,tier0_layers:11,tier1_layers:8,poly_len:2048};
+    const root = {zcash_network:'test',nullifier_pool:'ironwood',dataset_version:2,circuit_root:'00'.repeat(32),pir_root:'00'.repeat(32),num_ranges:1,pir_layout:layout,pir_depth:19,tier1_rows:2048,tier1_row_bytes:24576,height:100};
+    try {
+      for (const mode of ['transport','status','all-fail','identity','malformed','oversized','mixed']) {
+        const hits = [];
+        const queryCounts = new Map();
+        window.fetch = async request => {
+          const {hostname, pathname} = new URL(request.url);
+          hits.push(`${hostname}${pathname}`);
+          assert(request.credentials === 'omit' && request.redirect === 'error', 'unsafe fallback Fetch options');
+          if (pathname === '/root') return new Response(JSON.stringify(mode === 'identity' && hostname === 'second.example' ? {...root,height:101} : root));
+          if (pathname === '/tier0') return new Response(new Uint8Array(2047 * 32 + 2048 * 64));
+          if (pathname === '/params/tier1') return new Response(JSON.stringify({num_items:2048,item_size_bits:24576*8,poly_len:2048}));
+          for (const path of ['/root','/tier0','/params/tier1']) assert(hits.includes(`${hostname}${path}`), 'private query before endpoint handshake');
+          assert(request.method === 'POST' && (await request.arrayBuffer()).byteLength > 0, 'missing encoded fallback query');
+          const count = (queryCounts.get(hostname) || 0) + 1;
+          queryCounts.set(hostname, count);
+          if (hostname === 'first.example') {
+            if (mode === 'transport') throw new TypeError('unavailable');
+            if (mode === 'oversized') return new Response('', {headers:{'Content-Length':String(64*1024*1024+1)}});
+            if (mode === 'malformed' || (mode === 'mixed' && count === 2)) return new Response(new Uint8Array([0]));
+            return new Response('server diagnostic must not escape', {status:503});
+          }
+          return mode === 'all-fail' ? new Response('', {status:502}) : new Response(new Uint8Array([0]));
+        };
+        await errorCode(()=>bindings.votingTestPirFallback(['https://first.example','https://second.example']), 'PIR_SNAPSHOT_MISMATCH');
+        assert(queryCounts.get('first.example') === 2, 'first query batch not completed');
+        const stopAtFirst = ['malformed','oversized','mixed'].includes(mode);
+        assert(hits.includes('second.example/root') !== stopAtFirst, 'incorrect protocol failure fallback');
+        if (mode === 'identity') {
+          assert(!hits.includes('second.example/tier0') && !queryCounts.has('second.example'), 'identity mismatch reached private query');
+        } else if (!stopAtFirst) {
+          assert(queryCounts.get('second.example') === 2, 'validated replacement not queried');
+        }
+        const replacement = hits.indexOf('second.example/root');
+        if (replacement >= 0) assert(hits.slice(replacement).every(hit=>hit.startsWith('second.example/')), 'endpoint order changed');
+      }
+    } finally { window.fetch = original; }
+  });
   const bytes = async name => new Uint8Array(await (await fetch(`fixtures/${name}`)).arrayBuffer());
   const metadata = await (await fetch('fixtures/metadata.json')).json();
   const walletBytes = await bytes('wallet.bin');

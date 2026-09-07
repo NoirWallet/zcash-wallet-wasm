@@ -40,7 +40,7 @@ try {
   capabilities['goog:chromeOptions'].args.push('--headless');
   capabilities['goog:loggingPrefs'] = { browser: 'ALL' };
   session=(await command('/session',{capabilities:{alwaysMatch:capabilities}})).sessionId;
-  await command(`/session/${session}/timeouts`,{script:60000});
+  await command(`/session/${session}/timeouts`,{script:Number(process.env.SESSION_TEST_TIMEOUT_MS ?? 60000)});
   await command(`/session/${session}/url`,{url:`http://127.0.0.1:${server.address().port}/`});
   const results=await command(`/session/${session}/execute/async`,{script:`const done=arguments[arguments.length-1]; const timer=setInterval(()=>{if(window.sessionResults?.done){clearInterval(timer);done(window.sessionResults.results);}},20);`,args:[]}).catch(async error => {
     console.error(await command(`/session/${session}/log`, {type:'browser'}));

@@ -51,6 +51,117 @@ mod pir_identity {
     use zcash_voting::pir::{Transport, TransportFuture, TransportResponse};
 
     #[tokio::test]
+    async fn pir_query_batch_never_masks_protocol_failure_with_retryable_sibling() {
+        use std::collections::VecDeque;
+        use valar_ypir::{
+            client::YPIRClient,
+            modulus_switch::expected_ct_byte_len,
+            params::{GetQPrime, YPIRSPConfig},
+        };
+        use zcash_voting::pir::RetryableTransportError;
+        struct Responses(Mutex<VecDeque<u8>>, usize);
+        impl Transport for Responses {
+            fn get<'a>(&'a self, url: &'a str) -> TransportFuture<'a> {
+                let body = if url.ends_with("/tier0") {
+                    vec![0; 2047 * 32 + 2048 * 64]
+                } else if url.ends_with("/params/tier1") {
+                    serde_json::to_vec(
+                        &json!({"num_items":2048,"item_size_bits":24576*8,"poly_len":2048}),
+                    )
+                    .unwrap()
+                } else {
+                    serde_json::to_vec(&json!({"zcash_network":"test","nullifier_pool":"ironwood","dataset_version":2,"circuit_root":hex::encode([0;32]),"pir_root":hex::encode([0;32]),"num_ranges":1,"pir_layout":{"pir_depth":19,"tier0_layers":11,"tier1_layers":8,"poly_len":2048},"pir_depth":19,"tier1_rows":2048,"tier1_row_bytes":24576,"height":100})).unwrap()
+                };
+                Box::pin(async move {
+                    Ok(TransportResponse {
+                        status: 200,
+                        headers: vec![],
+                        body,
+                    })
+                })
+            }
+            fn post<'a>(&'a self, _: &'a str, _: Vec<u8>) -> TransportFuture<'a> {
+                let outcome = self.0.lock().unwrap().pop_front().unwrap();
+                let valid_length = self.1;
+                Box::pin(async move {
+                    match outcome {
+                        0 => Err(RetryableTransportError.into()),
+                        1 => Ok(TransportResponse {
+                            status: 503,
+                            headers: vec![],
+                            body: b"private server diagnostic".to_vec(),
+                        }),
+                        2 => Ok(TransportResponse {
+                            status: 200,
+                            headers: vec![],
+                            body: vec![0],
+                        }),
+                        4 => Ok(TransportResponse {
+                            status: 200,
+                            headers: vec![],
+                            body: vec![0; valid_length],
+                        }),
+                        _ => Err(zcash_voting::platform::TransportError::ResponseTooLarge {
+                            limit: 64 * 1024 * 1024,
+                        }
+                        .into()),
+                    }
+                })
+            }
+        }
+        let client_params = YPIRClient::from_db_sz_simplepir_with_config(
+            2048,
+            24576 * 8,
+            YPIRSPConfig::for_poly_len(2048),
+        );
+        let params = client_params.params();
+        let valid_length = params.instances
+            * expected_ct_byte_len(params, params.get_q_prime_1(), params.get_q_prime_2());
+        let transport = Arc::new(Responses(Mutex::new(VecDeque::new()), valid_length));
+        for (outcomes, retryable) in [
+            ([0, 0], true),
+            ([1, 1], true),
+            ([0, 1], true),
+            ([0, 2], false),
+            ([1, 2], false),
+            ([2, 0], false),
+            ([1, 3], false),
+            ([0, 4], false),
+        ] {
+            *transport.0.lock().unwrap() = outcomes.into_iter().collect();
+            let mut client = zcash_voting::pir::OrderedSnapshotPir::connect(
+                zcash_voting::wire::PirLayout {
+                    pir_depth: 19,
+                    tier0_layers: 11,
+                    tier1_layers: 8,
+                    poly_len: 2048,
+                },
+                vec!["https://pir.example".into()],
+                transport.clone(),
+                zcash_voting::Network::Testnet,
+                &[0; 32],
+                100,
+            )
+            .await
+            .unwrap();
+            let error = client
+                .fetch_proofs(&[1.into(), 2.into()])
+                .await
+                .unwrap_err();
+            assert_eq!(
+                matches!(error, zcash_voting::VotingError::Internal { .. }),
+                retryable,
+                "outcomes {outcomes:?}: {error}"
+            );
+            assert!(
+                transport.0.lock().unwrap().is_empty(),
+                "all siblings must complete"
+            );
+            assert!(!error.to_string().contains("private server diagnostic"));
+        }
+    }
+
+    #[tokio::test]
     async fn pir_response_shape_rejects_malformed_and_truncated_data_without_panicking() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use valar_ypir::{
