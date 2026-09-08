@@ -29,19 +29,25 @@ The browser patch categories are:
   gated. Protocol types, note bundling, signing, and witness validation remain
   compiled; the browser input adapter is added in the subsequent wallet task.
 - SQLite serialization: `serialize` is enabled for both SQLite variants.
-  Browser connection ownership, byte loading, and serialization APIs belong
-  to the subsequent storage task; schema version 17 is unchanged here.
-- Fetch transport: native implementations are gated while owned transport
-  traits and response parsers remain compiled. Fetch is added in the transport task.
-- Async tree sync: the native Hyper convenience method is gated; the pure
-  tree client, validation, and witness core remain. Async fetching is added later.
+  Browser connections own byte loading and serialization on the caller thread;
+  sensitive voting SQLite bytes are owner-bound and are not exposed through
+  public DTOs or separate host storage.
+- Fetch transport: native implementations remain target-gated while owned
+  transport traits and response parsers remain compiled. The browser adapter
+  owns Fetch, abort, timer, reader, and JavaScript promise handles in its
+  caller-local task; only owned Rust request and response data cross its Send
+  future.
+- Async tree sync: the native Hyper convenience method is gated while the
+  browser async tree path fetches and validates snapshots before opening the
+  wallet, releases SQLite before await, and retains the shared tree,
+  validation, and witness core.
 - Proof executor: native large-stack threads are retained on native targets;
-  WASM compiles the same proof construction directly and sequentially. The
-  dedicated browser executor and worker orchestration are added later.
+  WASM proves owned inputs sequentially or on an initialized Rayon pool without
+  moving SQLite, JavaScript values, or promises across a worker boundary.
 - Helper local futures: native Tokio preflight, submission, and polling entry
-  points are gated. Policy, wire parsing, durable storage, recovery, planning,
-  and `session::resume_plan` remain compiled. Browser timers, local futures,
-  and checkpoint hooks are added in the helper task.
+  points remain available to native tests. Browser `LocalHelperClient` uses
+  caller-local timers, transport, and checkpoint hooks while sharing policy,
+  wire parsing, durable storage, recovery, planning, and `session::resume_plan`.
 
 Target gates intentionally preserve native APIs when `browser` is enabled on
 a native test host. This permits contract tests alongside upstream regressions.
@@ -57,10 +63,17 @@ lifecycle semantics are unchanged.
 of the complete stored protocol parameters and network for recovery identity
 comparison, with safe errors for missing or unreadable records.
 
-Browser preparation adds schema v19's wallet/round-scoped voting hotkey column,
-with create-once/load APIs and no changes to the caller's strict authenticated
-session envelope. Async PIR cache preparation releases SQLite ownership before
-fetching or validating proofs and reuses the existing cache verification path.
+The browser voting database upgrades in place from launched schema v13 through
+current schema v22: v17 binds bytes to one wallet owner and network, v18 adds a
+wallet/round-scoped voting hotkey, v19 adds the canonical delegation-attempt
+journal, v20 adds immutable delegation confirmation evidence, and v22 adds the
+canonical vote-attempt journal. Pre-launch databases reset; launched databases
+retain recoverable state and reject unknown newer versions. Hotkeys and
+canonical recovery material remain only in sensitive owner-bound voting SQLite
+bytes; mnemonic, root seed, USK, and private wallet keys are never persisted.
+
+Async PIR cache preparation releases SQLite ownership before fetching or
+validating proofs and reuses the existing cache verification path.
 The snapshot transport binds the actual PIR handshake to the authenticated
 testnet network, Ironwood dataset, layout, IMT root and height. The PIR adapter
 uses browser clocks and validates the public encoded response length before
@@ -68,12 +81,17 @@ upstream decoding; query encoding and proof verification remain unchanged.
 Owned proof inputs may run sequentially or on the host's initialized Rayon pool;
 native large-stack proof behavior remains target-gated and unchanged.
 
-Delegation adds schema v20's owner/round/bundle-scoped canonical submission
-journal. Canonical signed payloads and proof recovery material live only in the
-sensitive voting SQLite export; seed material and wallet spending keys are never
-stored. An owned proof job separates synchronous database reads and writes from
-executor work. The explicit delegation planner covers prepared bundles without
-creating ballot choices or changing the ordinary ballot/helper resume planner.
+Delegation's schema v19 owner/round/bundle-scoped canonical journal and schema
+v20 confirmation fields preserve immutable original submission identity and
+validated VAN position. Vote schema v22 journals canonical batch bytes,
+precomputed transaction identity, ordered membership, outcome, and confirmation
+evidence. Recovery polls by the canonical precomputed hash after a possible
+dispatch and does not re-prove, re-sign, or blindly re-POST delegation or vote
+requests. Canonical signed payloads and proof recovery material live only in
+the sensitive voting SQLite export. An owned proof job separates synchronous
+database reads and writes from executor work. The explicit delegation planner
+covers prepared bundles without creating ballot choices or changing the
+ordinary ballot/helper resume planner.
 
 The pinned voting library has no vote-chain HTTP client. The local
 `delegation_submission` adapter uses the exact REST routes, request/response
@@ -94,6 +112,14 @@ response-body hash assertion. Possible dispatch is never retried by POST. A
 cancelled dispatch-intent checkpoint can conservatively require polling even
 when the original POST was never reached; no client can close that crash window
 without a stronger server-side idempotency contract.
+
+Browser helper submission uses the local runtime rather than native channels:
+the immutable helper plan is checkpointed before delivery work, the shared
+policy retains its duplicate-safe reconciliation rules, and Fetch capacity,
+timeouts, cancellation, bounded response reads, and post-checkpoint outcome
+classification are enforced on the caller thread. Native `HelperClient` keeps
+its Send/Sync and paused-time behavior; native contract tests exercise the
+local path without compiling browser JavaScript ownership into native helpers.
 
 Check out the proposed upstream commit separately, review protocol/schema and
 dependency changes, and merge the documented compatibility patches explicitly.
