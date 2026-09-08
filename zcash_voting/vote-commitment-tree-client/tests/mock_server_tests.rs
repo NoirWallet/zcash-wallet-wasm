@@ -16,8 +16,10 @@ use voting_crypto_deps::pasta_curves::{group::ff::PrimeField, Fp};
 
 use vote_commitment_tree::{TreeClient, TreeSyncApi};
 use vote_commitment_tree_client::{
-    http_sync_api::{HttpSyncError, HttpTreeSyncApi},
+    async_transport::AsyncTransport,
+    http_sync_api::{AsyncHttpTreeSyncApi, HttpSyncError, HttpTreeSyncApi},
     transport::{Transport, TransportError, TransportResponse},
+    AsyncTreeSyncApi,
 };
 
 const BASE_URL: &str = "http://node.example";
@@ -441,4 +443,145 @@ fn witness_hex_roundtrip() {
     let decoded_bytes = hex::decode(&witness_hex).unwrap();
     let decoded_path = vote_commitment_tree::MerklePath::from_bytes(&decoded_bytes).unwrap();
     assert!(decoded_path.verify(fp(42), root));
+}
+
+#[derive(Default)]
+struct MockAsyncTransport {
+    responses: Mutex<HashMap<String, VecDeque<Result<TransportResponse, TransportError>>>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl MockAsyncTransport {
+    fn with_responses(
+        responses: impl IntoIterator<Item = (String, Result<TransportResponse, TransportError>)>,
+    ) -> Arc<Self> {
+        let transport = Arc::new(Self::default());
+        for (url, response) in responses {
+            transport
+                .responses
+                .lock()
+                .unwrap()
+                .entry(url)
+                .or_default()
+                .push_back(response);
+        }
+        transport
+    }
+}
+
+impl AsyncTransport for MockAsyncTransport {
+    fn get(
+        &self,
+        url: String,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TransportResponse, TransportError>> + Send>,
+    > {
+        self.calls.lock().unwrap().push(url.clone());
+        let response = self
+            .responses
+            .lock()
+            .unwrap()
+            .get_mut(&url)
+            .and_then(VecDeque::pop_front)
+            .unwrap_or_else(|| Err(TransportError::Request("unexpected request".into())));
+        Box::pin(async move { response })
+    }
+}
+
+fn poll_ready<T>(future: impl std::future::Future<Output = T>) -> T {
+    struct Wake;
+    impl std::task::Wake for Wake {
+        fn wake(self: Arc<Self>) {}
+    }
+    let waker = std::task::Waker::from(Arc::new(Wake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    match std::future::Future::poll(future.as_mut(), &mut context) {
+        std::task::Poll::Ready(value) => value,
+        std::task::Poll::Pending => panic!("fixture future unexpectedly pending"),
+    }
+}
+
+#[test]
+fn async_http_api_uses_canonical_routes_and_parsers() {
+    const ROUND: &str = "abababababababababababababababababababababababababababababababab";
+    let base = "https://node.example";
+    let latest = format!("{base}/shielded-vote/v1/commitment-tree/{ROUND}/latest");
+    let leaves =
+        format!("{base}/shielded-vote/v1/commitment-tree/{ROUND}/leaves?from_height=1&to_height=2");
+    let transport = MockAsyncTransport::with_responses([
+        (
+            latest,
+            Ok(json_response(format!(
+                r#"{{"tree":{{"next_index":1,"root":"{}","height":2}}}}"#,
+                fp_bytes_to_b64(fp(10))
+            ))),
+        ),
+        (
+            leaves.clone(),
+            Ok(json_response(format!(
+                r#"{{"blocks":[{{"height":2,"start_index":0,"leaves":["{}"],"root":"{}"}}]}}"#,
+                fp_to_b64(10),
+                fp_bytes_to_b64(fp(10))
+            ))),
+        ),
+    ]);
+    let api = AsyncHttpTreeSyncApi::new(base, ROUND, transport.clone()).unwrap();
+    assert_eq!(poll_ready(api.get_tree_state()).unwrap().next_index, 1);
+    assert_eq!(
+        poll_ready(api.get_block_commitments(1, 2))
+            .unwrap()
+            .blocks
+            .len(),
+        1
+    );
+    assert_eq!(transport.calls.lock().unwrap()[1], leaves);
+}
+
+#[test]
+fn async_http_api_rejects_unbound_urls_rounds_and_oversized_bodies() {
+    const ROUND: &str = "abababababababababababababababababababababababababababababababab";
+    let transport = MockAsyncTransport::with_responses([]);
+    for base in [
+        "secret://node.example",
+        "https://user@node.example",
+        "https://node.example/tree?token=secret",
+        "https://node.example/tree#fragment",
+    ] {
+        assert!(AsyncHttpTreeSyncApi::new(base, ROUND, transport.clone()).is_err());
+    }
+    for round in ["ab", &"AB".repeat(32), &format!("{}?x=1", "ab".repeat(32))] {
+        assert!(
+            AsyncHttpTreeSyncApi::new("https://node.example", round, transport.clone()).is_err()
+        );
+    }
+
+    let url = format!("https://node.example/shielded-vote/v1/commitment-tree/{ROUND}/latest");
+    let transport = MockAsyncTransport::with_responses([(
+        url,
+        Ok(TransportResponse {
+            status: 200,
+            body: vec![0; 9],
+        }),
+    )]);
+    let api =
+        AsyncHttpTreeSyncApi::with_response_limit("https://node.example", ROUND, transport, 8)
+            .unwrap();
+    assert!(poll_ready(api.get_tree_state()).is_err());
+}
+
+#[test]
+fn async_http_failures_do_not_render_urls_or_response_bodies() {
+    const ROUND: &str = "abababababababababababababababababababababababababababababababab";
+    let base = "https://node.example/private-prefix";
+    let url = format!("{base}/shielded-vote/v1/commitment-tree/{ROUND}/latest");
+    let transport = MockAsyncTransport::with_responses([(
+        url,
+        Ok(status_response(500, "private response body")),
+    )]);
+    let api = AsyncHttpTreeSyncApi::new(base, ROUND, transport).unwrap();
+    let rendered = poll_ready(api.get_tree_state()).unwrap_err().to_string();
+    assert!(rendered.contains("500"));
+    assert!(!rendered.contains(base));
+    assert!(!rendered.contains("private response body"));
 }

@@ -9,9 +9,20 @@ pub(crate) use crate::backend::pasta_curves;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
-use vote_commitment_tree::{MerklePath, TreeClient, TreeSyncApi};
+pub use vote_commitment_tree::AsyncTreeSyncApi;
+use vote_commitment_tree::{
+    sync_api::{BlockCommitmentsPage, TreeState},
+    MerklePath, SyncError, TreeClient, TreeSyncApi,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use vote_commitment_tree_client::http_sync_api::HttpTreeSyncApi;
+pub use vote_commitment_tree_client::{
+    async_transport::AsyncTransport,
+    http_sync_api::AsyncHttpTreeSyncApi,
+    transport::{
+        TransportError as AsyncTransportError, TransportResponse as AsyncTransportResponse,
+    },
+};
 
 use crate::storage::{queries, VotingDb};
 use crate::types::VotingError;
@@ -192,7 +203,7 @@ mod tests {
         assert!(
             witness_error
                 .to_string()
-                .contains("failed to generate witness"),
+                .contains("has not been fully validated"),
             "{witness_error}"
         );
     }
@@ -361,6 +372,9 @@ mod tests {
 struct RoundTreeClient {
     client: TreeClient,
     marked_positions: BTreeSet<u64>,
+    validated_height: Option<u32>,
+    generation: u64,
+    sync_active: bool,
 }
 
 impl RoundTreeClient {
@@ -368,7 +382,16 @@ impl RoundTreeClient {
         Self {
             client: TreeClient::empty(),
             marked_positions: BTreeSet::new(),
+            validated_height: None,
+            generation: 0,
+            sync_active: false,
         }
+    }
+
+    fn clear_tree(&mut self) {
+        self.client = TreeClient::empty();
+        self.marked_positions.clear();
+        self.validated_height = None;
     }
 
     fn needs_resync_for(&self, positions: &BTreeSet<u64>) -> bool {
@@ -378,11 +401,63 @@ impl RoundTreeClient {
     }
 
     fn mark_positions(&mut self, positions: &BTreeSet<u64>) {
+        if positions
+            .iter()
+            .any(|position| !self.marked_positions.contains(position))
+        {
+            self.validated_height = None;
+        }
         for pos in positions {
             self.client.mark_position(*pos);
         }
         self.marked_positions.extend(positions.iter().copied());
     }
+}
+
+struct SyncLease {
+    round_client: Arc<Mutex<RoundTreeClient>>,
+    generation: u64,
+}
+
+impl Drop for SyncLease {
+    fn drop(&mut self) {
+        if let Ok(mut client) = self.round_client.lock() {
+            if client.generation == self.generation {
+                client.sync_active = false;
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BufferedTreeApi {
+    state: TreeState,
+    page: BlockCommitmentsPage,
+}
+
+impl TreeSyncApi for BufferedTreeApi {
+    type Error = std::convert::Infallible;
+
+    fn get_block_commitments(
+        &self,
+        _from_height: u32,
+        _to_height: u32,
+    ) -> Result<BlockCommitmentsPage, Self::Error> {
+        Ok(self.page.clone())
+    }
+
+    fn get_root_at_height(&self, _height: u32) -> Result<Option<pasta_curves::Fp>, Self::Error> {
+        Ok(None)
+    }
+
+    fn get_tree_state(&self) -> Result<TreeState, Self::Error> {
+        Ok(self.state.clone())
+    }
+}
+
+enum VanValidationFailure {
+    Invalid(VotingError),
+    Pending(VotingError),
 }
 
 /// Manages per-round in-memory vote commitment trees for VAN witness generation.
@@ -460,64 +535,390 @@ impl VoteTreeSync {
         }
         round_client.mark_positions(&positions);
 
-        round_client
-            .client
-            .sync(api)
-            .map_err(|e| VotingError::Internal {
-                message: format!("vote tree sync failed: {}", e),
-            })?;
+        if let Err(error) = round_client.client.sync(api) {
+            let retain = matches!(error, SyncError::Api(_));
+            let message = format!("vote tree sync failed: {error}");
+            if !retain {
+                round_client.clear_tree();
+            }
+            return Err(VotingError::Internal { message });
+        }
 
-        let anchor_height = round_client.client.last_synced_height().unwrap_or(0);
-        let validation = (|| {
-            let mut missing_bundle = None;
-            for entry in entries {
-                let Some(expected_delegation_van) = entry.expected_delegation_van else {
-                    continue;
-                };
-                let Some(path) = round_client
+        match Self::validate_van_entries(&mut round_client, &entries) {
+            Ok(height) => Ok(height),
+            Err(VanValidationFailure::Invalid(error)) => {
+                round_client.clear_tree();
+                Err(error)
+            }
+            Err(VanValidationFailure::Pending(error)) => Err(error),
+        }
+    }
+
+    /// Browser-safe incremental sync. Every remote fetch completes before a
+    /// short tree lock is acquired; only one bounded page is retained at once.
+    pub async fn sync_with_async_api<A: AsyncTreeSyncApi>(
+        &self,
+        db: &VotingDb,
+        round_id: &str,
+        api: &A,
+    ) -> Result<u32, VotingError> {
+        let wallet_id = db.wallet_id();
+        let entries = queries::load_van_tree_entries(&db.conn(), round_id, &wallet_id)?;
+        let positions = entries
+            .iter()
+            .map(|entry| u64::from(entry.position))
+            .collect::<BTreeSet<_>>();
+        let lease = self.acquire_async_lease(round_id, &positions)?;
+
+        let state = api
+            .get_tree_state()
+            .await
+            .map_err(|_| VotingError::Internal {
+                message: "vote tree state fetch failed".to_string(),
+            })?;
+        self.ensure_current(round_id, &lease)?;
+
+        let (mut page_from, to_height, needs_pages) = {
+            let client = lease
+                .round_client
+                .lock()
+                .map_err(|e| VotingError::Internal {
+                    message: format!("round tree client lock poisoned: {e}"),
+                })?;
+            (
+                client
                     .client
-                    .witness(u64::from(entry.position), anchor_height)
-                else {
-                    missing_bundle.get_or_insert(entry.bundle_index);
-                    continue;
-                };
-                let root = round_client
-                    .client
-                    .root_at_height(anchor_height)
-                    .ok_or_else(|| VotingError::Internal {
-                        message: format!(
-                            "synced vote tree has no root at anchor height {anchor_height}"
-                        ),
+                    .last_synced_height()
+                    .map(|h| h + 1)
+                    .unwrap_or(0),
+                state.height,
+                client.client.size() != state.next_index,
+            )
+        };
+
+        if needs_pages && page_from <= to_height {
+            let max_pages = vote_commitment_tree::SyncLimits::default().max_pages;
+            let mut pages_fetched = 0usize;
+            loop {
+                if pages_fetched >= max_pages {
+                    return Err(VotingError::Internal {
+                        message: format!("vote tree sync page limit exceeded: {max_pages}"),
+                    });
+                }
+                let page = api
+                    .get_block_commitments(page_from, to_height)
+                    .await
+                    .map_err(|_| VotingError::Internal {
+                        message: "vote tree commitment page fetch failed".to_string(),
                     })?;
-                if !path.verify(expected_delegation_van, root) {
-                    return Err(VotingError::InvalidInput {
+                pages_fetched += 1;
+                self.ensure_current(round_id, &lease)?;
+
+                let next = page.next_from_height;
+                if next != 0 && (next <= page_from || next > to_height) {
+                    self.invalidate_current(round_id, &lease)?;
+                    return Err(VotingError::Internal {
                         message: format!(
-                            "confirmed delegation bundle {} does not match its synced vote-tree leaf",
-                            entry.bundle_index
+                            "vote tree sync returned invalid pagination cursor {next} from {page_from}"
                         ),
                     });
                 }
+                let mut previous_height = None;
+                if page.blocks.iter().any(|block| {
+                    let invalid = block.height < page_from
+                        || block.height > to_height
+                        || previous_height.is_some_and(|height| block.height <= height);
+                    previous_height = Some(block.height);
+                    invalid
+                }) {
+                    self.invalidate_current(round_id, &lease)?;
+                    return Err(VotingError::Internal {
+                        message:
+                            "vote tree sync returned block heights outside the requested range"
+                                .to_string(),
+                    });
+                }
+
+                let apply_result = {
+                    let mut client =
+                        lease
+                            .round_client
+                            .lock()
+                            .map_err(|e| VotingError::Internal {
+                                message: format!("round tree client lock poisoned: {e}"),
+                            })?;
+                    if client.generation != lease.generation || !client.sync_active {
+                        return Err(Self::stale_sync_error());
+                    }
+                    client.validated_height = None;
+                    let added = page.blocks.iter().try_fold(0u64, |total, block| {
+                        let count = u64::try_from(block.leaves.len()).map_err(|_| ())?;
+                        total.checked_add(count).ok_or(())
+                    });
+                    let added = match added {
+                        Ok(added) => added,
+                        Err(()) => {
+                            client.clear_tree();
+                            return Err(VotingError::Internal {
+                                message: "vote tree commitment page size overflow".to_string(),
+                            });
+                        }
+                    };
+                    let next_index = match client.client.size().checked_add(added) {
+                        Some(next_index) => next_index,
+                        None => {
+                            client.clear_tree();
+                            return Err(VotingError::Internal {
+                                message: "vote tree position overflow".to_string(),
+                            });
+                        }
+                    };
+                    let page_state = if let Some(last) = page.blocks.last() {
+                        TreeState {
+                            next_index,
+                            root: last.root,
+                            height: last.height,
+                        }
+                    } else {
+                        TreeState {
+                            next_index,
+                            root: client.client.root(),
+                            height: client.client.last_synced_height().unwrap_or(0),
+                        }
+                    };
+                    let mut buffered_page = page.clone();
+                    buffered_page.next_from_height = 0;
+                    client.client.sync(&BufferedTreeApi {
+                        state: page_state,
+                        page: buffered_page,
+                    })
+                };
+                if let Err(error) = apply_result {
+                    self.invalidate_current(round_id, &lease)?;
+                    return Err(VotingError::Internal {
+                        message: format!("vote tree page validation failed: {error}"),
+                    });
+                }
+
+                if next == 0 {
+                    break;
+                }
+                page_from = next;
             }
-            Ok(missing_bundle)
-        })();
-        match validation {
-            Err(error) => {
-                *round_client = RoundTreeClient::empty();
-                return Err(error);
-            }
-            Ok(Some(bundle_index)) => {
-                return Err(VotingError::InvalidInput {
-                    message: format!(
-                        "confirmed delegation bundle {bundle_index} is absent from the synced vote tree"
-                    ),
-                });
-            }
-            Ok(None) => {}
         }
 
-        // Empty tree is valid before the first delegation commitment is appended.
-        // Report height 0 so callers can proceed instead of failing sync.
-        Ok(round_client.client.last_synced_height().unwrap_or(0))
+        let anchor_height = {
+            let mut client = lease
+                .round_client
+                .lock()
+                .map_err(|e| VotingError::Internal {
+                    message: format!("round tree client lock poisoned: {e}"),
+                })?;
+            let final_check = client.client.sync(&BufferedTreeApi {
+                state: state.clone(),
+                page: BlockCommitmentsPage {
+                    blocks: Vec::new(),
+                    next_from_height: 0,
+                },
+            });
+            if let Err(error) = final_check {
+                client.clear_tree();
+                return Err(VotingError::Internal {
+                    message: format!("vote tree final state validation failed: {error}"),
+                });
+            }
+            client.client.last_synced_height().unwrap_or(0)
+        };
+
+        if state.next_index > 0 {
+            let server_root =
+                api.get_root_at_height(anchor_height)
+                    .await
+                    .map_err(|_| VotingError::Internal {
+                        message: "vote tree anchor root fetch failed".to_string(),
+                    })?;
+            self.ensure_current(round_id, &lease)?;
+            let matches = {
+                let client = lease
+                    .round_client
+                    .lock()
+                    .map_err(|e| VotingError::Internal {
+                        message: format!("round tree client lock poisoned: {e}"),
+                    })?;
+                server_root == client.client.root_at_height(anchor_height)
+            };
+            if !matches {
+                self.invalidate_current(round_id, &lease)?;
+                return Err(VotingError::Internal {
+                    message: "vote tree anchor root does not match the verified tree".to_string(),
+                });
+            }
+        }
+
+        let registry = self.clients.lock().map_err(|e| VotingError::Internal {
+            message: format!("tree client registry lock poisoned: {e}"),
+        })?;
+        if !registry
+            .get(round_id)
+            .is_some_and(|client| Arc::ptr_eq(client, &lease.round_client))
+        {
+            return Err(Self::stale_sync_error());
+        }
+        let mut client = lease
+            .round_client
+            .lock()
+            .map_err(|e| VotingError::Internal {
+                message: format!("round tree client lock poisoned: {e}"),
+            })?;
+        if client.generation != lease.generation || !client.sync_active {
+            return Err(Self::stale_sync_error());
+        }
+        if client.client.size() != state.next_index
+            || (state.next_index > 0 && client.client.root() != state.root)
+        {
+            client.clear_tree();
+            return Err(VotingError::Internal {
+                message: "vote tree final tip does not match the advertised state".to_string(),
+            });
+        }
+        match Self::validate_van_entries(&mut client, &entries) {
+            Ok(height) => Ok(height),
+            Err(VanValidationFailure::Invalid(error)) => {
+                client.clear_tree();
+                Err(error)
+            }
+            Err(VanValidationFailure::Pending(error)) => Err(error),
+        }
+    }
+
+    fn acquire_async_lease(
+        &self,
+        round_id: &str,
+        positions: &BTreeSet<u64>,
+    ) -> Result<SyncLease, VotingError> {
+        let round_client = {
+            let mut clients = self.clients.lock().map_err(|e| VotingError::Internal {
+                message: format!("tree client registry lock poisoned: {e}"),
+            })?;
+            clients
+                .entry(round_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(RoundTreeClient::empty())))
+                .clone()
+        };
+        let generation = {
+            let mut client = round_client.lock().map_err(|e| VotingError::Internal {
+                message: format!("round tree client lock poisoned: {e}"),
+            })?;
+            if client.sync_active {
+                return Err(VotingError::InvalidInput {
+                    message: "vote tree sync is already in progress for this round".to_string(),
+                });
+            }
+            client.generation = client.generation.wrapping_add(1);
+            client.sync_active = true;
+            if client.needs_resync_for(positions) {
+                client.clear_tree();
+            }
+            client.mark_positions(positions);
+            client.generation
+        };
+        Ok(SyncLease {
+            round_client,
+            generation,
+        })
+    }
+
+    fn ensure_current(&self, round_id: &str, lease: &SyncLease) -> Result<(), VotingError> {
+        let current = self
+            .clients
+            .lock()
+            .map_err(|e| VotingError::Internal {
+                message: format!("tree client registry lock poisoned: {e}"),
+            })?
+            .get(round_id)
+            .cloned();
+        if !current
+            .as_ref()
+            .is_some_and(|client| Arc::ptr_eq(client, &lease.round_client))
+        {
+            return Err(Self::stale_sync_error());
+        }
+        let client = lease
+            .round_client
+            .lock()
+            .map_err(|e| VotingError::Internal {
+                message: format!("round tree client lock poisoned: {e}"),
+            })?;
+        if client.generation != lease.generation || !client.sync_active {
+            return Err(Self::stale_sync_error());
+        }
+        Ok(())
+    }
+
+    fn invalidate_current(&self, round_id: &str, lease: &SyncLease) -> Result<(), VotingError> {
+        self.ensure_current(round_id, lease)?;
+        lease
+            .round_client
+            .lock()
+            .map_err(|e| VotingError::Internal {
+                message: format!("round tree client lock poisoned: {e}"),
+            })?
+            .clear_tree();
+        Ok(())
+    }
+
+    fn stale_sync_error() -> VotingError {
+        VotingError::InvalidInput {
+            message: "vote tree sync was invalidated by a concurrent reset".to_string(),
+        }
+    }
+
+    fn validate_van_entries(
+        round_client: &mut RoundTreeClient,
+        entries: &[queries::VanTreeEntry],
+    ) -> Result<u32, VanValidationFailure> {
+        let anchor_height = round_client.client.last_synced_height().unwrap_or(0);
+        let mut missing_bundle = None;
+        for entry in entries {
+            let Some(expected_delegation_van) = entry.expected_delegation_van else {
+                continue;
+            };
+            let Some(path) = round_client
+                .client
+                .witness(u64::from(entry.position), anchor_height)
+            else {
+                missing_bundle.get_or_insert(entry.bundle_index);
+                continue;
+            };
+            let root = round_client
+                .client
+                .root_at_height(anchor_height)
+                .ok_or_else(|| {
+                    VanValidationFailure::Invalid(VotingError::Internal {
+                        message: format!(
+                            "synced vote tree has no root at anchor height {anchor_height}"
+                        ),
+                    })
+                })?;
+            if !path.verify(expected_delegation_van, root) {
+                return Err(VanValidationFailure::Invalid(VotingError::InvalidInput {
+                    message: format!(
+                        "confirmed delegation bundle {} does not match its synced vote-tree leaf",
+                        entry.bundle_index
+                    ),
+                }));
+            }
+        }
+        if let Some(bundle_index) = missing_bundle {
+            round_client.validated_height = None;
+            return Err(VanValidationFailure::Pending(VotingError::InvalidInput {
+                message: format!(
+                    "confirmed delegation bundle {bundle_index} is absent from the synced vote tree"
+                ),
+            }));
+        }
+        round_client.validated_height = Some(anchor_height);
+        Ok(anchor_height)
     }
 
     /// Generate a VAN Merkle witness for ZKP #2.
@@ -548,6 +949,13 @@ impl VoteTreeSync {
         let round_client = round_client.lock().map_err(|e| VotingError::Internal {
             message: format!("round tree client lock poisoned: {e}"),
         })?;
+
+        if round_client.validated_height != Some(anchor_height) {
+            return Err(VotingError::InvalidInput {
+                message: "vote tree has not been fully validated at the requested anchor height"
+                    .to_string(),
+            });
+        }
 
         let path = round_client
             .client

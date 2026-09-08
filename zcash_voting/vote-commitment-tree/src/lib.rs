@@ -42,7 +42,7 @@ pub use client::{SyncError, SyncLimits, TreeClient};
 pub use hash::{MerkleHashVote, TREE_DEPTH};
 pub use path::{MerklePath, MERKLE_PATH_BYTES};
 pub use server::{AppendFromKvError, MemoryTreeServer, SyncableServer, TreeServer};
-pub use sync_api::TreeSyncApi;
+pub use sync_api::{AsyncTreeSyncApi, TreeSyncApi};
 
 // -- Shared utilities ------------------------------------------------------
 

@@ -4,6 +4,8 @@
 //! In the POC: in-process trait object.
 //! In production: maps to Cosmos SDK gRPC/REST endpoints.
 
+use std::{future::Future, pin::Pin};
+
 use voting_crypto_deps::pasta_curves::Fp;
 
 use crate::hash::MerkleHashVote;
@@ -78,4 +80,27 @@ pub trait TreeSyncApi {
     ///
     /// Maps to: `GET /zally/v1/commitment-tree/latest`
     fn get_tree_state(&self) -> Result<TreeState, Self::Error>;
+}
+
+/// Owned asynchronous counterpart to [`TreeSyncApi`].
+///
+/// Futures return only owned Rust values, allowing browser adapters to keep
+/// JavaScript objects on the local thread that owns them.
+pub trait AsyncTreeSyncApi: Send + Sync {
+    type Error: std::fmt::Debug;
+
+    fn get_block_commitments(
+        &self,
+        from_height: u32,
+        to_height: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<BlockCommitmentsPage, Self::Error>> + Send>>;
+
+    fn get_root_at_height(
+        &self,
+        height: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Fp>, Self::Error>> + Send>>;
+
+    fn get_tree_state(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<TreeState, Self::Error>> + Send>>;
 }

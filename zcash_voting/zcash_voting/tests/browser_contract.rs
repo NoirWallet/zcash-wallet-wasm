@@ -1577,3 +1577,454 @@ fn browser_db_file_backed_wal_snapshot_preserves_pending_rows() {
         );
     }
 }
+
+mod async_tree_contract {
+    use crate::delegation_fixture;
+    use std::{
+        convert::Infallible,
+        future::Future,
+        pin::Pin,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Mutex,
+        },
+    };
+
+    use tokio::sync::oneshot;
+    use vote_commitment_tree::{
+        sync_api::{BlockCommitmentsPage, TreeState},
+        MemoryTreeServer, TreeSyncApi,
+    };
+    use vote_commitment_tree_client::AsyncTreeSyncApi;
+    use voting_crypto_deps::pasta_curves::{group::ff::PrimeField, Fp};
+    use zcash_voting::{
+        governance::BALLOT_DIVISOR, round::RoundParams, storage::VotingDb, tree_sync::VoteTreeSync,
+        types::NoteInfo,
+    };
+
+    const ROUND_ID: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+    const WALLET_ID: &str = "browser-async-tree";
+
+    type TreeFuture<T> = Pin<Box<dyn Future<Output = Result<T, FixtureError>> + Send + 'static>>;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum FixtureError {
+        Fetch,
+    }
+
+    #[derive(Clone, Copy)]
+    enum CursorFault {
+        None,
+        NonProgressing,
+        Overshooting,
+        Truncated,
+    }
+
+    struct AsyncServer {
+        server: Mutex<MemoryTreeServer>,
+        page_span: u32,
+        calls: Mutex<Vec<(u32, u32)>>,
+        page_number: AtomicUsize,
+        fail_page: AtomicUsize,
+        fail_state: AtomicBool,
+        corrupt_root: bool,
+        corrupt_anchor_root: bool,
+        cursor_fault: CursorFault,
+    }
+
+    impl AsyncServer {
+        fn new(blocks: u32, page_span: u32) -> Self {
+            Self {
+                server: Mutex::new(server(blocks)),
+                page_span,
+                calls: Mutex::new(Vec::new()),
+                page_number: AtomicUsize::new(0),
+                fail_page: AtomicUsize::new(usize::MAX),
+                fail_state: AtomicBool::new(false),
+                corrupt_root: false,
+                corrupt_anchor_root: false,
+                cursor_fault: CursorFault::None,
+            }
+        }
+
+        fn append_block(&self) {
+            let mut server = self.server.lock().unwrap();
+            let height = server.latest_checkpoint().unwrap_or(0) + 1;
+            server.append(Fp::from(u64::from(height))).unwrap();
+            server.checkpoint(height).unwrap();
+        }
+
+        fn fail_once_on_page(&self, page: usize) {
+            self.fail_page.store(page, Ordering::SeqCst);
+        }
+
+        fn requests(&self) -> Vec<(u32, u32)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl AsyncTreeSyncApi for AsyncServer {
+        type Error = FixtureError;
+
+        fn get_tree_state(&self) -> TreeFuture<TreeState> {
+            if self.fail_state.swap(false, Ordering::SeqCst) {
+                return Box::pin(async { Err(FixtureError::Fetch) });
+            }
+            let state = TreeSyncApi::get_tree_state(&*self.server.lock().unwrap()).unwrap();
+            Box::pin(async move { Ok(state) })
+        }
+
+        fn get_root_at_height(&self, height: u32) -> TreeFuture<Option<Fp>> {
+            let mut root =
+                TreeSyncApi::get_root_at_height(&*self.server.lock().unwrap(), height).unwrap();
+            if self.corrupt_anchor_root {
+                root = root.map(|root| root + Fp::one());
+            }
+            Box::pin(async move { Ok(root) })
+        }
+
+        fn get_block_commitments(
+            &self,
+            from_height: u32,
+            to_height: u32,
+        ) -> TreeFuture<BlockCommitmentsPage> {
+            self.calls.lock().unwrap().push((from_height, to_height));
+            let page_number = self.page_number.fetch_add(1, Ordering::SeqCst);
+            if self
+                .fail_page
+                .compare_exchange(page_number, usize::MAX, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Box::pin(async { Err(FixtureError::Fetch) });
+            }
+            let page_to = from_height
+                .saturating_add(self.page_span.saturating_sub(1))
+                .min(to_height);
+            let mut page = TreeSyncApi::get_block_commitments(
+                &*self.server.lock().unwrap(),
+                from_height,
+                page_to,
+            )
+            .unwrap();
+            page.next_from_height = if page_to < to_height { page_to + 1 } else { 0 };
+            if self.corrupt_root {
+                if let Some(block) = page.blocks.last_mut() {
+                    block.root += Fp::one();
+                }
+            }
+            page.next_from_height = match self.cursor_fault {
+                CursorFault::None => page.next_from_height,
+                CursorFault::NonProgressing => from_height,
+                CursorFault::Overshooting => to_height.saturating_add(1),
+                CursorFault::Truncated => 0,
+            };
+            Box::pin(async move { Ok(page) })
+        }
+    }
+
+    fn server(blocks: u32) -> MemoryTreeServer {
+        let mut server = MemoryTreeServer::empty();
+        for height in 1..=blocks {
+            server.append(Fp::from(u64::from(height))).unwrap();
+            server.checkpoint(height).unwrap();
+        }
+        server
+    }
+
+    fn db(expected: Option<(u32, Fp)>) -> VotingDb {
+        let db = VotingDb::open_browser(WALLET_ID, zcash_voting::Network::Testnet, None).unwrap();
+        db.create_round(
+            zcash_voting::Network::Testnet,
+            &RoundParams {
+                vote_round_id: ROUND_ID.into(),
+                snapshot_height: 100,
+                ea_pk: vec![1; 32],
+                nc_root: vec![2; 32],
+                nullifier_imt_root: vec![3; 32],
+            },
+            None,
+        )
+        .unwrap();
+        if let Some((position, commitment)) = expected {
+            db.ensure_bundles(
+                ROUND_ID,
+                &[NoteInfo {
+                    commitment: vec![1; 32],
+                    nullifier: vec![2; 32],
+                    value: BALLOT_DIVISOR + 500_000,
+                    position: 0,
+                    diversifier: vec![3; 11],
+                    rho: vec![4; 32],
+                    rseed: vec![5; 32],
+                    scope: 0,
+                    ufvk_str: "uviewtest".into(),
+                }],
+            )
+            .unwrap();
+            db.store_van_position(ROUND_ID, 0, position).unwrap();
+            let sql = format!(
+                "UPDATE bundles SET gov_comm = X'{}' WHERE round_id = '{}' AND wallet_id = '{}'",
+                hex::encode(commitment.to_repr()),
+                ROUND_ID,
+                WALLET_ID
+            );
+            let bytes = delegation_fixture::corrupt(&db.serialize_bytes().unwrap(), &sql);
+            return VotingDb::open_browser(WALLET_ID, zcash_voting::Network::Testnet, Some(&bytes))
+                .unwrap();
+        }
+        db
+    }
+
+    #[tokio::test]
+    async fn async_tree_initial_paged_and_incremental_sync_produce_valid_witnesses() {
+        let db = db(Some((0, Fp::from(1))));
+        let api = AsyncServer::new(3, 1);
+        let sync = VoteTreeSync::new();
+
+        let height = sync.sync_with_async_api(&db, ROUND_ID, &api).await.unwrap();
+        assert_eq!(height, 3);
+        assert_eq!(
+            sync.generate_van_witness(&db, ROUND_ID, 0, 3)
+                .unwrap()
+                .position,
+            0
+        );
+        assert!(api.requests().len() >= 3);
+
+        api.append_block();
+        let height = sync.sync_with_async_api(&db, ROUND_ID, &api).await.unwrap();
+        assert_eq!(height, 4);
+        assert!(api
+            .requests()
+            .iter()
+            .any(|(from, to)| *from == 4 && *to == 4));
+    }
+
+    #[tokio::test]
+    async fn async_tree_rejects_root_or_confirmed_leaf_mismatch_and_withholds_witness() {
+        let mismatched_db = db(Some((0, Fp::from(9))));
+        let api = AsyncServer::new(1, 1);
+        let sync = VoteTreeSync::new();
+        assert!(sync
+            .sync_with_async_api(&mismatched_db, ROUND_ID, &api)
+            .await
+            .is_err());
+        assert!(sync
+            .generate_van_witness(&mismatched_db, ROUND_ID, 0, 1)
+            .is_err());
+
+        let db = db(Some((0, Fp::from(1))));
+        let mut api = AsyncServer::new(1, 1);
+        api.corrupt_root = true;
+        let sync = VoteTreeSync::new();
+        assert!(sync.sync_with_async_api(&db, ROUND_ID, &api).await.is_err());
+        assert!(sync.generate_van_witness(&db, ROUND_ID, 0, 1).is_err());
+
+        let mut api = AsyncServer::new(1, 1);
+        api.corrupt_anchor_root = true;
+        let sync = VoteTreeSync::new();
+        assert!(sync.sync_with_async_api(&db, ROUND_ID, &api).await.is_err());
+        assert!(sync.generate_van_witness(&db, ROUND_ID, 0, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn async_tree_position_beyond_tip_and_fetch_failure_retain_incremental_progress() {
+        let db = db(Some((2, Fp::from(3))));
+        let api = AsyncServer::new(2, 1);
+        let sync = VoteTreeSync::new();
+        assert!(sync.sync_with_async_api(&db, ROUND_ID, &api).await.is_err());
+        assert!(sync.generate_van_witness(&db, ROUND_ID, 0, 2).is_err());
+        api.append_block();
+        assert_eq!(
+            sync.sync_with_async_api(&db, ROUND_ID, &api).await.unwrap(),
+            3
+        );
+        assert_eq!(
+            sync.generate_van_witness(&db, ROUND_ID, 0, 3)
+                .unwrap()
+                .position,
+            2
+        );
+
+        api.append_block();
+        api.append_block();
+        api.fail_once_on_page(api.page_number.load(Ordering::SeqCst) + 1);
+        assert!(sync.sync_with_async_api(&db, ROUND_ID, &api).await.is_err());
+        assert!(sync.generate_van_witness(&db, ROUND_ID, 0, 3).is_err());
+        assert_eq!(
+            sync.sync_with_async_api(&db, ROUND_ID, &api).await.unwrap(),
+            5
+        );
+        assert!(api.requests().iter().filter(|(from, _)| *from == 5).count() >= 2);
+    }
+
+    #[tokio::test]
+    async fn async_tree_state_fetch_failure_preserves_previously_validated_tree() {
+        let db = db(Some((0, Fp::from(1))));
+        let api = AsyncServer::new(1, 1);
+        let sync = VoteTreeSync::new();
+        assert_eq!(
+            sync.sync_with_async_api(&db, ROUND_ID, &api).await.unwrap(),
+            1
+        );
+
+        api.fail_state.store(true, Ordering::SeqCst);
+        assert!(sync.sync_with_async_api(&db, ROUND_ID, &api).await.is_err());
+        assert_eq!(
+            sync.generate_van_witness(&db, ROUND_ID, 0, 1)
+                .unwrap()
+                .position,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn async_tree_rejects_malformed_and_truncated_pagination() {
+        {
+            let db = db(Some((0, Fp::from(1))));
+            let mut api = AsyncServer::new(1, 1);
+            let sync = VoteTreeSync::new();
+            assert_eq!(
+                sync.sync_with_async_api(&db, ROUND_ID, &api).await.unwrap(),
+                1
+            );
+            api.append_block();
+            api.cursor_fault = CursorFault::NonProgressing;
+            assert!(sync.sync_with_async_api(&db, ROUND_ID, &api).await.is_err());
+            assert!(sync.generate_van_witness(&db, ROUND_ID, 0, 1).is_err());
+        }
+        for fault in [CursorFault::Overshooting, CursorFault::Truncated] {
+            let db = db(Some((0, Fp::from(1))));
+            let mut api = AsyncServer::new(2, 1);
+            api.cursor_fault = fault;
+            let sync = VoteTreeSync::new();
+            assert!(sync.sync_with_async_api(&db, ROUND_ID, &api).await.is_err());
+            assert!(sync.generate_van_witness(&db, ROUND_ID, 0, 1).is_err());
+        }
+    }
+
+    struct ExcessivePagesApi(AtomicUsize);
+
+    impl AsyncTreeSyncApi for ExcessivePagesApi {
+        type Error = Infallible;
+
+        fn get_tree_state(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<TreeState, Infallible>> + Send>> {
+            Box::pin(async {
+                Ok(TreeState {
+                    next_index: 1,
+                    root: Fp::one(),
+                    height: 10_000,
+                })
+            })
+        }
+
+        fn get_root_at_height(
+            &self,
+            _height: u32,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<Fp>, Infallible>> + Send>> {
+            unreachable!()
+        }
+
+        fn get_block_commitments(
+            &self,
+            from_height: u32,
+            _to_height: u32,
+        ) -> Pin<Box<dyn Future<Output = Result<BlockCommitmentsPage, Infallible>> + Send>>
+        {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(BlockCommitmentsPage {
+                    blocks: Vec::new(),
+                    next_from_height: from_height + 1,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn async_tree_page_count_is_bounded() {
+        let db = db(None);
+        let api = ExcessivePagesApi(AtomicUsize::new(0));
+        let error = VoteTreeSync::new()
+            .sync_with_async_api(&db, ROUND_ID, &api)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("page limit"), "{error}");
+        assert_eq!(
+            api.0.load(Ordering::SeqCst),
+            vote_commitment_tree::SyncLimits::default().max_pages
+        );
+    }
+
+    struct PendingStateApi(Mutex<Option<oneshot::Receiver<()>>>);
+
+    impl AsyncTreeSyncApi for PendingStateApi {
+        type Error = Infallible;
+
+        fn get_tree_state(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<TreeState, Infallible>> + Send>> {
+            let receiver = self.0.lock().unwrap().take().unwrap();
+            Box::pin(async move {
+                let _ = receiver.await;
+                Ok(TreeSyncApi::get_tree_state(&MemoryTreeServer::empty()).unwrap())
+            })
+        }
+
+        fn get_root_at_height(
+            &self,
+            _height: u32,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<Fp>, Infallible>> + Send>> {
+            unreachable!()
+        }
+
+        fn get_block_commitments(
+            &self,
+            _from_height: u32,
+            _to_height: u32,
+        ) -> Pin<Box<dyn Future<Output = Result<BlockCommitmentsPage, Infallible>> + Send>>
+        {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn async_tree_cancellation_releases_lease_and_reset_invalidates_in_flight_sync() {
+        let db = db(None);
+        let sync = VoteTreeSync::new();
+        let (_release, receiver) = oneshot::channel();
+        let api = PendingStateApi(Mutex::new(Some(receiver)));
+        {
+            let future = sync.sync_with_async_api(&db, ROUND_ID, &api);
+            futures_util::pin_mut!(future);
+            assert!(futures_util::poll!(future.as_mut()).is_pending());
+            assert!(sync
+                .sync_with_async_api(&db, ROUND_ID, &AsyncServer::new(0, 1))
+                .await
+                .is_err());
+        }
+        assert_eq!(
+            sync.sync_with_async_api(&db, ROUND_ID, &AsyncServer::new(0, 1))
+                .await
+                .unwrap(),
+            0
+        );
+
+        let (release, receiver) = oneshot::channel();
+        let api = PendingStateApi(Mutex::new(Some(receiver)));
+        let future = sync.sync_with_async_api(&db, ROUND_ID, &api);
+        futures_util::pin_mut!(future);
+        assert!(futures_util::poll!(future.as_mut()).is_pending());
+        sync.reset(ROUND_ID).unwrap();
+        release.send(()).unwrap();
+        assert!(future.await.is_err());
+        assert_eq!(
+            sync.sync_with_async_api(&db, ROUND_ID, &AsyncServer::new(0, 1))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}

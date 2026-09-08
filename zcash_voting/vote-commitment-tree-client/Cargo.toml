@@ -39,3 +39,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "time"], optional = true
 base64 = "0.22"
 hex = "0.4"
 thiserror = "2"
+url = "2"

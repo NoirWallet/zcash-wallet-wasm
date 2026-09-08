@@ -8,5 +8,7 @@ pub(crate) mod proof_executor;
 pub(crate) mod session;
 #[cfg(target_arch = "wasm32")]
 pub mod transport;
+#[cfg(target_arch = "wasm32")]
+mod tree_transport;
 pub(crate) mod types;
 pub(crate) mod wallet_adapter;
