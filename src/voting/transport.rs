@@ -2,6 +2,8 @@
 
 use futures_channel::oneshot;
 use futures_util::future::{Either, select};
+use futures_util::lock::{Mutex, MutexGuard};
+use std::{cell::Cell, sync::LazyLock};
 use wasm_bindgen::{JsCast, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use zcash_voting::platform::{
@@ -10,6 +12,15 @@ use zcash_voting::platform::{
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BrowserFetchTransport;
+
+static FETCH_SLOTS: LazyLock<[Mutex<()>; 16]> =
+    LazyLock::new(|| std::array::from_fn(|_| Mutex::new(())));
+
+struct ActiveFetch {
+    // Struct fields drop in declaration order: abort before waking queued dispatches.
+    _cleanup: FetchCleanup,
+    _permit: MutexGuard<'static, ()>,
+}
 
 impl HttpTransport for BrowserFetchTransport {
     fn execute(&self, request: OwnedHttpRequest) -> TransportFuture {
@@ -62,7 +73,12 @@ struct ReaderCleanup(wasm_bindgen::JsValue);
 impl Drop for ReaderCleanup {
     fn drop(&mut self) {
         if let Ok(cancel) = method(&self.0, "cancel") {
-            let _ = cancel.call0(&self.0);
+            if let Ok(result) = cancel.call0(&self.0) {
+                let promise = js_sys::Promise::resolve(&result);
+                spawn_local(async move {
+                    let _ = JsFuture::from(promise).await;
+                });
+            }
         }
         if let Ok(release) = method(&self.0, "releaseLock") {
             let _ = release.call0(&self.0);
@@ -165,7 +181,7 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
             request.timeout_ms as i32,
         )
         .map_err(|_| TransportError::Definite)?;
-    let _cleanup = FetchCleanup {
+    let cleanup = FetchCleanup {
         window: window.clone(),
         controller,
         timeout_id,
@@ -173,9 +189,20 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
     };
 
     let after_dispatch = || TransportError::after_dispatch(request.kind);
+    let dispatched = Cell::new(false);
     let response = async {
+        // Queue time is covered by the already-running request timer. Capacity
+        // follows the local Fetch lifetime, not the Send receiver's lifetime.
+        let (permit, _, _) =
+            futures_util::future::select_all(FETCH_SLOTS.iter().map(|slot| Box::pin(slot.lock())))
+                .await;
+        let _active = ActiveFetch {
+            _cleanup: cleanup,
+            _permit: permit,
+        };
         // Function.call1 catches synchronous host exceptions, unlike the
         // web-sys Fetch binding. Once invocation begins, non-delivery is unknown.
+        dispatched.set(true);
         let promise: js_sys::Promise = fetch
             .call1(&window, &js_request)
             .map_err(|_| after_dispatch())?
@@ -203,7 +230,11 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
     };
     let result = match select(Box::pin(response), timeout_receiver).await {
         Either::Left((result, _)) => result,
-        Either::Right((_, _)) => Err(after_dispatch()),
+        Either::Right((_, _)) => Err(if dispatched.get() {
+            after_dispatch()
+        } else {
+            TransportError::Definite
+        }),
     };
     result
 }

@@ -51,9 +51,9 @@ pub async fn network_request(url: String, limit: usize) -> Result<JsValue, JsVal
 }
 
 #[wasm_bindgen]
-pub async fn cancel_batches() {
+pub async fn cancel_batches(dispatched: js_sys::Function) {
     let mut previous = Vec::new();
-    for _ in 0..3 {
+    for batch in 0..3 {
         drop(std::mem::take(&mut previous));
         previous = (0..16)
             .map(|_| {
@@ -68,7 +68,10 @@ pub async fn cancel_batches() {
                 })
             })
             .collect();
-        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
+        let barrier = dispatched
+            .call1(&JsValue::NULL, &JsValue::from((batch + 1) * 16))
+            .unwrap();
+        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&barrier))
             .await
             .unwrap();
     }
@@ -76,6 +79,47 @@ pub async fn cancel_batches() {
     wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
         .await
         .unwrap();
+}
+
+#[wasm_bindgen]
+pub async fn cancellation_queue_case(mode: u32) -> String {
+    let make = |timeout_ms| {
+        transport::BrowserFetchTransport.execute(OwnedHttpRequest {
+            method: "POST".into(),
+            url: "https://example.invalid/queued".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            timeout_ms,
+            max_response_bytes: 4,
+            kind: RequestKind::NonIdempotent,
+        })
+    };
+    if mode == 0 {
+        drop(make(100));
+        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
+            .await
+            .unwrap();
+        return "unpolled".into();
+    }
+    let active = (0..16).map(|_| make(1000)).collect::<Vec<_>>();
+    wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
+        .await
+        .unwrap();
+    let queued = make(10);
+    let result = if mode == 1 {
+        format!("{:?}", queued.await.err().unwrap())
+    } else {
+        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
+            .await
+            .unwrap();
+        drop(queued);
+        "cancelled".into()
+    };
+    drop(active);
+    wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
+        .await
+        .unwrap();
+    result
 }
 
 #[wasm_bindgen]

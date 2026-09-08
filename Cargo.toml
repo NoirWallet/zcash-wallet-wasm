@@ -14,6 +14,7 @@ default = ["wasm-parallel"]
 multicore = ["zcash_proofs/multicore", "zcash_primitives/multicore", "zcash_client_memory/multicore", "orchard/multicore"]
 wasm-parallel = ["wasm-bindgen-rayon", "multicore"]
 voting = ["dep:zcash_voting", "dep:futures-channel", "dep:web-sys", "dep:serde_json", "dep:base64"]
+voting-test-fixtures = ["voting", "zcash_voting/test-fixtures"]
 
 [dependencies.zcash_voting]
 path = "./zcash_voting/zcash_voting"

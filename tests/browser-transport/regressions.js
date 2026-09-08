@@ -1,4 +1,4 @@
-import init, { request, cancel_request, cancel_batches, network_request } from './pkg/browser_transport_regressions.js';
+import init, { request, cancel_request, cancel_batches, cancellation_queue_case, network_request } from './pkg/browser_transport_regressions.js';
 
 const results = [];
 window.transportResults = { done: false, results };
@@ -108,16 +108,48 @@ try {
   let active = 0;
   let maximum = 0;
   let dispatched = 0;
+  let notifyDispatch = () => {};
   window.fetch = req => {
     dispatched++;
     active++;
     maximum = Math.max(maximum, active);
     req.signal.addEventListener('abort', () => active--, { once: true });
+    notifyDispatch();
     return new Promise(() => {});
   };
-  await cancel_batches();
-  results.push({ name: 'three replacing batches never exceed 16 actual live Fetch calls', passed: maximum === 16 && active === 0 && dispatched === 48 });
+  await cancel_batches(expected => new Promise((resolve, reject) => {
+    const watchdog = originalSetTimeout.call(window, () => reject(new Error('batch dispatch barrier timed out')), 1000);
+    notifyDispatch = () => {
+      if (dispatched === expected) {
+        originalClearTimeout.call(window, watchdog);
+        resolve();
+      }
+    };
+    notifyDispatch();
+  }));
+  notifyDispatch = () => {};
+  results.push({ name: 'three replacing batches never exceed 16 actual live Fetch calls', passed: maximum === 16 && active === 0 && dispatched === 48, maximum, active, dispatched });
+  for(const mode of [0,1,2]) {
+    active=maximum=dispatched=0;
+    const outcome=await cancellation_queue_case(mode);
+    const expected=mode===0?'unpolled':mode===1?'Definite':'cancelled';
+    results.push({name:`cancel queue case ${mode}`,passed:outcome===expected&&active===0&&maximum===(mode===0?0:16)&&dispatched===(mode===0?0:16),maximum,active,dispatched,outcome});
+  }
   window.fetch = originalFetch;
+  let unhandled=0;
+  const rejectListener=event=>{unhandled++;event.preventDefault();};
+  window.addEventListener('unhandledrejection',rejectListener);
+  await fixture('reader cancel rejection preserves response',()=>{
+    const response=new Response();
+    Object.defineProperty(response,'body',{value:{getReader(){return {
+      read:()=>Promise.resolve({done:true,value:new Uint8Array([1])}),
+      cancel:()=>Promise.reject(new Error('HOST_PRIVATE')),releaseLock(){},
+    };}}});
+    return Promise.resolve(response);
+  },false,4,[200,[1]]);
+  await new Promise(resolve=>originalSetTimeout.call(window,resolve,25));
+  window.removeEventListener('unhandledrejection',rejectListener);
+  results.push({name:'reader cancel rejected promise is consumed',passed:unhandled===0,unhandled});
   for (const type of [null, 'text/html', 'application/json; charset=utf-8']) {
     try {
       const url = new URL('/metadata', location.href);

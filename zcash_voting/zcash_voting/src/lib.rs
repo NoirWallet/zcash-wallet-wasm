@@ -31,6 +31,9 @@ compile_error!("enable exactly one of the `lrz` or `zakura` features");
 
 pub mod action;
 pub mod backend;
+#[cfg(all(feature = "browser", feature = "test-fixtures"))]
+#[doc(hidden)]
+pub mod browser_proof_fixture;
 mod clock;
 pub mod config;
 pub mod confirmation;

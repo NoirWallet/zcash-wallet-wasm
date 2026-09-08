@@ -1243,6 +1243,23 @@ impl VotingSessionInner {
         self.validate_saved_identity(&round)?;
         Ok(round)
     }
+    pub(crate) async fn round_proposals_with<F>(
+        &self,
+        id: &str,
+        fetch: F,
+        now: impl Fn() -> Result<u64, VotingApiError>,
+    ) -> Result<Vec<super::types::Proposal>, VotingApiError>
+    where
+        F: Future<
+            Output = Result<(VotingDiscovery, BTreeMap<String, TrustedRound>), VotingApiError>,
+        >,
+    {
+        let _guard = self.mutation_guard()?;
+        Ok(self
+            .ensure_trusted_round_with(id, fetch, now)
+            .await?
+            .proposals)
+    }
     pub(crate) async fn check_eligibility_at(
         &self,
         id: &str,
@@ -2755,6 +2772,43 @@ mod tests {
             .await
             .unwrap();
         assert!(session.cached_round_at(ID, 1500).is_err());
+    }
+    #[tokio::test]
+    async fn round_proposals_require_authenticated_unexpired_round() {
+        let (session, round) = session().await;
+        assert_eq!(
+            session
+                .round_proposals_with(ID, async { panic!("cached") }, || Ok(1500))
+                .await
+                .unwrap(),
+            round.proposals
+        );
+        assert_eq!(
+            session
+                .round_proposals_with(ID, async { panic!("cached") }, || Ok(2000))
+                .await
+                .unwrap_err()
+                .code,
+            VotingErrorCode::RoundExpired
+        );
+        session.trusted_rounds.borrow_mut().clear();
+        let rejected = VotingDiscovery {
+            accepted: vec![],
+            rejected: vec![super::super::types::RejectedRound {
+                round_id: ID.into(),
+                code: VotingErrorCode::RoundUnauthenticated,
+                message: "unauthenticated".into(),
+            }],
+            config_fingerprint: "fixture".into(),
+        };
+        assert_eq!(
+            session
+                .round_proposals_with(ID, async { Ok((rejected, BTreeMap::new())) }, || Ok(1500))
+                .await
+                .unwrap_err()
+                .code,
+            VotingErrorCode::RoundUnauthenticated
+        );
     }
     #[tokio::test]
     async fn ensure_uses_current_cache_but_restored_state_must_rediscover() {

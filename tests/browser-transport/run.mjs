@@ -45,6 +45,19 @@ const server = http.createServer(async (req, res) => {
   }
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+if (process.env.TRANSPORT_PLAYWRIGHT === '1') {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({args:['--no-sandbox']});
+  try {
+    const page = await browser.newPage();
+    await page.goto(`http://127.0.0.1:${server.address().port}/`);
+    await page.waitForFunction(() => window.transportResults?.done, null, {timeout:30000});
+    const results = await page.evaluate(() => window.transportResults.results);
+    console.log(JSON.stringify(results,null,2));
+    if (!results.length || results.some(result => !result.passed)) process.exitCode = 1;
+  } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}
+  process.exit(process.exitCode ?? 0);
+}
 const driver = spawn(process.env.CHROMEDRIVER ?? 'chromedriver', ['--port=0'], { stdio: ['ignore', 'pipe', 'inherit'] });
 const driverPort = await new Promise((resolve, reject) => {
   let output = '';

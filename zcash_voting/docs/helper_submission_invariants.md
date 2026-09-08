@@ -1454,6 +1454,14 @@ missing or misleading Content-Length cannot replace decoded-byte validation.
 Dropping the owned receiver cancels the local Fetch task; RAII aborts its
 AbortController, clears the timer and cancels/releases the reader. A dispatched
 POST remains ambiguous on any such transport failure.
+All root Fetch adapter instances share sixteen dispatch slots. A slot is held
+by the caller-local task until its Fetch cleanup has aborted the request and
+cleared its timer; dropping the Send receiver cannot release capacity before
+that cleanup. Queued cancellation releases wait resources without dispatch.
+The existing request deadline includes queue time: a timeout proven to precede
+Fetch invocation is definite, while a dispatched POST remains ambiguous even
+when its timeout becomes ready simultaneously. Reader cancellation promises
+are consumed without exposing rejected host errors.
 
 Regression coverage: `helper::client::local::tests`,
 `tests/support/browser_helper_cases.rs`, and the root
