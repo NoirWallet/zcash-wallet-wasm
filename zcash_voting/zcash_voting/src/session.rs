@@ -220,6 +220,7 @@ pub fn delegation_resume_steps(
     round_id: &str,
     proposal_ids: &[u32],
 ) -> Result<Vec<NextStep>, VotingError> {
+    db.validate_delegation_state(round_id)?;
     let plan = resume_plan(db, round_id, proposal_ids)?;
     if plan.delegation_statuses.is_empty()
         || plan

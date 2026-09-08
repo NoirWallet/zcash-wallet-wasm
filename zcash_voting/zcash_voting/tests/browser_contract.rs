@@ -6,6 +6,219 @@ mod browser_storage_cases;
 mod delegation_fixture;
 
 #[test]
+fn delegation_restored_confirmed_corruption_blocks_all_planned_work() {
+    use zcash_voting::{
+        session::{delegation_resume_steps, NextStep},
+        storage::VotingDb,
+        Network, VotingRoundParams,
+    };
+    let db = VotingDb::open_browser("owner", Network::Testnet, None).unwrap();
+    let id = "01".repeat(32);
+    let params = VotingRoundParams {
+        vote_round_id: id.clone(),
+        snapshot_height: delegation_fixture::height(),
+        ea_pk: vec![0; 32],
+        nc_root: vec![0; 32],
+        nullifier_imt_root: vec![0; 32],
+    };
+    db.init_round(Network::Testnet, &params, None).unwrap();
+    let canonical = delegation_fixture::prepare_bundles(&db, &params, 17, 2);
+    for (index, submission) in canonical.iter().enumerate() {
+        db.prepare_delegation_submission(&id, index as u32, submission)
+            .unwrap();
+    }
+    db.mark_delegation_dispatching(&id, 1).unwrap();
+    db.confirm_journaled_delegation(
+        &id,
+        1,
+        canonical[1].tx_hash(),
+        &[delegation_fixture::event(&id, "42")],
+    )
+    .unwrap();
+    let bytes = db.serialize_bytes().unwrap();
+    assert_eq!(
+        delegation_resume_steps(&db, &id, &[1]).unwrap(),
+        [NextStep::Delegate { bundle_index: 0 }]
+    );
+    for sql in delegation_fixture::confirmed_corruptions() {
+        let bytes = delegation_fixture::corrupt(&bytes, sql);
+        let restored = VotingDb::open_browser("owner", Network::Testnet, Some(&bytes)).unwrap();
+        assert!(
+            delegation_resume_steps(&restored, &id, &[1]).is_err(),
+            "restored corruption was omitted: {sql}"
+        );
+    }
+}
+
+#[test]
+fn delegation_rest_events_reject_legacy_repairs_and_noncanonical_values() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use zcash_voting::{storage::VotingDb, Network, VotingRoundParams};
+    // Exact plain values in vote-sdk api/handler_tx_status_test.go at 990fb1c3.
+    let id = "0400".repeat(16);
+    let db = VotingDb::open_browser("owner", Network::Testnet, None).unwrap();
+    let params = VotingRoundParams {
+        vote_round_id: id.clone(),
+        snapshot_height: delegation_fixture::height(),
+        ea_pk: vec![0; 32],
+        nc_root: vec![0; 32],
+        nullifier_imt_root: vec![0; 32],
+    };
+    db.init_round(Network::Testnet, &params, None).unwrap();
+    let canonical = delegation_fixture::prepare(&db, &params, 17);
+    db.prepare_delegation_submission(&id, 0, &canonical)
+        .unwrap();
+    db.mark_delegation_dispatching(&id, 0).unwrap();
+    let bytes = db.serialize_bytes().unwrap();
+    let repaired_round = String::from_utf8(STANDARD.decode(&id).unwrap()).unwrap();
+    let repaired_position = String::from_utf8(STANDARD.decode("3753").unwrap()).unwrap();
+    let mut invalid = vec![
+        delegation_fixture::event(&repaired_round, "3753"),
+        delegation_fixture::event(&id, &repaired_position),
+    ];
+    for event in &invalid {
+        let legacy = VotingDb::open_browser("owner", Network::Testnet, Some(&bytes)).unwrap();
+        zcash_voting::confirmation::confirm_delegation_submission(
+            &legacy,
+            &id,
+            0,
+            canonical.tx_hash(),
+            std::slice::from_ref(event),
+        )
+        .unwrap();
+    }
+    let mut repaired_event_type = delegation_fixture::event(&id, "3753");
+    repaired_event_type.event_type = STANDARD.encode("delegate_vote");
+    invalid.push(repaired_event_type);
+    for value in [
+        "",
+        " 3753",
+        "3753 ",
+        "+3753",
+        "-0",
+        "00",
+        "03753",
+        "4294967296",
+        "1.0",
+        "3e3",
+        "\u{ff13}\u{ff17}\u{ff15}\u{ff13}",
+    ] {
+        invalid.push(delegation_fixture::event(&id, value));
+    }
+    invalid.push(delegation_fixture::event(&(id.clone() + "00"), "3753"));
+    invalid.push(delegation_fixture::event(&("0x".to_owned() + &id), "3753"));
+    for event in invalid {
+        let restored = VotingDb::open_browser("owner", Network::Testnet, Some(&bytes)).unwrap();
+        assert!(restored
+            .confirm_journaled_delegation(&id, 0, canonical.tx_hash(), &[event])
+            .is_err());
+        assert_ne!(
+            restored.delegation_phase(&id, 0).unwrap(),
+            zcash_voting::phases::DelegationPhase::Confirmed
+        );
+    }
+    for position in ["0", "3753", "4294967295"] {
+        let restored = VotingDb::open_browser("owner", Network::Testnet, Some(&bytes)).unwrap();
+        restored
+            .confirm_journaled_delegation(
+                &id,
+                0,
+                canonical.tx_hash(),
+                &[delegation_fixture::event(&id, position)],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn delegation_confirmation_is_atomic_immutable_and_v20_migration_is_fail_closed() {
+    use zcash_voting::{
+        delegation_submission::DelegationOutcome,
+        session::{delegation_resume_steps, NextStep},
+        storage::VotingDb,
+        Network, VotingRoundParams,
+    };
+    let db = VotingDb::open_browser("owner", Network::Testnet, None).unwrap();
+    let id = "01".repeat(32);
+    let params = VotingRoundParams {
+        vote_round_id: id.clone(),
+        snapshot_height: delegation_fixture::height(),
+        ea_pk: vec![0; 32],
+        nc_root: vec![0; 32],
+        nullifier_imt_root: vec![0; 32],
+    };
+    db.init_round(Network::Testnet, &params, None).unwrap();
+    let canonical = delegation_fixture::prepare(&db, &params, 17);
+    db.prepare_delegation_submission(&id, 0, &canonical)
+        .unwrap();
+    db.mark_delegation_dispatching(&id, 0).unwrap();
+    db.record_delegation_outcome(&id, 0, DelegationOutcome::Ambiguous)
+        .unwrap();
+    let pending = db.serialize_bytes().unwrap();
+    let to_v20="ALTER TABLE delegation_attempts DROP COLUMN confirmation_tx_hash; ALTER TABLE delegation_attempts DROP COLUMN confirmation_van_position; PRAGMA user_version=20";
+    let migrated = VotingDb::open_browser(
+        "owner",
+        Network::Testnet,
+        Some(&delegation_fixture::corrupt(&pending, to_v20)),
+    )
+    .unwrap();
+    assert_eq!(
+        delegation_resume_steps(&migrated, &id, &[1]).unwrap(),
+        [NextStep::PollDelegation { bundle_index: 0 }]
+    );
+    assert_eq!(
+        migrated
+            .delegation_submission(&id, 0)
+            .unwrap()
+            .unwrap()
+            .canonical
+            .json_bytes(),
+        canonical.json_bytes()
+    );
+    let blocked=VotingDb::open_browser("owner",Network::Testnet,Some(&delegation_fixture::corrupt(&pending,"CREATE TRIGGER reject_confirmation BEFORE UPDATE OF confirmation_tx_hash ON delegation_attempts BEGIN SELECT RAISE(ABORT,'fixture'); END"))).unwrap();
+    assert!(blocked
+        .confirm_journaled_delegation(
+            &id,
+            0,
+            canonical.tx_hash(),
+            &[delegation_fixture::event(&id, "42")]
+        )
+        .is_err());
+    assert_eq!(
+        delegation_resume_steps(&blocked, &id, &[1]).unwrap(),
+        [NextStep::PollDelegation { bundle_index: 0 }]
+    );
+    assert!(blocked.load_van_position(&id, 0).is_err());
+    db.confirm_journaled_delegation(
+        &id,
+        0,
+        canonical.tx_hash(),
+        &[delegation_fixture::event(&id, "42")],
+    )
+    .unwrap();
+    assert!(db
+        .record_delegation_outcome(&id, 0, DelegationOutcome::Rejected)
+        .is_err());
+    assert!(db
+        .confirm_journaled_delegation(
+            &id,
+            0,
+            canonical.tx_hash(),
+            &[delegation_fixture::event(&id, "41")]
+        )
+        .is_err());
+    assert!(delegation_resume_steps(&db, &id, &[1]).unwrap().is_empty());
+    let confirmed_v20 = delegation_fixture::corrupt(&db.serialize_bytes().unwrap(), to_v20);
+    let migrated = VotingDb::open_browser("owner", Network::Testnet, Some(&confirmed_v20)).unwrap();
+    assert!(delegation_resume_steps(&migrated, &id, &[1]).is_err());
+    assert_eq!(migrated.load_van_position(&id, 0).unwrap(), 42);
+    assert_eq!(
+        migrated.get_delegation_tx_hash(&id, 0).unwrap().as_deref(),
+        Some(canonical.tx_hash())
+    );
+}
+
+#[test]
 fn delegation_planner_orders_mixed_durable_bundles_without_ballot_intent() {
     use zcash_voting::{
         session::{delegation_resume_steps, NextStep},
@@ -18,7 +231,7 @@ fn delegation_planner_orders_mixed_durable_bundles_without_ballot_intent() {
         Network::Testnet,
         &VotingRoundParams {
             vote_round_id: id.clone(),
-            snapshot_height: 100,
+            snapshot_height: delegation_fixture::height(),
             ea_pk: vec![0; 32],
             nc_root: vec![0; 32],
             nullifier_imt_root: vec![0; 32],
@@ -27,24 +240,24 @@ fn delegation_planner_orders_mixed_durable_bundles_without_ballot_intent() {
     )
     .unwrap();
     assert!(delegation_resume_steps(&db, &id, &[1]).is_err());
-    let notes = (0..3)
-        .map(|i| zcash_voting::NoteInfo {
-            commitment: vec![i as u8; 32],
-            nullifier: vec![i as u8; 32],
-            value: 100_000_000,
-            position: i,
-            diversifier: vec![0; 11],
-            rho: vec![3; 32],
-            rseed: vec![4; 32],
-            scope: 0,
-            ufvk_str: "fixture".into(),
-        })
-        .collect::<Vec<_>>();
-    db.ensure_bundles_with_policy(&id, &notes, zcash_voting::BundlePolicy::new(1).unwrap())
-        .unwrap();
-    db.mark_delegation_submitted(&id, 1, "pending").unwrap();
-    db.mark_delegation_submitted(&id, 2, "confirmed").unwrap();
-    db.store_van_position(&id, 2, 42).unwrap();
+    let canonical = delegation_fixture::prepare_bundles(
+        &db,
+        &db.round_params_with_network(&id).unwrap().0,
+        17,
+        3,
+    );
+    for index in [1, 2] {
+        db.prepare_delegation_submission(&id, index, &canonical[index as usize])
+            .unwrap();
+        db.mark_delegation_dispatching(&id, index).unwrap();
+    }
+    db.confirm_journaled_delegation(
+        &id,
+        2,
+        canonical[2].tx_hash(),
+        &[delegation_fixture::event(&id, "42")],
+    )
+    .unwrap();
     let expected = vec![
         NextStep::Delegate { bundle_index: 0 },
         NextStep::PollDelegation { bundle_index: 1 },
@@ -62,8 +275,9 @@ fn delegation_planner_orders_mixed_durable_bundles_without_ballot_intent() {
         expected
     );
     restored
-        .mark_delegation_submitted(&id, 0, "dispatching")
+        .prepare_delegation_submission(&id, 0, &canonical[0])
         .unwrap();
+    restored.mark_delegation_dispatching(&id, 0).unwrap();
     assert!(delegation_resume_steps(&restored, &id, &[1])
         .unwrap()
         .iter()

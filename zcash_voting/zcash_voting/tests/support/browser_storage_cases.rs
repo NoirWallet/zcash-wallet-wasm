@@ -111,7 +111,7 @@ fn browser_db_empty_input_and_metadata() {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            20
+            21
         );
     }
     assert!(VotingDb::open_browser("", Network::Testnet, None).is_err());
@@ -136,7 +136,7 @@ fn browser_db_upgrades_v17_preserving_round_and_intent() {
         read_snapshot(&db.serialize_bytes().unwrap())
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        20
+        21
     );
     assert_rejected(
         "wallet-b",

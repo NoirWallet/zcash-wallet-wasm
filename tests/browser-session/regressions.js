@@ -146,6 +146,7 @@ try {
   const metadata = await (await fetch('fixtures/metadata.json')).json();
   const walletBytes = await bytes('wallet.bin');
   const votingBytes = await bytes('voting.bin');
+  const corruptDelegationBytes = await Promise.all(['delegation-mixed-corrupt.bin', 'delegation-confirmed-corrupt.bin'].map(bytes));
   console.log('Constructing synthetic wallet');
   const wallet = new WebWallet('test', 'https://example.invalid', walletBytes);
   console.log('Synthetic wallet constructed');
@@ -166,6 +167,24 @@ try {
       }
       assert(requests===0,'identity mismatch dispatched HTTP');
     } finally {window.fetch=original;s.free();}
+  });
+  await test('restored confirmed delegation corruption blocks discovery and dispatch globally', async () => {
+    const original = window.fetch;
+    let requests = 0;
+    let checkpoints = 0;
+    window.fetch = () => { requests++; throw new Error('unexpected network'); };
+    try {
+      for (const restored of corruptDelegationBytes) {
+        const s = session(() => { checkpoints++; }, restored);
+        try {
+          const key = new bindings.UnifiedSpendingKey('test', new Uint8Array(32).fill(17), 0);
+          const fingerprint = new bindings.SeedFingerprint(new Uint8Array(32).fill(17));
+          await errorCode(() => s.submitDelegation(metadata.roundId, key, fingerprint), 'RECOVERY_CONFLICT');
+          assert(requests === 0, 'corrupt confirmed state dispatched HTTP');
+          assert(checkpoints === 0, 'corrupt confirmed state checkpointed');
+        } finally { s.free(); }
+      }
+    } finally { window.fetch = original; }
   });
   await test('synchronous constructor and exact hashed storage key', () => {
     let calls = 0;

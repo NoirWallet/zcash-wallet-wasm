@@ -88,8 +88,21 @@ fn record_delegation_confirmation(
             message: format!("delegation confirmation transaction failed: {e}"),
         })?;
 
+    record_delegation_confirmation_fields(&tx, round_id, &wallet_id, bundle_index, confirmation)?;
+    tx.commit().map_err(|e| VotingError::Internal {
+        message: format!("commit delegation confirmation transaction failed: {e}"),
+    })
+}
+
+pub(crate) fn record_delegation_confirmation_fields(
+    conn: &rusqlite::Connection,
+    round_id: &str,
+    wallet_id: &str,
+    bundle_index: u32,
+    confirmation: &DelegationConfirmation,
+) -> Result<(), VotingError> {
     let (stored_hash, stored_van_position) =
-        load_bundle_confirmation_fields(&tx, round_id, &wallet_id, bundle_index)?;
+        load_bundle_confirmation_fields(conn, round_id, wallet_id, bundle_index)?;
     check_text_conflict(
         stored_hash.as_deref(),
         &confirmation.tx_hash,
@@ -98,24 +111,22 @@ fn record_delegation_confirmation(
     let should_store_van_position =
         delegation_van_position_should_update(stored_van_position, confirmation.van_leaf_position)?;
     queries::store_delegation_tx_hash(
-        &tx,
+        conn,
         round_id,
-        &wallet_id,
+        wallet_id,
         bundle_index,
         &confirmation.tx_hash,
     )?;
     if should_store_van_position {
         queries::store_van_position(
-            &tx,
+            conn,
             round_id,
-            &wallet_id,
+            wallet_id,
             bundle_index,
             confirmation.van_leaf_position,
         )?;
     }
-    tx.commit().map_err(|e| VotingError::Internal {
-        message: format!("commit delegation confirmation transaction failed: {e}"),
-    })
+    Ok(())
 }
 
 /// Parses and records a confirmed cast-vote transaction in one durable step.

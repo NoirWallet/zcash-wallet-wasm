@@ -4086,6 +4086,7 @@ dependencies = [
  "prost",
  "rand_core",
  "rayon",
+ "rusqlite 0.37.0",
  "sapling-crypto",
  "secp256k1 0.27.0",
  "secrecy 0.8.0",

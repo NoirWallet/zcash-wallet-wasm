@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::VotingError;
 
-const CURRENT_VERSION: u32 = 20;
+const CURRENT_VERSION: u32 = 21;
 
 /// Oldest launched schema version that can be upgraded in place.
 ///
@@ -119,6 +119,7 @@ END;",
     (17, include_str!("migrations/002_wallet_owner.sql")),
     (18, include_str!("migrations/003_voting_hotkey.sql")),
     (19, include_str!("migrations/004_delegation_attempts.sql")),
+    (20, include_str!("migrations/005_delegation_confirmation.sql")),
 ];
 
 const RESET_SQL: &str = "DROP TABLE IF EXISTS wallet_metadata;
@@ -180,6 +181,10 @@ pub fn migrate(conn: &mut Connection) -> Result<(), VotingError> {
         tx.execute_batch(include_str!("migrations/004_delegation_attempts.sql"))
             .map_err(|_| VotingError::Internal {
                 message: "could not create delegation journal".into(),
+            })?;
+        tx.execute_batch(include_str!("migrations/005_delegation_confirmation.sql"))
+            .map_err(|_| VotingError::Internal {
+                message: "could not create delegation confirmation storage".into(),
             })?;
     } else {
         // Launched databases hold delegation state that cannot be rebuilt, so

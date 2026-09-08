@@ -164,33 +164,125 @@ impl DelegationOutcome {
 pub struct DelegationAttempt {
     pub canonical: CanonicalDelegation,
     pub outcome: DelegationOutcome,
+    pub(crate) original_van_position: Option<u32>,
 }
 
 impl VotingDb {
+    /// Validate every bundle before planning can omit confirmed work or dispatch another bundle.
+    pub fn validate_delegation_state(&self, round: &str) -> Result<(), VotingError> {
+        use crate::phases::DelegationPhase;
+        let phases = self.delegation_phases(round)?;
+        if phases.is_empty() {
+            return Err(invalid());
+        }
+        let orphan: bool = self
+            .conn()
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM delegation_attempts a
+                    LEFT JOIN bundles b
+                      ON a.round_id = b.round_id
+                     AND a.wallet_id = b.wallet_id
+                     AND a.bundle_index = b.bundle_index
+                    WHERE a.round_id = ?1
+                      AND a.wallet_id = ?2
+                      AND b.bundle_index IS NULL
+                )",
+                params![round, self.wallet_id()],
+                |row| row.get(0),
+            )
+            .map_err(|_| invalid())?;
+        if orphan {
+            return Err(invalid());
+        }
+        for (index, (bundle, phase)) in phases.into_iter().enumerate() {
+            if bundle as usize != index {
+                return Err(invalid());
+            }
+            if self.delegation_submission(round, bundle)?.is_none()
+                && matches!(
+                    phase,
+                    DelegationPhase::Submitted | DelegationPhase::Confirmed
+                )
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+
     pub fn delegation_submission(
         &self,
         round: &str,
         bundle: u32,
     ) -> Result<Option<DelegationAttempt>, VotingError> {
-        let row: Option<(Vec<u8>,String,String)> = self.conn().query_row(
-            "SELECT canonical_json, tx_hash, outcome FROM delegation_attempts WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=?3",
-            params![round,self.wallet_id(),bundle], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-        ).optional().map_err(|_| invalid())?;
-        row.map(|(json, hash, outcome)| {
-            let canonical = CanonicalDelegation::parse(json)?;
-            canonical.validate_bundle(self, round, bundle)?;
-            let outcome = DelegationOutcome::parse(&outcome)?;
-            if canonical.round_id != round || canonical.tx_hash != hash {
-                return Err(invalid());
-            }
-            let stored = self.get_delegation_tx_hash(round, bundle)?;
-            if (outcome == DelegationOutcome::Prepared && stored.is_some())
-                || (outcome != DelegationOutcome::Prepared && stored.as_deref() != Some(&hash))
-            {
-                return Err(invalid());
-            }
-            Ok(DelegationAttempt { canonical, outcome })
-        })
+        let row: Option<(Vec<u8>, String, String, Option<String>, Option<i64>)> = self
+            .conn()
+            .query_row(
+                "SELECT canonical_json, tx_hash, outcome,
+                        confirmation_tx_hash, confirmation_van_position
+                 FROM delegation_attempts
+                 WHERE round_id = ?1 AND wallet_id = ?2 AND bundle_index = ?3",
+                params![round, self.wallet_id(), bundle],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| invalid())?;
+        row.map(
+            |(json, hash, outcome, confirmation_hash, confirmation_position)| {
+                let canonical = CanonicalDelegation::parse(json)?;
+                canonical.validate_bundle(self, round, bundle)?;
+                let outcome = DelegationOutcome::parse(&outcome)?;
+                if canonical.round_id != round || canonical.tx_hash != hash {
+                    return Err(invalid());
+                }
+                let (stored_hash, current_van_position): (Option<String>, Option<i64>) = self
+                    .conn()
+                    .query_row(
+                        "SELECT delegation_tx_hash, van_leaf_position
+                     FROM bundles
+                     WHERE round_id = ?1 AND wallet_id = ?2 AND bundle_index = ?3",
+                        params![round, self.wallet_id(), bundle],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|_| invalid())?;
+                if (outcome == DelegationOutcome::Prepared && stored_hash.is_some())
+                    || (outcome != DelegationOutcome::Prepared
+                        && stored_hash.as_deref() != Some(&hash))
+                {
+                    return Err(invalid());
+                }
+                let original_van_position = match (
+                    confirmation_hash,
+                    confirmation_position,
+                    current_van_position,
+                ) {
+                    (None, None, None) => None,
+                    (Some(confirmed_hash), Some(position), Some(current_position))
+                        if confirmed_hash == hash
+                            && outcome == DelegationOutcome::Accepted
+                            && position == current_position =>
+                    {
+                        Some(u32::try_from(position).map_err(|_| invalid())?)
+                    }
+                    _ => return Err(invalid()),
+                };
+                Ok(DelegationAttempt {
+                    canonical,
+                    outcome,
+                    original_van_position,
+                })
+            },
+        )
         .transpose()
     }
     pub fn prepare_delegation_submission(
@@ -259,6 +351,9 @@ impl VotingDb {
         {
             return Err(invalid());
         }
+        if existing.original_van_position.is_some() && existing.outcome != outcome {
+            return Err(invalid());
+        }
         self.conn().execute("UPDATE delegation_attempts SET outcome=?4 WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=?3",
             params![round,self.wallet_id(),bundle,outcome.as_str()]).map_err(|_| invalid())?;
         Ok(())
@@ -281,40 +376,89 @@ impl VotingDb {
         {
             return Err(invalid());
         }
-        if events
-            .iter()
-            .filter(|event| {
-                event.event_type == "delegate_vote"
-                    || STANDARD
-                        .decode(&event.event_type)
-                        .is_ok_and(|name| name == b"delegate_vote")
-            })
-            .count()
-            != 1
+        let confirmation = strict_delegation_confirmation(round, hash, events)?;
+        if attempt
+            .original_van_position
+            .is_some_and(|position| position != confirmation.van_leaf_position)
         {
             return Err(invalid());
         }
-        for event in events
-            .iter()
-            .filter(|event| event.event_type == "delegate_vote")
-        {
-            let mut keys = std::collections::BTreeSet::new();
-            let mut round_attributes = 0;
-            for attribute in &event.attributes {
-                if !keys.insert(attribute.key.as_str()) {
-                    return Err(invalid());
-                }
-                if matches!(attribute.key.as_str(), "vote_round_id" | "round_id") {
-                    round_attributes += 1;
-                }
-            }
-            if round_attributes != 1 {
-                return Err(invalid());
-            }
+        let wallet = self.wallet_id();
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|_| invalid())?;
+        crate::confirmation::record_delegation_confirmation_fields(
+            &tx,
+            round,
+            &wallet,
+            bundle,
+            &confirmation,
+        )
+        .map_err(|_| invalid())?;
+        let changed=tx.execute("UPDATE delegation_attempts SET outcome='accepted',confirmation_tx_hash=?4,confirmation_van_position=?5 WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=?3",
+            params![round,wallet,bundle,confirmation.tx_hash,confirmation.van_leaf_position]).map_err(|_|invalid())?;
+        if changed != 1 {
+            return Err(invalid());
         }
-        crate::confirmation::confirm_delegation_submission(self, round, bundle, hash, events)?;
-        Ok(())
+        tx.commit().map_err(|_| invalid())
     }
+}
+
+fn strict_delegation_confirmation(
+    round: &str,
+    hash: &str,
+    events: &[TxEvent],
+) -> Result<crate::confirmation::DelegationConfirmation, VotingError> {
+    if round.len() != 64
+        || !round
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid());
+    }
+    if events
+        .iter()
+        .filter(|event| event.event_type == "delegate_vote")
+        .count()
+        != 1
+    {
+        return Err(invalid());
+    }
+    let event = events
+        .iter()
+        .find(|event| event.event_type == "delegate_vote")
+        .ok_or_else(invalid)?;
+    let mut keys = std::collections::BTreeSet::new();
+    for attribute in &event.attributes {
+        if !keys.insert(attribute.key.as_str()) {
+            return Err(invalid());
+        }
+        if attribute.key == "round_id" {
+            return Err(invalid());
+        }
+    }
+    let value = |key: &str| {
+        event
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == key)
+            .map(|attribute| attribute.value.as_str())
+            .ok_or_else(invalid)
+    };
+    if value("vote_round_id")? != round {
+        return Err(invalid());
+    }
+    let raw_position = value("leaf_index")?;
+    if raw_position.is_empty()
+        || !raw_position.bytes().all(|byte| byte.is_ascii_digit())
+        || (raw_position.len() > 1 && raw_position.starts_with('0'))
+    {
+        return Err(invalid());
+    }
+    let van_leaf_position = raw_position.parse::<u32>().map_err(|_| invalid())?;
+    Ok(crate::confirmation::DelegationConfirmation {
+        tx_hash: hash.into(),
+        van_leaf_position,
+    })
 }
 
 pub fn delegation_request(base: &str, canonical: &CanonicalDelegation) -> OwnedHttpRequest {

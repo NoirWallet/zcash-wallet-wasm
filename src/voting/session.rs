@@ -105,6 +105,7 @@ impl VotingSessionInner {
         self.validate_delegation_key(&usk, fingerprint)?;
         drop(usk);
         let id = config::normalize_round_id(id)?;
+        self.db.validate_delegation_state(&id).map_err(conflict)?;
         let round = authenticate().await?;
         self.validate_delegation_round(&id, &round, now()?)?;
         let roster = round
@@ -1083,6 +1084,113 @@ mod tests {
             0
         );
         assert!(session.wallet.db.try_write().is_ok());
+    }
+
+    #[tokio::test]
+    async fn delegation_restored_corruption_is_global_before_network() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use zcash_voting::platform::{
+            HttpTransport, OwnedHttpRequest, TransportError, TransportFuture,
+        };
+        struct Transport(AtomicUsize);
+        impl HttpTransport for Transport {
+            fn execute(&self, _: OwnedHttpRequest) -> TransportFuture {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(Err(TransportError::Ambiguous)))
+            }
+        }
+        let (session, mut round) = session().await;
+        round.params.snapshot_height = delegation_fixture::height();
+        round.summary.snapshot_height = round.params.snapshot_height;
+        let envelope = serde_json::to_string(&VotingSessionEnvelope {
+            version: 1,
+            authenticated_round: round.identity(),
+        })
+        .unwrap();
+        session
+            .db
+            .init_round(
+                zcash_voting::Network::Testnet,
+                &round.params,
+                Some(&envelope),
+            )
+            .unwrap();
+        let canonical = delegation_fixture::prepare_bundles(&session.db, &round.params, 17, 2);
+        for (index, submission) in canonical.iter().enumerate() {
+            session
+                .db
+                .prepare_delegation_submission(ID, index as u32, submission)
+                .unwrap();
+        }
+        session.db.mark_delegation_dispatching(ID, 1).unwrap();
+        session
+            .db
+            .confirm_journaled_delegation(
+                ID,
+                1,
+                canonical[1].tx_hash(),
+                &[delegation_fixture::event(ID, "42")],
+            )
+            .unwrap();
+        let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            &crate::Network::TestNetwork,
+            &[17; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap();
+        let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&[17; 32]).unwrap();
+        for all_confirmed in [false, true] {
+            if all_confirmed {
+                session.db.mark_delegation_dispatching(ID, 0).unwrap();
+                session
+                    .db
+                    .confirm_journaled_delegation(
+                        ID,
+                        0,
+                        canonical[0].tx_hash(),
+                        &[delegation_fixture::event(ID, "41")],
+                    )
+                    .unwrap();
+            }
+            let bytes = session.export_state().unwrap();
+            for sql in delegation_fixture::confirmed_corruptions() {
+                let bytes = delegation_fixture::corrupt(&bytes, sql);
+                let restored =
+                    open(session.wallet.clone(), session.account_id, Some(&bytes)).unwrap();
+                let transport = Transport(AtomicUsize::new(0));
+                let authentication = Cell::new(0);
+                let checkpoints = Cell::new(0);
+                let builds = Cell::new(0);
+                let error = restored
+                    .submit_delegation_with(
+                        ID,
+                        usk.clone(),
+                        fingerprint,
+                        &transport,
+                        || {
+                            authentication.set(authentication.get() + 1);
+                            std::future::ready(Ok(round.clone()))
+                        },
+                        |_, _| {
+                            builds.set(builds.get() + 1);
+                            std::future::ready(Err(conflict(())))
+                        },
+                        || {
+                            checkpoints.set(checkpoints.get() + 1);
+                            std::future::ready(Ok(()))
+                        },
+                        || Ok(1500),
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code, VotingErrorCode::RecoveryConflict);
+                assert_eq!(authentication.get(), 0);
+                assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+                assert_eq!(checkpoints.get(), 0);
+                assert_eq!(builds.get(), 0);
+                assert!(restored.mutation_guard().is_ok());
+            }
+        }
     }
 
     #[tokio::test]
@@ -2329,6 +2437,55 @@ mod tests {
             .unwrap();
         std::fs::write(path.join("voting.bin"), session.export_state().unwrap()).unwrap();
         std::fs::write(path.join("metadata.json"),serde_json::to_vec(&serde_json::json!({"accountId":*session.account_id,"roundId":ID,"storageKey":session.storage_key()})).unwrap()).unwrap();
+        session.db.clear_round(ID).unwrap();
+        let mut round = round;
+        round.params.snapshot_height = delegation_fixture::height();
+        round.summary.snapshot_height = round.params.snapshot_height;
+        let envelope = serde_json::to_string(&VotingSessionEnvelope {
+            version: 1,
+            authenticated_round: round.identity(),
+        })
+        .unwrap();
+        session
+            .db
+            .init_round(
+                zcash_voting::Network::Testnet,
+                &round.params,
+                Some(&envelope),
+            )
+            .unwrap();
+        let canonical = delegation_fixture::prepare_bundles(&session.db, &round.params, 17, 2);
+        for (bundle, submission) in canonical.iter().enumerate() {
+            session
+                .db
+                .prepare_delegation_submission(ID, bundle as u32, submission)
+                .unwrap();
+        }
+        for bundle in [1, 0] {
+            session.db.mark_delegation_dispatching(ID, bundle).unwrap();
+            session
+                .db
+                .confirm_journaled_delegation(
+                    ID,
+                    bundle,
+                    canonical[bundle as usize].tx_hash(),
+                    &[delegation_fixture::event(ID, &(41 + bundle).to_string())],
+                )
+                .unwrap();
+            let corrupt = delegation_fixture::corrupt(
+                &session.export_state().unwrap(),
+                "UPDATE proofs SET proof=x'02' WHERE bundle_index=1",
+            );
+            std::fs::write(
+                path.join(if bundle == 1 {
+                    "delegation-mixed-corrupt.bin"
+                } else {
+                    "delegation-confirmed-corrupt.bin"
+                }),
+                corrupt,
+            )
+            .unwrap();
+        }
     }
     #[tokio::test]
     async fn mutation_gate_rejects_overlap_and_releases_on_cancellation() {

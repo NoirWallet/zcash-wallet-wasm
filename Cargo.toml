@@ -95,6 +95,9 @@ web-sys = { version = "0.3", optional = true, features = [
 [dev-dependencies]
 rand_core = "0.6"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+rusqlite = { version = "=0.37.0", features = ["bundled", "serialize"] }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
