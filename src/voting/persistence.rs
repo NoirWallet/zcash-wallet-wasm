@@ -58,15 +58,36 @@ where
 
 pub(crate) struct Persistence {
     pub(crate) revision: Revision,
+    pending: Cell<bool>,
     #[cfg(target_arch = "wasm32")]
     callback: js_sys::Function,
 }
 
 impl Persistence {
+    pub(crate) fn has_pending_checkpoint(&self) -> bool {
+        self.pending.get()
+    }
+
+    // Session mutations and helper checkpoints serialize access to this boundary.
+    // Failure or dropping the future must not acknowledge the in-memory snapshot.
+    pub(crate) async fn checkpoint_with<F>(
+        &self,
+        checkpoint: impl FnOnce() -> F,
+    ) -> Result<(), VotingApiError>
+    where
+        F: Future<Output = Result<(), VotingApiError>>,
+    {
+        self.pending.set(true);
+        checkpoint().await?;
+        self.pending.set(false);
+        Ok(())
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn new(callback: js_sys::Function) -> Self {
         Self {
             revision: Revision::default(),
+            pending: Cell::new(false),
             callback,
         }
     }
@@ -107,6 +128,7 @@ impl Default for Persistence {
     fn default() -> Self {
         Self {
             revision: Revision::default(),
+            pending: Cell::new(false),
         }
     }
 }
@@ -115,6 +137,38 @@ impl Default for Persistence {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    #[tokio::test]
+    async fn pending_checkpoint_survives_rejection_and_dropped_retries_until_acknowledged() {
+        let persistence = Persistence::default();
+        assert!(!persistence.has_pending_checkpoint());
+        for _ in 0..2 {
+            let mut checkpoint = Box::pin(persistence.checkpoint_with(|| {
+                assert!(persistence.has_pending_checkpoint());
+                std::future::pending::<Result<(), VotingApiError>>()
+            }));
+            assert!(futures_util::poll!(checkpoint.as_mut()).is_pending());
+            drop(checkpoint);
+            assert!(persistence.has_pending_checkpoint());
+            assert!(
+                persistence
+                    .checkpoint_with(|| async {
+                        Err(VotingApiError::new(VotingErrorCode::PersistenceFailed))
+                    })
+                    .await
+                    .is_err()
+            );
+            assert!(persistence.has_pending_checkpoint());
+        }
+        persistence
+            .checkpoint_with(|| async {
+                assert!(persistence.has_pending_checkpoint());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(!persistence.has_pending_checkpoint());
+    }
+
     #[tokio::test]
     async fn delegation_post_dispatch_persistence_failure_is_unknown() {
         let checkpoints = Cell::new(0);

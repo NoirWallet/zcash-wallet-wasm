@@ -115,6 +115,10 @@ impl VotingSessionInner {
         self.db
             .validate_vote_submission_state(&id)
             .map_err(conflict)?;
+        let checkpoint = || self.persistence.checkpoint_with(&checkpoint);
+        if self.persistence.has_pending_checkpoint() {
+            checkpoint().await?;
+        }
         let round = authenticate().await?;
         self.validate_delegation_round(&id, &round, now()?)?;
         let roster = round
@@ -402,6 +406,10 @@ impl VotingSessionInner {
         let _guard = self.mutation_guard()?;
         let id = config::normalize_round_id(id)?;
         self.validate_submission_state(&id)?;
+        let checkpoint = || self.persistence.checkpoint_with(&checkpoint);
+        if self.persistence.has_pending_checkpoint() {
+            checkpoint().await?;
+        }
         let round = authenticate().await?;
         self.validate_delegation_round(&id, &round, now()?)?;
         if let Some(decisions) = decisions {
@@ -1407,6 +1415,11 @@ impl VotingSessionInner {
             status.phase = VotingRoundPhase::Expired;
             status.next_action = "none".into();
         }
+        if status.phase == VotingRoundPhase::SharesConfirmed
+            && self.persistence.has_pending_checkpoint()
+        {
+            return Err(VotingApiError::new(VotingErrorCode::PersistenceFailed));
+        }
         Ok(status)
     }
     pub(crate) async fn clear_round_with<F>(
@@ -1422,14 +1435,14 @@ impl VotingSessionInner {
         self.db.clear_round(&id).map_err(conflict)?;
         // Cleanup runs on success, callback failure, and future cancellation.
         let _cleanup = ClearedRound { session: self, id };
-        checkpoint().await
+        self.persistence.checkpoint_with(checkpoint).await
     }
 
     pub(crate) async fn prepare_round_with<P, C>(
         &self,
         id: &str,
         prepare: impl FnOnce(TrustedRound) -> P,
-        checkpoint: impl FnOnce() -> C,
+        checkpoint: impl Fn() -> C,
         now: impl Fn() -> Result<u64, VotingApiError>,
     ) -> Result<PreparedVotingRound, VotingApiError>
     where
@@ -1439,6 +1452,12 @@ impl VotingSessionInner {
         let _mutation = self.mutation_guard()?;
         let round = self.cached_round_at(id, now()?)?;
         self.validate_saved_identity(&round)?;
+        let checkpoint = || self.persistence.checkpoint_with(&checkpoint);
+        if self.persistence.has_pending_checkpoint() {
+            checkpoint().await?;
+            self.cached_round_at(id, now()?)?;
+            self.validate_saved_identity(&round)?;
+        }
         let id = round.summary.round_id.clone();
         if self
             .selected_round_id
@@ -2051,7 +2070,8 @@ mod tests {
                 .code,
             VotingErrorCode::SubmissionRejected
         );
-        assert_eq!(checkpoints.get(), 4);
+        // The retry first acknowledges the rejected outcome before planning again.
+        assert_eq!(checkpoints.get(), 5);
         struct PendingPost(Mutex<Vec<String>>);
         impl HttpTransport for PendingPost {
             fn execute(&self, request: OwnedHttpRequest) -> TransportFuture {
@@ -2139,6 +2159,25 @@ mod tests {
             assert!(cancelled.mutation_guard().is_err());
             drop(operation);
             assert!(cancelled.mutation_guard().is_ok());
+            assert!(cancelled.persistence.has_pending_checkpoint());
+            assert_eq!(
+                cancelled
+                    .submit_delegation_with(
+                        ID,
+                        usk.clone(),
+                        fingerprint,
+                        &transport,
+                        || async { panic!("pending persistence must precede authentication") },
+                        |_, _| async { panic!("pending persistence must precede proving") },
+                        || async { Err(VotingApiError::new(VotingErrorCode::PersistenceFailed)) },
+                        || Ok(1500),
+                    )
+                    .await
+                    .unwrap_err()
+                    .code,
+                VotingErrorCode::PersistenceFailed
+            );
+            assert!(cancelled.persistence.has_pending_checkpoint());
             assert_eq!(
                 transport.0.lock().unwrap().len(),
                 usize::from(cancel_at == 3)
@@ -2403,7 +2442,9 @@ mod tests {
     #[tokio::test]
     async fn prepare_round_checkpoint_rejection_retains_authoritative_hotkey_and_identity() {
         let (session, round) = session().await;
+        let builds = Cell::new(0);
         let prepare = |round: TrustedRound| {
+            builds.set(builds.get() + 1);
             let envelope = serde_json::to_string(&VotingSessionEnvelope {
                 version: 1,
                 authenticated_round: round.identity(),
@@ -2438,6 +2479,40 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(failed.code, VotingErrorCode::PersistenceFailed);
+        assert!(session.persistence.has_pending_checkpoint());
+        assert_eq!(
+            session
+                .prepare_round_with(
+                    ID,
+                    prepare,
+                    || async { Err(VotingApiError::new(VotingErrorCode::PersistenceFailed)) },
+                    || Ok(1500),
+                )
+                .await
+                .unwrap_err()
+                .code,
+            VotingErrorCode::PersistenceFailed
+        );
+        assert_eq!(builds.get(), 1);
+        let now = Cell::new(1500);
+        assert_eq!(
+            session
+                .prepare_round_with(
+                    ID,
+                    prepare,
+                    || async {
+                        now.set(2000);
+                        Ok(())
+                    },
+                    || Ok(now.get()),
+                )
+                .await
+                .unwrap_err()
+                .code,
+            VotingErrorCode::RoundExpired
+        );
+        assert_eq!(builds.get(), 1);
+        assert!(!session.persistence.has_pending_checkpoint());
         let hotkey = session.db.ensure_voting_hotkey(ID).unwrap();
         assert_eq!(*session.selected_round_id.borrow(), Some(ID.into()));
         session
@@ -3122,6 +3197,7 @@ mod tests {
             VotingRoundPhase::ConfigAuthenticated
         );
         drop(clearing);
+        assert!(session.persistence.has_pending_checkpoint());
         assert!(session.trusted_rounds.borrow().is_empty());
         session
             .clear_round_with(ID, || {
@@ -3136,6 +3212,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(*revisions.borrow(), [1, 2]);
+        assert!(!session.persistence.has_pending_checkpoint());
     }
     #[tokio::test]
     #[ignore = "generates public synthetic inputs for the Chrome session harness"]

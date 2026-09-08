@@ -1,6 +1,180 @@
 use super::*;
 use rusqlite::OptionalExtension;
 
+async fn final_quorum_checkpoint_must_be_acknowledged(drop_checkpoint: bool) {
+    struct NoNetwork;
+    impl HttpTransport for NoNetwork {
+        fn execute(&self, _: OwnedHttpRequest) -> TransportFuture {
+            panic!("unacknowledged terminal recovery must checkpoint before any request")
+        }
+    }
+    let (fixture, base) = confirmed_vote_base().await;
+    let session = fixture.reopen(&base);
+    let durable = Arc::new(Mutex::new(base));
+    let transport = Helpers::new(&fixture, durable.clone());
+    let checkpoints = Cell::new(0);
+    let (reached, receiver) = tokio::sync::oneshot::channel();
+    let reached = std::cell::RefCell::new(Some(reached));
+    let mut operation = Box::pin(session.submit_ballot_with(
+        ID,
+        None,
+        &transport,
+        || std::future::ready(Ok(fixture.round.clone())),
+        |_, _, _| async { panic!("helper resume regenerated a vote") },
+        || async {
+            checkpoints.set(checkpoints.get() + 1);
+            if checkpoints.get() == 49 {
+                let _ = reached.borrow_mut().take().unwrap().send(());
+                if drop_checkpoint {
+                    pending::<()>().await;
+                }
+                return Err(VotingApiError::new(VotingErrorCode::PersistenceFailed));
+            }
+            *durable.lock().unwrap() = session.db.serialize_bytes().unwrap();
+            Ok(())
+        },
+        || Ok(1500),
+    ));
+    if drop_checkpoint {
+        tokio::select! {
+            result = &mut operation => panic!("final checkpoint did not suspend: {}", result.is_ok()),
+            _ = receiver => (),
+        }
+    } else {
+        assert!(operation.as_mut().await.is_err());
+    }
+    drop(operation);
+    assert_eq!(checkpoints.get(), 49);
+    assert!(
+        session
+            .db
+            .get_share_delegations(ID)
+            .unwrap()
+            .iter()
+            .all(|share| share.confirmed)
+    );
+    assert_eq!(
+        session.round_status_at(ID, 1500).unwrap_err().code,
+        VotingErrorCode::PersistenceFailed
+    );
+    let acknowledged = durable.lock().unwrap().clone();
+    let restored = fixture.reopen(&acknowledged);
+    let restored_status = restored.round_status_at(ID, 1500).unwrap();
+    assert_eq!(restored_status.phase, VotingRoundPhase::VoteConfirmed);
+    assert_eq!(restored_status.confirmed_helpers, 15);
+    let immutable_plan = plan_snapshot(&acknowledged).unwrap();
+    let retry_count = Cell::new(0);
+    let error = session
+        .submit_ballot_with(
+            ID,
+            None,
+            &NoNetwork,
+            || std::future::ready(Ok(fixture.round.clone())),
+            |_, _, _| async { panic!("unacknowledged resume must not prove") },
+            || async {
+                retry_count.set(retry_count.get() + 1);
+                Err(VotingApiError::new(VotingErrorCode::PersistenceFailed))
+            },
+            || Ok(1500),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, VotingErrorCode::PersistenceFailed);
+    assert_eq!(retry_count.get(), 1);
+    assert_eq!(
+        session.round_status_at(ID, 1500).unwrap_err().code,
+        VotingErrorCode::PersistenceFailed
+    );
+    let mut retry = Box::pin(session.submit_ballot_with(
+        ID,
+        None,
+        &NoNetwork,
+        || async { panic!("dropped acknowledgement must precede authentication") },
+        |_, _, _| async { panic!("dropped acknowledgement must precede proving") },
+        || async {
+            retry_count.set(retry_count.get() + 1);
+            pending::<Result<(), VotingApiError>>().await
+        },
+        || Ok(1500),
+    ));
+    assert!(poll!(retry.as_mut()).is_pending());
+    drop(retry);
+    assert_eq!(retry_count.get(), 2);
+    assert_eq!(
+        session.round_status_at(ID, 1500).unwrap_err().code,
+        VotingErrorCode::PersistenceFailed
+    );
+    let result = session
+        .submit_ballot_with(
+            ID,
+            None,
+            &NoNetwork,
+            || {
+                assert_eq!(retry_count.get(), 3);
+                std::future::ready(Ok(fixture.round.clone()))
+            },
+            |_, _, _| async { panic!("acknowledging quorum must not prove") },
+            || async {
+                retry_count.set(retry_count.get() + 1);
+                assert_eq!(
+                    session.round_status_at(ID, 1500).unwrap_err().code,
+                    VotingErrorCode::PersistenceFailed
+                );
+                *durable.lock().unwrap() = session.db.serialize_bytes().unwrap();
+                Ok(())
+            },
+            || Ok(1500),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry_count.get(), 3);
+    assert_eq!(result.phase, VotingRoundPhase::SharesConfirmed);
+    assert_eq!(
+        session.round_status_at(ID, 1500).unwrap().phase,
+        VotingRoundPhase::SharesConfirmed
+    );
+    let final_bytes = durable.lock().unwrap().clone();
+    assert_eq!(plan_snapshot(&final_bytes).as_ref(), Some(&immutable_plan));
+    assert_eq!(
+        fixture
+            .reopen(&final_bytes)
+            .round_status_at(ID, 1500)
+            .unwrap()
+            .phase,
+        VotingRoundPhase::SharesConfirmed
+    );
+    let restored_durable = Arc::new(Mutex::new(acknowledged));
+    let restored_transport = Helpers::new(&fixture, restored_durable.clone());
+    let recovered = restored
+        .submit_ballot_with(
+            ID,
+            None,
+            &restored_transport,
+            || std::future::ready(Ok(fixture.round.clone())),
+            |_, _, _| async { panic!("restored quorum must not regenerate payloads") },
+            || async {
+                *restored_durable.lock().unwrap() = restored.db.serialize_bytes().unwrap();
+                Ok(())
+            },
+            || Ok(1500),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.phase, VotingRoundPhase::SharesConfirmed);
+    assert!(restored_transport.posts.lock().unwrap().is_empty());
+    fixture.assert_canonical(&restored);
+}
+
+#[tokio::test]
+async fn helper_recovery_same_session_rejects_unacknowledged_final_quorum() {
+    final_quorum_checkpoint_must_be_acknowledged(false).await;
+}
+
+#[tokio::test]
+async fn helper_recovery_same_session_dropped_final_checkpoint_cannot_skip_persistence() {
+    final_quorum_checkpoint_must_be_acknowledged(true).await;
+}
+
 #[tokio::test]
 async fn helper_recovery_pending_prior_proposal_does_not_block_later_cast() {
     let fixture = BallotFixture::new(true).await;
