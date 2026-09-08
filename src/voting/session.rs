@@ -634,6 +634,7 @@ impl VotingSessionInner {
                     checkpoint()
                         .await
                         .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                    self.validate_delegation_round(id, &round, now()?)?;
                     let outcome = transport
                         .execute(vote_request(
                             round.vote_server_urls.first().ok_or_else(|| conflict(()))?,
@@ -1499,6 +1500,10 @@ impl Drop for MutationGuard {
 mod delegation_fixture;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "session_ballot_tests.rs"]
+mod ballot_driver_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use futures_util::{future::pending, poll};
@@ -2335,7 +2340,7 @@ mod tests {
     ) -> Result<VotingSessionInner, VotingApiError> {
         VotingSessionInner::open(wallet, account, bytes, Persistence::default())
     }
-    async fn session() -> (VotingSessionInner, TrustedRound) {
+    pub(super) async fn session() -> (VotingSessionInner, TrustedRound) {
         let (wallet, account, _) = wallet(crate::Network::TestNetwork, 17, true);
         let session = open(wallet, account, None).unwrap();
         let (discovery, rounds) = super::super::config::tests::discover(

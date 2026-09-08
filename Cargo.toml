@@ -96,6 +96,7 @@ web-sys = { version = "0.3", optional = true, features = [
 rand_core = "0.6"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+zcash_voting = { path = "./zcash_voting/zcash_voting", default-features = false, features = ["lrz", "browser", "test-fixtures"] }
 rusqlite = { version = "=0.37.0", features = ["bundled", "serialize"] }
 
 [profile.release]

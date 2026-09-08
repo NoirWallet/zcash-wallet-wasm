@@ -1957,6 +1957,123 @@ pub struct VoteBatchRecovery {
     pub size: u32,
 }
 
+/// Constructs deterministic recovery-only input for orchestration tests.
+///
+/// This is deliberately feature-gated: callers must still use
+/// [`insert_recovery_fixture`] to persist it into an already initialized test
+/// round. Only authority transitions use real derivation; proofs, signatures,
+/// and share ciphertexts are placeholders. Normal builds do not enable it.
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub fn synthetic_recovery_fixtures(
+    db: &VotingDb,
+    round_id: &str,
+    bundle_index: u32,
+    drafts: &[DraftVote],
+) -> Result<Vec<VoteRecoveryBundle>, VotingError> {
+    validate_draft_votes(drafts)?;
+    let mut authority = 65_535;
+    let mut recoveries = Vec::new();
+    for draft in drafts {
+        let mut recovery = synthetic_recovery_fixture(
+            db,
+            round_id,
+            bundle_index,
+            draft.proposal_id,
+            draft.choice,
+            authority,
+        )?;
+        recovery.num_options = draft.num_options;
+        authority &= !(1u64 << draft.proposal_id);
+        recoveries.push(recovery);
+    }
+    if recoveries.len() > 1 {
+        let actions = recoveries
+            .iter()
+            .map(|r| crate::vote_commitment::CastVoteBatchSighashAction {
+                r_vpk: &r.r_vpk,
+                van_nullifier: &r.van_nullifier,
+                vote_authority_note_new: &r.vote_authority_note_new,
+                vote_commitment: &r.vote_commitment,
+                proposal_id: r.proposal_id,
+            })
+            .collect::<Vec<_>>();
+        let digest = crate::vote_commitment::cast_vote_batch_sighash(round_id, 123, &actions)?;
+        let size = recoveries.len() as u32;
+        for (index, recovery) in recoveries.iter_mut().enumerate() {
+            recovery.batch = Some(VoteBatchRecovery {
+                digest,
+                index: index as u32,
+                size,
+            });
+        }
+    }
+    Ok(recoveries)
+}
+
+#[cfg(feature = "test-fixtures")]
+fn synthetic_recovery_fixture(
+    db: &VotingDb,
+    round_id: &str,
+    bundle_index: u32,
+    proposal_id: u32,
+    choice: u32,
+    proposal_authority: u64,
+) -> Result<VoteRecoveryBundle, VotingError> {
+    let wallet_id = db.wallet_id();
+    let hotkey = db
+        .load_voting_hotkey(round_id)?
+        .ok_or_else(|| VotingError::InvalidInput {
+            message: "synthetic fixture requires a voting hotkey".into(),
+        })?;
+    let conn = db.conn();
+    let inputs =
+        crate::storage::queries::load_zkp2_inputs(&conn, round_id, &wallet_id, bundle_index)?;
+    let network = crate::storage::queries::load_round_network(&conn, round_id, &wallet_id)?;
+    let transition = crate::zkp2::plan_vote_authority_transition(
+        hotkey.stored_secret(),
+        network,
+        inputs.address_index,
+        inputs.total_note_value,
+        &inputs.gov_comm_rand,
+        &hex::decode(round_id).map_err(|_| VotingError::InvalidInput {
+            message: "invalid round id".into(),
+        })?,
+        proposal_id,
+        proposal_authority,
+    )?;
+    Ok(VoteRecoveryBundle {
+        vote_round_id: round_id.into(),
+        bundle_index,
+        proposal_id,
+        vote_decision: choice,
+        anchor_height: 123,
+        vc_tree_position: 0,
+        single_share: false,
+        num_options: 2,
+        van_nullifier: [proposal_id as u8; 32],
+        vote_authority_note_new: transition.vote_authority_note_new,
+        vote_commitment: [proposal_id as u8 + 16; 32],
+        proof: vec![0x13; 96],
+        shares_hash: [0x14; 32],
+        r_vpk: [0x15; 32],
+        alpha_v: [0x16; 32],
+        vote_auth_sig: [0x17; 64],
+        encrypted_shares: (0..16)
+            .map(|share_index| crate::types::EncryptedShare {
+                c1: vec![0x21; 32],
+                c2: vec![0x22; 32],
+                share_index,
+                plaintext_value: 5,
+                randomness: vec![0x23; 32],
+            })
+            .collect(),
+        share_blinds: vec![[0x41; 32]; 16],
+        share_comms: vec![[0x51; 32]; 16],
+        batch: None,
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 struct VoteRecoveryJson {
     format: String,
@@ -5967,7 +6084,8 @@ mod tests {
             WALLET_ID,
             Network::Testnet,
             Some(&db.serialize_bytes().unwrap()),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(restored.validate_vote_submission_state(ROUND_ID).is_err());
     }
 
@@ -5993,8 +6111,14 @@ mod tests {
         let event = TxEvent {
             event_type: "cast_vote".into(),
             attributes: vec![
-                TxEventAttribute { key: "vote_round_id".into(), value: ROUND_ID.into() },
-                TxEventAttribute { key: "leaf_index".into(), value: "40,39".into() },
+                TxEventAttribute {
+                    key: "vote_round_id".into(),
+                    value: ROUND_ID.into(),
+                },
+                TxEventAttribute {
+                    key: "leaf_index".into(),
+                    value: "40,39".into(),
+                },
             ],
         };
         assert!(db
@@ -6064,6 +6188,32 @@ mod tests {
             .unwrap();
             let van = 10 + (index as u32 * 2);
             let leaf = format!("{van},{}", van + 1);
+            if index > 0 {
+                let before = db.serialize_bytes().unwrap();
+                let overlaps_previous_vc = TxEvent {
+                    event_type: "cast_vote".into(),
+                    attributes: vec![
+                        TxEventAttribute {
+                            key: "vote_round_id".into(),
+                            value: ROUND_ID.into(),
+                        },
+                        TxEventAttribute {
+                            key: "leaf_index".into(),
+                            value: format!("{},{}", van - 1, van + 1),
+                        },
+                    ],
+                };
+                assert!(db
+                    .confirm_journaled_vote(
+                        ROUND_ID,
+                        0,
+                        proposal_id,
+                        canonical.tx_hash(),
+                        &[overlaps_previous_vc],
+                    )
+                    .is_err());
+                assert!(db.serialize_bytes().unwrap() == before);
+            }
             db.confirm_journaled_vote(
                 ROUND_ID,
                 0,
