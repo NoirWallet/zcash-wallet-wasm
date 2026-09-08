@@ -10,6 +10,9 @@ use zcash_voting::{
 
 const ID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
+#[path = "session_helper_tests.rs"]
+mod helper_recovery;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stop {
     None,
@@ -25,10 +28,30 @@ struct RecordingTransport {
     canonical: CanonicalVoteSubmission,
     confirmation: Vec<u8>,
     stop: Stop,
+    confirm_helpers: bool,
 }
 
 impl HttpTransport for RecordingTransport {
     fn execute(&self, request: OwnedHttpRequest) -> TransportFuture {
+        if request.url.ends_with("/status")
+            || request.url.contains("/share-status/")
+            || request.url.ends_with("/shares")
+        {
+            let status = if request.url.ends_with("/shares") {
+                "queued"
+            } else if request.url.ends_with("/status") {
+                "ok"
+            } else if self.confirm_helpers {
+                "confirmed"
+            } else {
+                "pending"
+            };
+            return Box::pin(std::future::ready(Ok(OwnedHttpResponse {
+                status: 200,
+                body: serde_json::to_vec(&serde_json::json!({ "status": status })).unwrap(),
+                content_type: Some("application/json".into()),
+            })));
+        }
         let post = request.method == "POST";
         // Fetch may dispatch when its future is constructed: inspect the last
         // acknowledged host checkpoint at this boundary, not the live database.
@@ -66,6 +89,7 @@ impl HttpTransport for RecordingTransport {
             self.confirmation.clone()
         };
         Box::pin(std::future::ready(Ok(OwnedHttpResponse {
+            content_type: None,
             status: 200,
             body,
         })))
@@ -83,6 +107,13 @@ struct BallotFixture {
 impl BallotFixture {
     async fn new(batch: bool) -> Self {
         let (session, mut round) = super::tests::session().await;
+        round.helpers = (1..=2)
+            .map(|index| HelperEndpoint {
+                id: format!("helper-{index}"),
+                url: format!("https://helper-{index}.example"),
+                public_key: vec![index; 32],
+            })
+            .collect();
         round.params.snapshot_height = delegation_fixture::height();
         round.summary.snapshot_height = round.params.snapshot_height;
         if batch {
@@ -216,6 +247,7 @@ impl BallotFixture {
             canonical: self.canonical.clone(),
             confirmation: self.confirmation.clone(),
             stop,
+            confirm_helpers: false,
         }
     }
 
@@ -310,7 +342,7 @@ async fn interruption_matrix(batch: bool) {
             2,
             vec![],
         ),
-        (Stop::None, "submit_shares", 2, vec![]),
+        (Stop::None, "confirm_share", 2, vec![]),
     ] {
         let session = fixture.reopen(&initial);
         let durable = Arc::new(Mutex::new(initial.clone()));
@@ -378,14 +410,13 @@ async fn interruption_matrix(batch: bool) {
             },
             || Ok(1500),
         ));
-        let result = poll!(&mut future);
         if stop == Stop::None {
             assert_eq!(
-                result.map(|r| r.unwrap().phase),
-                std::task::Poll::Ready(VotingRoundPhase::VoteConfirmed)
+                future.as_mut().await.unwrap().phase,
+                VotingRoundPhase::VoteConfirmed
             );
         } else {
-            assert!(result.is_pending(), "{stop:?}");
+            assert!(poll!(&mut future).is_pending(), "{stop:?}");
         }
         drop(future);
         assert!(!session.mutation_active.get());
@@ -430,7 +461,7 @@ async fn interruption_matrix(batch: bool) {
                 .unwrap()
                 .next_steps[0]
                 .kind(),
-            "submit_shares"
+            "confirm_share"
         );
     }
 }
@@ -438,6 +469,48 @@ async fn interruption_matrix(batch: bool) {
 #[tokio::test]
 async fn singleton_submit_and_resume_reopen_at_every_dispatch_and_confirmation_boundary() {
     interruption_matrix(false).await;
+}
+
+#[tokio::test]
+async fn helper_recovery_completes_the_durable_ballot_lifecycle() {
+    for batch in [false, true] {
+        let fixture = BallotFixture::new(batch).await;
+        let session = &fixture.session;
+        let durable = Arc::new(Mutex::new(session.db.serialize_bytes().unwrap()));
+        let mut transport = fixture.transport(durable.clone(), Stop::None);
+        transport.confirm_helpers = true;
+        let result = session
+            .submit_ballot_with(
+                ID,
+                Some(
+                    fixture
+                        .roster()
+                        .into_iter()
+                        .map(|proposal_id| BallotDecision::Choice {
+                            proposal_id,
+                            option: 0,
+                        })
+                        .collect(),
+                ),
+                &transport,
+                || std::future::ready(Ok(fixture.round.clone())),
+                |_, _, _| {
+                    std::future::ready(Ok(BallotFixture::store(&session.db, &fixture.recoveries)))
+                },
+                || async {
+                    *durable.lock().unwrap() = session.db.serialize_bytes().unwrap();
+                    Ok(())
+                },
+                || Ok(1500),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.phase, VotingRoundPhase::SharesConfirmed);
+        assert_eq!(
+            session.round_status_at(ID, 1500).unwrap().confirmed_helpers,
+            (fixture.roster().len() * 16) as u32
+        );
+    }
 }
 
 #[tokio::test]
@@ -585,7 +658,7 @@ async fn driver_rejects_malformed_tree_positions_without_checkpointing_and_accep
             assert_eq!(transport.requests.lock().unwrap().len(), 1);
             if valid {
                 assert_eq!(result.unwrap().phase, VotingRoundPhase::VoteConfirmed);
-                assert_eq!(checkpoints.get(), 1);
+                assert_eq!(checkpoints.get(), 1 + fixture.roster().len() * 33);
                 fixture.assert_canonical(&restored);
                 let events: Vec<zcash_voting::confirmation::TxEvent> =
                     serde_json::from_value(response["events"].clone()).unwrap();

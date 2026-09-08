@@ -1422,6 +1422,48 @@ canonical identity with `InvalidInput` before storage or network effects.
 Hosts remain responsible only for supplying the configured list from an
 authenticated configuration source.
 
+### Browser local runtime and host durability
+
+The browser entry points use `helper::client::local::LocalHelperClient` with a
+borrowed `CheckpointHook`, an owned-data `HttpTransport`, and a caller-local
+monotonic `Timer`. Native `HelperClient` remains Send/Sync and keeps its Tokio
+clock and task execution contracts. Both entry points execute the same
+initial-delivery, generation-qualified recovery, confirmation, quota, operation
+lock, and process-wide POST semaphore policy through `helper::runtime`.
+Local status polling uses `FuturesUnordered`; dropping a local operation must
+cancel its underlying request, not only stop awaiting a detached request.
+Borrowed clients share the session's advisory health scores; scores remain
+process-local and are not added to durable recovery bytes.
+
+The complete immutable plan is checkpointed before constructing delivery work.
+Every POST, including an allowed recovery re-POST and a definite transient
+retry, awaits the host checkpoint before constructing the transport future.
+After that await, cancellation, generation, expiry and the remaining attempt
+budget are checked again. Outcome and quorum-confirmation mutations are also
+checkpointed. Checkpoint calls are serialized using a local logical mutex;
+no SQLite connection guard or JavaScript guard is retained across an await.
+Failure latches the client so sibling fan-out tasks cannot dispatch after a
+failed checkpoint. An interrupted attempting marker remains subject to the
+existing duplicate-safe reconciliation policy, not a blind fresh submission.
+
+The root Fetch adapter returns actual Content-Type metadata. It reads Fetch
+byte streams with bounded BYOB buffers (at most 16 KiB, or remaining limit plus
+one byte) and checks accumulated size before copying into Rust. It does not
+call `arrayBuffer()`. Unsupported non-byte streams fail closed. Encoded,
+missing or misleading Content-Length cannot replace decoded-byte validation.
+Dropping the owned receiver cancels the local Fetch task; RAII aborts its
+AbortController, clears the timer and cancels/releases the reader. A dispatched
+POST remains ambiguous on any such transport failure.
+
+Regression coverage: `helper::client::local::tests`,
+`tests/support/browser_helper_cases.rs`, and the root
+`src/voting/session_helper_tests.rs` exercise local timing, actual response
+metadata, full-fleet preflight, and isolated SQLite reopen at every plan,
+attempt, outcome and confirmation boundary. Root `tests/browser-transport`
+uses real Chrome for eager cancellation, timeout cleanup, decoded streaming
+bounds and actual HTTP metadata. Synthetic helper replies in driver tests
+exercise durable quorum policy; they are not cryptographic chain evidence.
+
 ## Reviewer checklist
 
 A change to helper submission or recovery should answer all of the following:

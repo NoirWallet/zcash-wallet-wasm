@@ -32,6 +32,7 @@ pub(crate) struct VotingSessionInner {
     pub(crate) mutation_active: Rc<Cell<bool>>,
     pub(crate) vote_tree_sync: zcash_voting::tree_sync::VoteTreeSync,
     eligibility: RefCell<BTreeMap<String, VotingEligibility>>,
+    helper_health: zcash_voting::helper::health::HelperHealth,
 }
 
 fn conflict(_: impl Sized) -> VotingApiError {
@@ -464,6 +465,9 @@ impl VotingSessionInner {
                 parse_vote_status, vote_request, vote_status_request,
             },
         };
+        let mut visited_helpers = std::collections::BTreeSet::new();
+        let mut tracked_helpers = false;
+        let timer = super::timer::HelperTimer::default();
         loop {
             self.validate_submission_state(id)?;
             let round = authenticate().await?;
@@ -474,7 +478,29 @@ impl VotingSessionInner {
                 .map(|proposal| proposal.proposal_id)
                 .collect::<Vec<_>>();
             let plan = resume_plan(&self.db, id, &roster).map_err(conflict)?;
-            let Some(step) = plan.next_steps.first().cloned() else {
+            let Some(step) = plan
+                .next_steps
+                .iter()
+                .find(|step| match step {
+                    NextStep::SubmitShares {
+                        bundle_index,
+                        proposal_id,
+                        share_index,
+                    }
+                    | NextStep::ConfirmShare {
+                        bundle_index,
+                        proposal_id,
+                        share_index,
+                    } => !visited_helpers.contains(&(
+                        step.kind(),
+                        *bundle_index,
+                        *proposal_id,
+                        *share_index,
+                    )),
+                    _ => true,
+                })
+                .cloned()
+            else {
                 return self.delegation_progress(id, now()?);
             };
             match step {
@@ -533,8 +559,153 @@ impl VotingSessionInner {
                         return self.delegation_progress(id, now()?);
                     }
                 }
-                NextStep::SubmitShares { .. } | NextStep::ConfirmShare { .. } => {
-                    return self.delegation_progress(id, now()?);
+                NextStep::SubmitShares {
+                    bundle_index,
+                    proposal_id,
+                    share_index,
+                }
+                | NextStep::ConfirmShare {
+                    bundle_index,
+                    proposal_id,
+                    share_index,
+                } => {
+                    use zcash_voting::helper::client::local::{CheckpointHook, LocalHelperClient};
+                    use zcash_voting::share_tracking::*;
+                    struct Hook<'a, F>(&'a F, &'a Cell<bool>);
+                    impl<F, C> CheckpointHook for Hook<'_, F>
+                    where
+                        F: Fn() -> C,
+                        C: Future<Output = Result<(), VotingApiError>>,
+                    {
+                        fn checkpoint(
+                            &self,
+                        ) -> futures_util::future::LocalBoxFuture<
+                            '_,
+                            Result<(), zcash_voting::VotingError>,
+                        > {
+                            Box::pin(async {
+                                (self.0)().await.map_err(|_| {
+                                    self.1.set(true);
+                                    zcash_voting::VotingError::Internal {
+                                        message: "helper checkpoint failed".into(),
+                                    }
+                                })
+                            })
+                        }
+                    }
+                    let persistence_failed = Cell::new(false);
+                    let hook = Hook(&checkpoint, &persistence_failed);
+                    let wall_time = || now().unwrap_or(u64::MAX);
+                    let vote_end = round.summary.ends_at.parse::<u64>().map_err(conflict)?;
+                    let client =
+                        LocalHelperClient::new(transport, &timer, &hook, &wall_time, vote_end)
+                            .with_health(self.helper_health.clone());
+                    let helper_error = |_| {
+                        VotingApiError::new(if persistence_failed.get() {
+                            if client.has_dispatched() {
+                                VotingErrorCode::SubmissionUnknown
+                            } else {
+                                VotingErrorCode::PersistenceFailed
+                            }
+                        } else {
+                            VotingErrorCode::RecoveryConflict
+                        })
+                    };
+                    let fleet = round
+                        .helpers
+                        .iter()
+                        .map(|helper| helper.url.clone())
+                        .collect::<Vec<_>>();
+                    visited_helpers.insert((step.kind(), bundle_index, proposal_id, share_index));
+                    if matches!(step, NextStep::SubmitShares { .. }) {
+                        let committed = zcash_voting::vote::CommittedVote::recover(
+                            &self.db,
+                            id,
+                            bundle_index,
+                            proposal_id,
+                        )
+                        .map_err(conflict)?;
+                        let preflight = client.preflight_fleet(&fleet).await.map_err(conflict)?;
+                        self.validate_delegation_round(id, &round, now()?)?;
+                        committed
+                            .prepare_share_delivery(
+                                &self.db,
+                                ShareDeliveryPlanningParams {
+                                    fleet: &preflight,
+                                    now_seconds: now()?,
+                                    vote_end_time_seconds: vote_end,
+                                    last_moment_buffer_seconds:
+                                        zcash_voting::share_policy::last_moment_buffer_seconds(
+                                            round
+                                                .summary
+                                                .starts_at
+                                                .parse::<u64>()
+                                                .map_err(conflict)?,
+                                            vote_end,
+                                        ),
+                                    proposal_ids: &roster,
+                                },
+                            )
+                            .map_err(conflict)?;
+                        let delivery_started =
+                            zcash_voting::helper::client::local::Timer::now(&timer);
+                        let delivery = committed
+                            .submit_prepared_shares_local(
+                                &self.db,
+                                &client,
+                                ShareDeliverySubmissionParams {
+                                    configured_server_urls: &fleet,
+                                    now_seconds: now()?,
+                                },
+                                &|| false,
+                            )
+                            .await
+                            .map_err(helper_error)?;
+                        let budget_exhausted = zcash_voting::helper::client::local::Timer::now(&timer)
+                            .saturating_sub(delivery_started).as_millis() >= u128::from(zcash_voting::share_policy::SHARE_INITIAL_DELIVERY_TIMEOUT_MILLISECONDS);
+                        if delivery.cancelled || budget_exhausted || now()? >= vote_end {
+                            return self.delegation_progress(id, now()?);
+                        }
+                    } else {
+                        if !tracked_helpers {
+                            let report = track_pending_shares_local(
+                                &self.db,
+                                &ShareTrackingParams {
+                                    round_id: id,
+                                    configured_server_urls: &fleet,
+                                    now_seconds: now()?,
+                                    vote_end_time_seconds: Some(vote_end),
+                                    policy: zcash_voting::share_policy::ShareTimingPolicy::default(
+                                    ),
+                                },
+                                &client,
+                                &|| false,
+                            )
+                            .await
+                            .map_err(helper_error)?;
+                            tracked_helpers = true;
+                            if !report.unrecoverable.is_empty() {
+                                return Err(conflict(()));
+                            }
+                        }
+                        confirm_pending_share_local(
+                            &self.db,
+                            &ShareConfirmationParams {
+                                round_id: id,
+                                share: ShareKey {
+                                    bundle_index,
+                                    proposal_id,
+                                    share_index,
+                                },
+                                configured_server_urls: &fleet,
+                                now_seconds: now()?,
+                            },
+                            &client,
+                            &|| false,
+                        )
+                        .await
+                        .map_err(helper_error)?;
+                    }
                 }
                 NextStep::CastVote { bundle_index, .. } => {
                     let before_share = plan.next_steps.iter().take_while(|step| {
@@ -909,6 +1080,7 @@ impl VotingSessionInner {
         let db = VotingDb::open_browser(&wallet_id, zcash_voting::Network::Testnet, bytes)
             .map_err(conflict)?;
         let session = Self {
+            helper_health: zcash_voting::helper::health::HelperHealth::default(),
             wallet,
             account_id,
             wallet_id,
@@ -1765,6 +1937,7 @@ mod tests {
                         Err(TransportError::Ambiguous)
                     } else {
                         Ok(OwnedHttpResponse {
+                            content_type: None,
                             status: 404,
                             body: vec![],
                         })
@@ -1889,6 +2062,7 @@ mod tests {
                         pending::<()>().await;
                     }
                     Ok(OwnedHttpResponse {
+                        content_type: None,
                         status: 404,
                         body: vec![],
                     })
@@ -2104,6 +2278,7 @@ mod tests {
                 };
                 Box::pin(async move {
                     Ok(OwnedHttpResponse {
+                        content_type: None,
                         status: 200,
                         body: serde_json::to_vec(&body).unwrap(),
                     })

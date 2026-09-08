@@ -19,7 +19,13 @@
 //! retrying it on the same helper risks a duplicate. Moving to the next helper
 //! is both safer and faster.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashMap;
+use std::{sync::Arc, time::Duration};
+
+#[cfg(feature = "browser")]
+#[path = "local.rs"]
+pub mod local;
 
 use serde_json::Value;
 #[cfg(not(target_arch = "wasm32"))]
@@ -164,6 +170,8 @@ pub enum HelperError {
     /// This is a definite local outcome: the helper did not receive the share,
     /// so the error is neither ambiguous nor charged against helper health.
     DeadlineExceeded,
+    /// Host persistence failed before dispatch; preserve the durable reservation.
+    CheckpointFailed,
     /// The caller asked to stop before the request finished.
     Cancelled,
 }
@@ -182,8 +190,13 @@ impl HelperError {
             | Self::Decode { .. }
             | Self::AmbiguousSubmissionResponse { .. }
             | Self::DeadlineExceeded
+            | Self::CheckpointFailed
             | Self::Cancelled => false,
         }
+    }
+
+    fn retryable_for(&self, idempotent: bool) -> bool {
+        self.is_transient() && (idempotent || !self.is_ambiguous())
     }
 
     /// Returns true when the helper may have processed the request.
@@ -216,6 +229,7 @@ impl std::fmt::Display for HelperError {
                 )
             }
             Self::Cancelled => write!(f, "helper request cancelled"),
+            Self::CheckpointFailed => write!(f, "helper checkpoint failed"),
         }
     }
 }
@@ -785,8 +799,7 @@ impl HelperClient {
             match operation(remaining).await {
                 Ok(value) => return Ok(value),
                 Err(error) => {
-                    let retryable =
-                        error.is_transient() && (retry_ambiguous || !error.is_ambiguous());
+                    let retryable = error.retryable_for(retry_ambiguous);
                     if attempt == attempts || !retryable {
                         return Err(error);
                     }
@@ -833,7 +846,8 @@ impl HelperClient {
             Err(
                 HelperError::InvalidRequest { .. }
                 | HelperError::Cancelled
-                | HelperError::DeadlineExceeded,
+                | HelperError::DeadlineExceeded
+                | HelperError::CheckpointFailed,
             ) => {}
             Err(_) => self.health.record_failure(
                 server_url,
@@ -1199,7 +1213,7 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(pallas::Base::from(value).to_repr())
     }
 
-    fn valid_share_json() -> String {
+    pub(super) fn valid_share_json() -> String {
         VoteShareWire {
             vote_round_id: "01".repeat(32),
             shares_hash: encoded_field(1),

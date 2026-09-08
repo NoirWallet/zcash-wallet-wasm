@@ -17,9 +17,13 @@ impl HttpTransport for BrowserFetchTransport {
             return Box::pin(async move { Err(error) });
         }
         let kind = request.kind;
-        let (sender, receiver) = oneshot::channel();
+        let (mut sender, receiver) = oneshot::channel();
         spawn_local(async move {
-            let result = fetch(request).await;
+            let result =
+                match select(Box::pin(sender.cancellation()), Box::pin(fetch(request))).await {
+                    Either::Left(_) => return,
+                    Either::Right((result, _)) => result,
+                };
             let _ = sender.send(result);
         });
         // Only owned Rust data crosses this Send future. Lost local execution
@@ -29,6 +33,92 @@ impl HttpTransport for BrowserFetchTransport {
                 .await
                 .unwrap_or_else(|_| Err(TransportError::after_dispatch(kind)))
         })
+    }
+}
+
+struct FetchCleanup {
+    window: web_sys::Window,
+    controller: web_sys::AbortController,
+    timeout_id: i32,
+    _callback: Closure<dyn FnMut()>,
+}
+
+impl Drop for FetchCleanup {
+    fn drop(&mut self) {
+        self.controller.abort();
+        self.window.clear_timeout_with_handle(self.timeout_id);
+    }
+}
+
+fn method(value: &wasm_bindgen::JsValue, name: &str) -> Result<js_sys::Function, ()> {
+    js_sys::Reflect::get(value, &name.into())
+        .map_err(|_| ())?
+        .dyn_into()
+        .map_err(|_| ())
+}
+
+struct ReaderCleanup(wasm_bindgen::JsValue);
+
+impl Drop for ReaderCleanup {
+    fn drop(&mut self) {
+        if let Ok(cancel) = method(&self.0, "cancel") {
+            let _ = cancel.call0(&self.0);
+        }
+        if let Ok(release) = method(&self.0, "releaseLock") {
+            let _ = release.call0(&self.0);
+        }
+    }
+}
+
+async fn read_bounded_body(
+    response: &web_sys::Response,
+    request: &OwnedHttpRequest,
+) -> Result<Vec<u8>, TransportError> {
+    let failure = || TransportError::after_dispatch(request.kind);
+    let stream = js_sys::Reflect::get(response, &"body".into()).map_err(|_| failure())?;
+    if stream.is_null() {
+        return Ok(Vec::new());
+    }
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(&options, &"mode".into(), &"byob".into()).map_err(|_| failure())?;
+    // Fetch byte streams support BYOB. Reject unsupported streams rather than
+    // asking the host to allocate an unbounded complete response or chunk.
+    let reader = method(&stream, "getReader")
+        .map_err(|_| failure())?
+        .call1(&stream, &options)
+        .map_err(|_| failure())?;
+    let reader = ReaderCleanup(reader);
+    let mut body = Vec::new();
+    loop {
+        let remaining = request.max_response_bytes.saturating_sub(body.len());
+        let buffer =
+            js_sys::Uint8Array::new_with_length(remaining.saturating_add(1).min(16 * 1024) as u32);
+        let promise: js_sys::Promise = method(&reader.0, "read")
+            .map_err(|_| failure())?
+            .call1(&reader.0, &buffer)
+            .map_err(|_| failure())?
+            .dyn_into()
+            .map_err(|_| failure())?;
+        let result = JsFuture::from(promise).await.map_err(|_| failure())?;
+        let value = js_sys::Reflect::get(&result, &"value".into()).map_err(|_| failure())?;
+        if !value.is_undefined() {
+            let size = js_sys::Reflect::get(&value, &"byteLength".into())
+                .map_err(|_| failure())?
+                .as_f64()
+                .ok_or_else(failure)?;
+            let size = request.check_response_size_number(size)?;
+            request.check_response_size(body.len().checked_add(size).ok_or_else(failure)?)?;
+            let bytes: js_sys::Uint8Array = value.dyn_into().map_err(|_| failure())?;
+            body.extend_from_slice(&bytes.to_vec());
+        }
+        match js_sys::Reflect::get(&result, &"done".into())
+            .map_err(|_| failure())?
+            .as_bool()
+        {
+            Some(true) => return Ok(body),
+            Some(false) => {}
+            None => return Err(failure()),
+        }
     }
 }
 
@@ -75,6 +165,12 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
             request.timeout_ms as i32,
         )
         .map_err(|_| TransportError::Definite)?;
+    let _cleanup = FetchCleanup {
+        window: window.clone(),
+        controller,
+        timeout_id,
+        _callback: timeout_callback,
+    };
 
     let after_dispatch = || TransportError::after_dispatch(request.kind);
     let response = async {
@@ -94,31 +190,21 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
             .get("Content-Length")
             .map_err(|_| after_dispatch())?;
         request.check_content_length(content_length.as_deref())?;
-        let buffer = JsFuture::from(response.array_buffer().map_err(|_| after_dispatch())?)
-            .await
+        let content_type = response
+            .headers()
+            .get("Content-Type")
             .map_err(|_| after_dispatch())?;
-        let buffer: js_sys::ArrayBuffer = buffer.dyn_into().map_err(|_| after_dispatch())?;
-        // The locked js-sys byte_length getter narrows to u32. Reflect retains
-        // the complete JS number, including lengths at and above 2^32.
-        let size = js_sys::Reflect::get(&buffer, &wasm_bindgen::JsValue::from_str("byteLength"))
-            .map_err(|_| after_dispatch())?
-            .as_f64()
-            .ok_or_else(after_dispatch)?;
-        request.check_response_size_number(size)?;
+        let body = read_bounded_body(&response, &request).await?;
         Ok(OwnedHttpResponse {
             status: response.status(),
-            body: js_sys::Uint8Array::new(&buffer).to_vec(),
+            body,
+            content_type,
         })
     };
     let result = match select(Box::pin(response), timeout_receiver).await {
         Either::Left((result, _)) => result,
         Either::Right((_, _)) => Err(after_dispatch()),
     };
-    window.clear_timeout_with_handle(timeout_id);
-    if result.is_err() {
-        controller.abort();
-    }
-    drop(timeout_callback);
     result
 }
 

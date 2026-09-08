@@ -1,4 +1,4 @@
-import init, { request } from './pkg/browser_transport_regressions.js';
+import init, { request, cancel_request, cancel_batches, network_request } from './pkg/browser_transport_regressions.js';
 
 const results = [];
 window.transportResults = { done: false, results };
@@ -67,18 +67,88 @@ async function fixture(name, hostFetch, post, limit, expected) {
 }
 
 function bufferResponse(length) {
-  const buffer = new ArrayBuffer(0);
+  const buffer = new Uint8Array(0);
   Object.defineProperty(buffer, 'byteLength', { value: length });
   const response = new Response();
-  response.arrayBuffer = () => Promise.resolve(buffer);
+  Object.defineProperty(response, 'body', { value: { getReader() {
+    return { read: () => Promise.resolve({ done: true, value: buffer }), cancel() {}, releaseLock() {} };
+  } } });
   return Promise.resolve(response);
 }
 
 try {
   await init();
+  await fixture('streams body without arrayBuffer allocation', () => {
+    const response = new Response(new Uint8Array([1, 2, 3, 4]));
+    response.arrayBuffer = () => { throw new Error('whole body allocation'); };
+    return Promise.resolve(response);
+  }, false, 4, [200, [1, 2, 3, 4]]);
+  let cancelledSignal;
+  let cancellationTimer;
+  let cancellationClears = 0;
+  window.setTimeout = function(callback, delay, ...args) {
+    const id = originalSetTimeout.call(window, callback, delay, ...args);
+    if (delay === 100) cancellationTimer = id;
+    return id;
+  };
+  window.clearTimeout = function(id) {
+    if (id === cancellationTimer) cancellationClears++;
+    originalClearTimeout.call(window, id);
+  };
+  window.fetch = req => {
+    cancelledSignal = req.signal;
+    return new Promise(() => {});
+  };
+  await cancel_request();
+  results.push({ name: 'dropping Rust receiver aborts actual Fetch', passed: cancelledSignal?.aborted === true });
+  results.push({ name: 'dropping Rust receiver clears its timer exactly once', passed: cancellationClears === 1 });
+  window.fetch = originalFetch;
+  window.setTimeout = originalSetTimeout;
+  window.clearTimeout = originalClearTimeout;
+  let active = 0;
+  let maximum = 0;
+  let dispatched = 0;
+  window.fetch = req => {
+    dispatched++;
+    active++;
+    maximum = Math.max(maximum, active);
+    req.signal.addEventListener('abort', () => active--, { once: true });
+    return new Promise(() => {});
+  };
+  await cancel_batches();
+  results.push({ name: 'three replacing batches never exceed 16 actual live Fetch calls', passed: maximum === 16 && active === 0 && dispatched === 48 });
+  window.fetch = originalFetch;
+  for (const type of [null, 'text/html', 'application/json; charset=utf-8']) {
+    try {
+      const url = new URL('/metadata', location.href);
+      if (type) url.searchParams.set('type', type);
+      const response = await network_request(url.href, 4);
+      assert((response[2] ?? null) === type, `wrong Content-Type ${response[2]}`);
+      results.push({ name: `actual HTTP metadata ${type}`, passed: true });
+    } catch (error) { results.push({ name: `actual HTTP metadata ${type}`, passed: false, error: String(error) }); }
+  }
+  try {
+    let error;
+    try { await network_request(new URL('/stream', location.href).href, 4096); }
+    catch (caught) { error = caught; }
+    assert(error === 'ResponseTooLarge { limit: 4096 }', `unbounded stream result ${error}`);
+    await new Promise(resolve => originalSetTimeout.call(window, resolve, 50));
+    const stats = await (await originalFetch('/stream-stats')).json();
+    assert(stats.closed === 1 && stats.bytes < 32768, `stream was not promptly cancelled: ${JSON.stringify(stats)}`);
+    results.push({ name: 'actual HTTP unbounded body stops and closes connection', passed: true });
+  } catch (error) { results.push({ name: 'actual HTTP unbounded body stops and closes connection', passed: false, error: String(error) }); }
+  try {
+    let error;
+    try { await network_request(new URL('/compressed', location.href).href, 4096); }
+    catch (caught) { error = caught; }
+    assert(error === 'ResponseTooLarge { limit: 4096 }', `compressed body bypassed streaming limit: ${error}`);
+    results.push({ name: 'actual HTTP small encoded Content-Length cannot bypass decoded body bound', passed: true });
+  } catch (error) { results.push({ name: 'actual HTTP small encoded Content-Length cannot bypass decoded body bound', passed: false, error: String(error) }); }
   for (const post of [false, true]) {
     const kind = post ? 'POST' : 'GET';
     const failed = post ? 'Ambiguous' : 'Definite';
+    await fixture(`${kind} misleading small Content-Length`, () => Promise.resolve(new Response(new Uint8Array(32), { headers: { 'Content-Length': '1' } })), post, 4,
+      post ? 'Ambiguous' : 'ResponseTooLarge { limit: 4 }');
     await fixture(`${kind} full byteLength above u32`, () => bufferResponse(4294967296), post, 4,
       post ? 'Ambiguous' : 'ResponseTooLarge { limit: 4 }');
     for (const length of [NaN, Infinity, -1, 0.5, '4']) {

@@ -2,5 +2,6 @@
 
 pub mod client;
 pub mod health;
+pub(crate) mod runtime;
 pub mod transport;
 pub mod url;

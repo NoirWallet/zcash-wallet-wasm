@@ -605,6 +605,7 @@ mod tests {
     #[test]
     fn delegation_status_requires_exact_api_shape() {
         let response = |status, body: &[u8]| OwnedHttpResponse {
+            content_type: None,
             status,
             body: body.to_vec(),
         };
@@ -665,18 +666,22 @@ mod tests {
         );
         for response in [
             OwnedHttpResponse {
+                content_type: None,
                 status: 200,
                 body: br#"{"code":0,"tx_hash":"wrong"}"#.to_vec(),
             },
             OwnedHttpResponse {
+                content_type: None,
                 status: 200,
                 body: br#"{"code":0}"#.to_vec(),
             },
             OwnedHttpResponse {
+                content_type: None,
                 status: 502,
                 body: vec![],
             },
             OwnedHttpResponse {
+                content_type: None,
                 status: 200,
                 body: vec![0; API_LIMIT + 1],
             },

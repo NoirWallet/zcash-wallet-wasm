@@ -22,13 +22,18 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock, Mutex, Weak},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::helper::client::HelperClient;
+use crate::helper::runtime::RuntimeClient;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use crate::{
-    helper::client::{HelperClient, HelperFleetPreflight},
+    helper::client::HelperFleetPreflight,
     round::VotingDb,
     share,
     share_policy::{
@@ -62,12 +67,10 @@ struct ShareOperationLockKey {
     share_index: u32,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 static SHARE_OPERATION_LOCKS: LazyLock<
     Mutex<HashMap<ShareOperationLockKey, Weak<tokio::sync::Mutex<()>>>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn lock_share_operation(
     scope: &share::ShareOperationScope,
     round_id: &str,
@@ -100,13 +103,13 @@ async fn lock_share_operation(
     Ok(lock.lock_owned().await)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn lock_share_operation_or_cancel(
     scope: &share::ShareOperationScope,
     round_id: &str,
     bundle_index: u32,
     proposal_id: u32,
     share_index: u32,
+    client: &impl RuntimeClient,
     cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, VotingError> {
     let lock = lock_share_operation(scope, round_id, bundle_index, proposal_id, share_index);
@@ -119,7 +122,7 @@ async fn lock_share_operation_or_cancel(
         tokio::select! {
             biased;
             result = &mut lock => return result.map(Some),
-            _ = tokio::time::sleep(Duration::from_millis(
+            _ = client.sleep_until(client.now() + Duration::from_millis(
                 SHARE_OPERATION_LOCK_CANCEL_CHECK_MILLISECONDS,
             )) => {}
         }
@@ -380,12 +383,9 @@ pub(crate) fn os_random_bytes(len: usize) -> Vec<u8> {
 }
 
 mod configured_fleet;
-#[cfg(not(target_arch = "wasm32"))]
 mod confirmation;
 mod delivery_plan;
-#[cfg(not(target_arch = "wasm32"))]
 mod initial_delivery;
-#[cfg(not(target_arch = "wasm32"))]
 mod recovery;
 
 pub(crate) use delivery_plan::{load_share_delivery_plan, prepare_share_delivery_plan};
@@ -393,13 +393,10 @@ pub(crate) use delivery_plan::{load_share_delivery_plan, prepare_share_delivery_
 use configured_fleet::ConfiguredHelperFleet;
 #[cfg(test)]
 use confirmation::{finish_expired_polls, poll_share_helpers_with_budget};
-#[cfg(not(target_arch = "wasm32"))]
 use confirmation::{poll_share_helpers, ShareStatusOutcome};
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use initial_delivery::submit_committed_share_to_helpers;
 #[cfg(test)]
 use initial_delivery::submit_share_to_helpers;
-#[cfg(not(target_arch = "wasm32"))]
 use recovery::{
     resubmit_to_next_helper, ResubmissionCandidates, ResubmissionSchedule, ResubmitOutcome,
     ResubmitRequest,
@@ -425,6 +422,25 @@ pub async fn confirm_pending_share(
     db: &VotingDb,
     params: &ShareConfirmationParams<'_>,
     client: &HelperClient,
+    cancel: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<ShareConfirmationReport, VotingError> {
+    confirm_pending_share_core(db, params, client, cancel).await
+}
+
+#[cfg(feature = "browser")]
+pub async fn confirm_pending_share_local(
+    db: &VotingDb,
+    params: &ShareConfirmationParams<'_>,
+    client: &crate::helper::client::local::LocalHelperClient<'_>,
+    cancel: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<ShareConfirmationReport, VotingError> {
+    confirm_pending_share_core(db, params, client, cancel).await
+}
+
+async fn confirm_pending_share_core(
+    db: &VotingDb,
+    params: &ShareConfirmationParams<'_>,
+    client: &impl RuntimeClient,
     cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<ShareConfirmationReport, VotingError> {
     let scope = share::ShareOperationScope::capture(db);
@@ -453,6 +469,7 @@ pub async fn confirm_pending_share(
         params.share.bundle_index,
         params.share.proposal_id,
         params.share.share_index,
+        client,
         cancel,
     )
     .await?
@@ -488,14 +505,13 @@ pub async fn confirm_pending_share(
     .await
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn poll_and_confirm_share(
     db: &VotingDb,
     scope: &share::ShareOperationScope,
     round_id: &str,
     share: &ShareDelegationRecord,
     configured_urls: &[String],
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     now_seconds: u64,
     cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<ShareConfirmationReport, VotingError> {
@@ -534,6 +550,7 @@ async fn poll_and_confirm_share(
                 share.share_index,
                 generation,
             )?;
+            client.checkpoint().await?;
             Ok(ShareConfirmationReport {
                 confirmed,
                 cancelled: false,
@@ -588,11 +605,10 @@ pub async fn track_pending_shares(
     .await
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn track_pending_shares_with_elapsed(
     db: &VotingDb,
     params: &ShareTrackingParams<'_>,
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     cancel: &(dyn Fn() -> bool + Send + Sync),
     elapsed_seconds: &(dyn Fn() -> u64 + Send + Sync),
 ) -> Result<ShareTrackingReport, VotingError> {
@@ -614,6 +630,7 @@ async fn track_pending_shares_with_elapsed(
             loaded_share.bundle_index,
             loaded_share.proposal_id,
             loaded_share.share_index,
+            client,
             cancel,
         )
         .await?
@@ -816,6 +833,22 @@ async fn track_pending_shares_with_elapsed(
         params.policy,
     );
     Ok(report)
+}
+
+/// Runs the same generation-bound tracking pass using caller-local futures.
+#[cfg(feature = "browser")]
+pub async fn track_pending_shares_local(
+    db: &VotingDb,
+    params: &ShareTrackingParams<'_>,
+    client: &crate::helper::client::local::LocalHelperClient<'_>,
+    cancel: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<ShareTrackingReport, VotingError> {
+    let timer = client.timer;
+    let start = timer.now();
+    track_pending_shares_with_elapsed(db, params, client, cancel, &|| {
+        timer.now().saturating_sub(start).as_secs()
+    })
+    .await
 }
 
 fn dedupe_preserving_order(urls: impl Iterator<Item = String>) -> Vec<String> {

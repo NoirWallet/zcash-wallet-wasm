@@ -7,9 +7,9 @@ use std::{
     time::Duration,
 };
 
-use tokio::task::JoinSet;
+use crate::helper::runtime::{join_polls, PollSet, RuntimeClient};
 
-use crate::helper::client::{HelperClient, HelperError, ShareStatus};
+use crate::helper::client::{HelperError, ShareStatus};
 
 use super::{
     SHARE_STATUS_CANCEL_CHECK_MILLISECONDS, SHARE_STATUS_MAX_CONCURRENT_POLLS,
@@ -27,8 +27,8 @@ pub(super) enum ShareStatusOutcome {
     Cancelled,
 }
 
-fn record_completed_poll(
-    joined: Result<(String, Result<ShareStatus, HelperError>), tokio::task::JoinError>,
+fn record_completed_poll<E>(
+    joined: Result<(String, Result<ShareStatus, HelperError>), E>,
     in_flight: &mut HashSet<String>,
     confirmations: &mut usize,
     required_confirmations: usize,
@@ -44,16 +44,16 @@ fn record_completed_poll(
 }
 
 pub(super) async fn finish_expired_polls(
-    polls: &mut JoinSet<(String, Result<ShareStatus, HelperError>)>,
+    polls: &mut impl PollSet,
     in_flight: &mut HashSet<String>,
     confirmations: &mut usize,
     required_confirmations: usize,
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     failure_time: u64,
 ) -> bool {
     polls.abort_all();
     let mut quorum_observed = false;
-    while let Some(joined) = polls.join_next().await {
+    while let Some(joined) = join_polls(polls).await {
         quorum_observed |=
             record_completed_poll(joined, in_flight, confirmations, required_confirmations);
     }
@@ -74,7 +74,7 @@ pub(super) async fn finish_expired_polls(
 /// still in flight at budget expiry are degraded so later passes prefer other
 /// configured endpoints.
 pub(super) async fn poll_share_helpers(
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     round_id: &str,
     share_id: &str,
     server_urls: &[String],
@@ -94,7 +94,7 @@ pub(super) async fn poll_share_helpers(
 }
 
 pub(super) async fn poll_share_helpers_with_budget(
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     round_id: &str,
     share_id: &str,
     server_urls: &[String],
@@ -109,10 +109,10 @@ pub(super) async fn poll_share_helpers_with_budget(
     }
 
     let mut remaining = VecDeque::from(client.health().candidate_servers(server_urls, now_seconds));
-    let mut polls = JoinSet::new();
+    let mut polls = client.new_polls();
     let mut in_flight = HashSet::new();
     let task_cancelled = Arc::new(AtomicBool::new(false));
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(poll_budget_milliseconds);
+    let deadline = client.now() + Duration::from_millis(poll_budget_milliseconds);
     let mut confirmations = 0usize;
 
     loop {
@@ -139,7 +139,7 @@ pub(super) async fn poll_share_helpers_with_budget(
             return ShareStatusOutcome::Cancelled;
         }
 
-        let now = tokio::time::Instant::now();
+        let now = client.now();
         if now >= deadline {
             // Abort first, then drain the set. Tasks that completed before the
             // abort retain their own status and health result; only tasks that
@@ -165,18 +165,18 @@ pub(super) async fn poll_share_helpers_with_budget(
                 break;
             };
             in_flight.insert(server_url.clone());
-            let client = client.clone();
             let round_id = round_id.to_string();
             let share_id = share_id.to_string();
             let task_cancelled = Arc::clone(&task_cancelled);
-            polls.spawn(async move {
-                let outcome = client
-                    .share_status(&server_url, &round_id, &share_id, now_seconds, &|| {
-                        task_cancelled.load(Ordering::Relaxed)
-                    })
-                    .await;
-                (server_url, outcome)
-            });
+            client.start_poll(
+                &mut polls,
+                server_url,
+                round_id,
+                share_id,
+                now_seconds,
+                deadline,
+                task_cancelled,
+            );
         }
 
         if polls.is_empty() {
@@ -187,8 +187,8 @@ pub(super) async fn poll_share_helpers_with_budget(
         let wait_deadline = deadline.min(cancel_check);
         let joined = tokio::select! {
             biased;
-            joined = polls.join_next() => joined,
-            _ = tokio::time::sleep_until(wait_deadline) => continue,
+            joined = join_polls(&mut polls) => joined,
+            _ = client.sleep_until(wait_deadline) => continue,
         };
         let Some(joined) = joined else {
             continue;

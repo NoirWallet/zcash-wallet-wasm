@@ -29,7 +29,11 @@ pub(crate) mod tests {
         }
     }
     fn ok(body: Vec<u8>) -> Result<OwnedHttpResponse, TransportError> {
-        Ok(OwnedHttpResponse { status: 200, body })
+        Ok(OwnedHttpResponse {
+            content_type: None,
+            status: 200,
+            body,
+        })
     }
     fn fixture(replies: Vec<Result<OwnedHttpResponse, TransportError>>) -> Fixture {
         Fixture {
@@ -286,6 +290,7 @@ pub(crate) mod tests {
         for failure in [
             Err(TransportError::Definite),
             Ok(OwnedHttpResponse {
+                content_type: None,
                 status: 503,
                 body: b"secret body".to_vec(),
             }),
@@ -397,6 +402,7 @@ pub(crate) mod tests {
             ok(vec![0; API_LIMIT + 1]),
             ok(b"malformed".to_vec()),
             Ok(OwnedHttpResponse {
+                content_type: None,
                 status: 502,
                 body: vec![],
             }),
@@ -424,6 +430,7 @@ pub(crate) mod tests {
         for response in [
             ok(br#"{"round":null}"#.to_vec()),
             Ok(OwnedHttpResponse {
+                content_type: None,
                 status: 404,
                 body: vec![],
             }),

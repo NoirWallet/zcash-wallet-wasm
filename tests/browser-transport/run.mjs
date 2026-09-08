@@ -2,12 +2,39 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { gzipSync } from 'node:zlib';
 
 const root = new URL('./', import.meta.url);
 const mime = { html: 'text/html', js: 'text/javascript', wasm: 'application/wasm' };
+let streamClosed = 0;
+let streamBytes = 0;
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/compressed') {
+      const body = gzipSync(Buffer.alloc(512 * 1024));
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Content-Length', body.length);
+      res.end(body);
+      return;
+    }
+    if (url.pathname === '/stream') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      const interval = setInterval(() => { streamBytes += 1024; res.write(Buffer.alloc(1024)); }, 10);
+      res.on('close', () => { clearInterval(interval); streamClosed++; });
+      return;
+    }
+    if (url.pathname === '/stream-stats') {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ closed: streamClosed, bytes: streamBytes }));
+      return;
+    }
+    if (url.pathname === '/metadata') {
+      const contentType = url.searchParams.get('type');
+      if (contentType) res.setHeader('Content-Type', contentType);
+      res.end('ok');
+      return;
+    }
     const path = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     const file = new URL(path, root);
     if (!file.href.startsWith(root.href)) throw new Error('invalid path');

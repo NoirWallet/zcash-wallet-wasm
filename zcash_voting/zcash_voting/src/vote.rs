@@ -386,6 +386,30 @@ impl CommittedVote {
         params: crate::share_tracking::ShareDeliverySubmissionParams<'_>,
         cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<crate::share_tracking::ShareBatchDeliveryReport, VotingError> {
+        self.submit_prepared_shares_core(db, client, params, cancel)
+            .await
+    }
+
+    /// Local delivery with awaited browser persistence checkpoints.
+    #[cfg(feature = "browser")]
+    pub async fn submit_prepared_shares_local(
+        &self,
+        db: &VotingDb,
+        client: &crate::helper::client::local::LocalHelperClient<'_>,
+        params: crate::share_tracking::ShareDeliverySubmissionParams<'_>,
+        cancel: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<crate::share_tracking::ShareBatchDeliveryReport, VotingError> {
+        self.submit_prepared_shares_core(db, client, params, cancel)
+            .await
+    }
+
+    async fn submit_prepared_shares_core(
+        &self,
+        db: &VotingDb,
+        client: &impl crate::helper::runtime::RuntimeClient,
+        params: crate::share_tracking::ShareDeliverySubmissionParams<'_>,
+        cancel: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<crate::share_tracking::ShareBatchDeliveryReport, VotingError> {
         use futures_util::{stream, StreamExt as _};
         use std::sync::LazyLock;
         use std::time::Duration;
@@ -443,6 +467,7 @@ impl CommittedVote {
         for (payload, share_plan) in self.commit.share_payloads.iter().zip(&plan.share_plans) {
             payload.to_wire_json(Some(vc_tree_position), share_plan.submit_at)?;
         }
+        client.checkpoint().await?;
 
         let configured = params.configured_server_urls.to_vec();
         let planning_fleet = plan.configured_server_urls.clone();
@@ -477,7 +502,7 @@ impl CommittedVote {
                                     message: "helper-share delivery semaphore closed".to_string(),
                                 })?;
                             }
-                            _ = tokio::time::sleep(Duration::from_millis(
+                            _ = client.sleep_until(client.now() + Duration::from_millis(
                                 DELIVERY_PERMIT_CANCEL_CHECK_MILLISECONDS,
                             )) => {}
                         }
@@ -574,11 +599,10 @@ impl CommittedVote {
         .await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     async fn submit_share_to_helpers_for_generation(
         &self,
         db: &VotingDb,
-        client: &crate::helper::client::HelperClient,
+        client: &impl crate::helper::runtime::RuntimeClient,
         request: crate::share_tracking::CommittedShareSubmissionRequest<'_>,
         expected_commitment_bundle_json: &str,
         scope: &crate::share::ShareOperationScope,
@@ -2020,6 +2044,16 @@ fn synthetic_recovery_fixture(
     choice: u32,
     proposal_authority: u64,
 ) -> Result<VoteRecoveryBundle, VotingError> {
+    use pasta_curves::{
+        group::{ff::PrimeField, Group, GroupEncoding},
+        pallas,
+    };
+    let field = |value: u64| pallas::Base::from(value).to_repr();
+    let point = |value: u64| {
+        (pallas::Point::generator() * pallas::Scalar::from(value))
+            .to_bytes()
+            .to_vec()
+    };
     let wallet_id = db.wallet_id();
     let hotkey = db
         .load_voting_hotkey(round_id)?
@@ -2061,15 +2095,15 @@ fn synthetic_recovery_fixture(
         vote_auth_sig: [0x17; 64],
         encrypted_shares: (0..16)
             .map(|share_index| crate::types::EncryptedShare {
-                c1: vec![0x21; 32],
-                c2: vec![0x22; 32],
+                c1: point(u64::from(share_index) * 2 + 1),
+                c2: point(u64::from(share_index) * 2 + 2),
                 share_index,
                 plaintext_value: 5,
                 randomness: vec![0x23; 32],
             })
             .collect(),
-        share_blinds: vec![[0x41; 32]; 16],
-        share_comms: vec![[0x51; 32]; 16],
+        share_blinds: (0..16).map(|index| field(64 + index)).collect(),
+        share_comms: (0..16).map(|index| field(80 + index)).collect(),
         batch: None,
     })
 }
@@ -5910,6 +5944,7 @@ mod tests {
         );
 
         let accepted = OwnedHttpResponse {
+            content_type: None,
             status: 200,
             body: format!(
                 "{{\"tx_hash\":\"{}\",\"code\":0,\"batch_digest\":\"{}\"}}",
@@ -5936,6 +5971,7 @@ mod tests {
             assert!(matches!(
                 parse_vote_result(
                     OwnedHttpResponse {
+                        content_type: None,
                         status: 200,
                         body: body.into_bytes()
                     },
@@ -5946,6 +5982,7 @@ mod tests {
         }
         assert!(matches!(
             parse_vote_status(OwnedHttpResponse {
+                content_type: None,
                 status: 404,
                 body: br#"{"error":"tx not found"}"#.to_vec()
             }),
@@ -5953,6 +5990,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_vote_status(OwnedHttpResponse {
+                content_type: None,
                 status: 200,
                 body: br#"{"height":"42","code":0,"log":"","events":[]}"#.to_vec()
             }),
@@ -5965,6 +6003,7 @@ mod tests {
             br#"{"height":"42","code":0,"log":"","events":[],"hash":"x"}"#,
         ] {
             assert!(parse_vote_status(OwnedHttpResponse {
+                content_type: None,
                 status: 200,
                 body: body.to_vec()
             })

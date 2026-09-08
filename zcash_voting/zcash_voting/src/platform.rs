@@ -26,6 +26,7 @@ pub struct OwnedHttpRequest {
 pub struct OwnedHttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    pub content_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]

@@ -1,8 +1,9 @@
+use crate::helper::runtime::RuntimeClient;
 use std::collections::HashSet;
 
 use crate::recovery as vote_recovery;
 use crate::{
-    helper::client::{HelperClient, HelperError},
+    helper::client::HelperError,
     round::VotingDb,
     share,
     share_policy::{
@@ -92,7 +93,7 @@ pub(super) async fn resubmit_to_next_helper(
     db: &VotingDb,
     scope: &share::ShareOperationScope,
     params: &ShareTrackingParams<'_>,
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     request: &ResubmitRequest<'_>,
     attempted_urls: &mut Vec<String>,
     cancel: &(dyn Fn() -> bool + Send + Sync),
@@ -316,6 +317,7 @@ pub(super) async fn resubmit_to_next_helper(
                     false
                 }
                 crate::storage::queries::ShareAttemptReservation::StaleGeneration => {
+                    client.checkpoint().await?;
                     return Ok(ResubmitReport {
                         outcome: ResubmitOutcome::StaleGeneration,
                         outcome_unknown_urls: newly_outcome_unknown_urls,
@@ -326,6 +328,7 @@ pub(super) async fn resubmit_to_next_helper(
             match share::is_confirmed_for_generation(db, &attempt, generation)? {
                 Some(confirmed) => !confirmed,
                 None => {
+                    client.checkpoint().await?;
                     return Ok(ResubmitReport {
                         outcome: ResubmitOutcome::StaleGeneration,
                         outcome_unknown_urls: newly_outcome_unknown_urls,
@@ -337,14 +340,29 @@ pub(super) async fn resubmit_to_next_helper(
             continue;
         }
         match client
-            .resubmit_share(
+            .resubmit(
                 &server_url,
                 &recovered_share_wire_json,
                 current_time,
                 cancel,
+                &|| {
+                    matches!(
+                        share::is_confirmed_for_generation(db, &attempt, generation),
+                        Ok(Some(false))
+                    ) && params.vote_end_time_seconds.is_none_or(|end| {
+                        is_share_resubmission_window_open(
+                            params.now_seconds.saturating_add(elapsed_seconds()),
+                            end,
+                            params.policy,
+                        )
+                    })
+                },
             )
             .await
         {
+            Err(HelperError::CheckpointFailed) => {
+                return Err(crate::helper::runtime::checkpoint_error())
+            }
             Ok(_) => {
                 if !share::resolve_delivery_attempt_for_generation(
                     db,
@@ -353,11 +371,13 @@ pub(super) async fn resubmit_to_next_helper(
                     share::ShareDeliveryAttemptOutcome::Accepted,
                     request.schedule.reset_submit_at(),
                 )? {
+                    client.checkpoint().await?;
                     return Ok(ResubmitReport {
                         outcome: ResubmitOutcome::StaleGeneration,
                         outcome_unknown_urls: newly_outcome_unknown_urls,
                     });
                 }
+                client.checkpoint().await?;
                 return Ok(ResubmitReport {
                     outcome: ResubmitOutcome::DefinitelyAcceptedByHelper(server_url),
                     outcome_unknown_urls: newly_outcome_unknown_urls,
@@ -373,11 +393,13 @@ pub(super) async fn resubmit_to_next_helper(
                         request.schedule.reset_submit_at(),
                     )?
                 {
+                    client.checkpoint().await?;
                     return Ok(ResubmitReport {
                         outcome: ResubmitOutcome::StaleGeneration,
                         outcome_unknown_urls: newly_outcome_unknown_urls,
                     });
                 }
+                client.checkpoint().await?;
                 return Ok(ResubmitReport {
                     outcome: ResubmitOutcome::Cancelled,
                     outcome_unknown_urls: newly_outcome_unknown_urls,
@@ -394,6 +416,7 @@ pub(super) async fn resubmit_to_next_helper(
                     share::ShareDeliveryAttemptOutcome::Ambiguous,
                     request.schedule.reset_submit_at(),
                 )? {
+                    client.checkpoint().await?;
                     return Ok(ResubmitReport {
                         outcome: ResubmitOutcome::StaleGeneration,
                         outcome_unknown_urls: newly_outcome_unknown_urls,
@@ -411,6 +434,7 @@ pub(super) async fn resubmit_to_next_helper(
                     share::ShareDeliveryAttemptOutcome::Ambiguous,
                     request.schedule.reset_submit_at(),
                 )? {
+                    client.checkpoint().await?;
                     return Ok(ResubmitReport {
                         outcome: ResubmitOutcome::StaleGeneration,
                         outcome_unknown_urls: newly_outcome_unknown_urls,
@@ -429,6 +453,7 @@ pub(super) async fn resubmit_to_next_helper(
                     share::ShareDeliveryAttemptOutcome::DefiniteFailure,
                     request.schedule.reset_submit_at(),
                 )? {
+                    client.checkpoint().await?;
                     return Ok(ResubmitReport {
                         outcome: ResubmitOutcome::StaleGeneration,
                         outcome_unknown_urls: newly_outcome_unknown_urls,
@@ -436,7 +461,9 @@ pub(super) async fn resubmit_to_next_helper(
                 }
             }
         }
+        client.checkpoint().await?;
     }
+    client.checkpoint().await?;
     Ok(ResubmitReport {
         outcome: ResubmitOutcome::NoDefiniteAcceptanceObserved,
         outcome_unknown_urls: newly_outcome_unknown_urls,

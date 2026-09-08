@@ -1,8 +1,9 @@
 use std::{collections::HashSet, time::Duration};
 
+use crate::helper::runtime::{timeout_at, RuntimeClient};
 use crate::recovery as vote_recovery;
 use crate::{
-    helper::{client::HelperClient, url::canonical_helper_url_list},
+    helper::url::canonical_helper_url_list,
     round::VotingDb,
     share,
     share_policy::{
@@ -43,7 +44,7 @@ use super::{
 #[cfg(test)]
 pub(crate) async fn submit_share_to_helpers(
     db: &VotingDb,
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     params: &InitialShareSubmissionParams<'_>,
     cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<ShareSubmissionReport, VotingError> {
@@ -75,7 +76,7 @@ pub(crate) async fn submit_share_to_helpers(
 async fn submit_share_to_canonical_helpers(
     db: &VotingDb,
     scope: &share::ShareOperationScope,
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     params: &InitialShareSubmissionParams<'_>,
     planned: &[String],
     fallback: &[String],
@@ -176,7 +177,7 @@ fn load_prepared_share_delivery(
 async fn dispatch_share_to_canonical_helpers(
     db: &VotingDb,
     scope: &share::ShareOperationScope,
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     params: &InitialShareSubmissionParams<'_>,
     planned: &[String],
     fallback: &[String],
@@ -191,6 +192,7 @@ async fn dispatch_share_to_canonical_helpers(
         params.bundle_index,
         params.proposal_id,
         params.share_index,
+        client,
         cancel,
     )
     .await?
@@ -215,8 +217,8 @@ async fn dispatch_share_to_canonical_helpers(
             .len()
             .saturating_add(remaining.len()),
     );
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_millis(SHARE_INITIAL_DELIVERY_TIMEOUT_MILLISECONDS);
+    let deadline =
+        client.now() + Duration::from_millis(SHARE_INITIAL_DELIVERY_TIMEOUT_MILLISECONDS);
 
     while !remaining.is_empty() && delivery_state.accepted_urls().len() < definite_acceptance_target
     {
@@ -243,7 +245,7 @@ async fn dispatch_share_to_canonical_helpers(
         };
         remaining.retain(|url| url != &server_url);
 
-        let remaining_time = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining_time = deadline.saturating_duration_since(client.now());
         if remaining_time < Duration::from_millis(SHARE_DELIVERY_MIN_ATTEMPT_BUDGET_MILLISECONDS) {
             // An attempt started with almost no budget is guaranteed to end
             // as an unknown outcome; leave the helper untouched instead.
@@ -268,19 +270,29 @@ async fn dispatch_share_to_canonical_helpers(
             }
         }
 
-        let helper_post_outcome = tokio::time::timeout_at(
+        let helper_post_outcome = timeout_at(
+            client,
             deadline,
-            client.submit_share_with_timeout(
+            client.submit(
                 &server_url,
                 params.share_wire_json,
                 params.now_seconds,
                 cancel,
                 remaining_time,
-                Some(deadline),
+                deadline,
+                &|| {
+                    matches!(
+                        share::is_confirmed_for_generation(db, &attempt, generation),
+                        Ok(Some(false))
+                    )
+                },
             ),
         )
         .await;
         match helper_post_outcome {
+            Ok(Err(crate::helper::client::HelperError::CheckpointFailed)) => {
+                return Err(crate::helper::runtime::checkpoint_error());
+            }
             Err(_) => {
                 // The client returns a held definite error rather than
                 // sleeping a retry backoff into this deadline, so an elapse
@@ -297,6 +309,7 @@ async fn dispatch_share_to_canonical_helpers(
                     return Err(stale_delivery_error(params));
                 }
                 delivery_state.mark_outcome_unknown(&server_url)?;
+                client.checkpoint().await?;
                 break;
             }
             Ok(Ok(_)) => {
@@ -335,6 +348,7 @@ async fn dispatch_share_to_canonical_helpers(
                 }
             }
         }
+        client.checkpoint().await?;
     }
     delivery_state =
         load_current_delivery_state(db, scope, params, &expected_nullifier, &candidates)?;
@@ -412,7 +426,7 @@ fn stale_delivery_error(params: &InitialShareSubmissionParams<'_>) -> VotingErro
 /// durable state or dispatches network requests.
 pub(crate) async fn submit_committed_share_to_helpers(
     db: &VotingDb,
-    client: &HelperClient,
+    client: &impl RuntimeClient,
     round_id: &str,
     bundle_index: u32,
     proposal_id: u32,
