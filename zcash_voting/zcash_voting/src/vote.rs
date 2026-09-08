@@ -851,13 +851,322 @@ impl<'a> AtomicVoteBatch<'a> {
     }
 }
 
-/// Builds and signs an atomic batch without holding SQLite during ZKP #2
-/// computation.
-pub fn prepare_atomic_vote_batch(
+/// Owned atomic ZKP #2 work. It contains no database or host-language handles.
+pub struct AtomicVoteProofJob {
+    wallet_id: String,
+    round_id: String,
+    bundle_index: u32,
+    drafts: Vec<DraftVote>,
+    witness: VanWitness,
+    secret: zeroize::Zeroizing<Vec<u8>>,
+    network: Network,
+    captured: Vec<crate::storage::queries::VotePreparationState>,
+    recovered: Option<Vec<(crate::storage::queries::VoteRowState, VoteRecoveryBundle)>>,
+    legacy_proof_concurrency: usize,
+}
+
+/// Owned singleton ZKP #2 work with no database or host-language handles.
+pub struct VoteProofJob {
+    wallet_id: String,
+    round_id: String,
+    bundle_index: u32,
+    draft: DraftVote,
+    witness: VanWitness,
+    secret: zeroize::Zeroizing<Vec<u8>>,
+    network: Network,
+    captured: crate::storage::queries::VotePreparationState,
+    recovered: Option<(crate::storage::queries::VoteRowState, VoteRecoveryBundle)>,
+}
+
+impl VoteProofJob {
+    pub fn prove(
+        self,
+        stages: &dyn crate::types::VoteCommitStageReporter,
+    ) -> Result<PreparedVoteCommit, VotingError> {
+        if let Some((vote, recovery)) = self.recovered {
+            if !recovery_matches_draft(&recovery, &self.draft) || recovery.batch.is_some() {
+                return Err(VotingError::InvalidInput {
+                    message: "persisted singleton vote recovery does not match draft".into(),
+                });
+            }
+            return Ok(PreparedVoteCommit {
+                wallet_id: self.wallet_id,
+                round_id: self.round_id,
+                bundle_index: self.bundle_index,
+                draft: self.draft,
+                commit: commit_from_recovery(&recovery)?,
+                recovery,
+                captured_state: CapturedVoteState::Recovered(vote),
+            });
+        }
+        stages.on_stage(VoteCommitStage::ProofStarting {
+            proposal_id: self.draft.proposal_id,
+            bundle_index: self.bundle_index,
+        });
+        let progress = VoteProofProgressReporter {
+            proposal_id: self.draft.proposal_id,
+            bundle_index: self.bundle_index,
+            stages,
+        };
+        let round_bytes = hex::decode(&self.round_id).map_err(|_| VotingError::InvalidInput {
+            message: "vote round id is not canonical hex".into(),
+        })?;
+        let bundle = crate::zkp2::build_vote_commitment(
+            &self.secret,
+            self.network,
+            self.captured.zkp2.address_index,
+            self.captured.zkp2.total_note_value,
+            &self.captured.zkp2.gov_comm_rand,
+            &round_bytes,
+            &self.captured.zkp2.ea_pk,
+            self.draft.proposal_id,
+            self.draft.choice,
+            self.draft.num_options,
+            &self.witness.auth_path_fixed()?,
+            self.witness.position,
+            self.witness.anchor_height,
+            self.captured.zkp2.proposal_authority,
+            self.draft.single_share,
+            &progress,
+        )?;
+        let wire_shares = bundle
+            .enc_shares
+            .iter()
+            .map(WireEncryptedShare::from)
+            .collect::<Vec<_>>();
+        stages.on_stage(VoteCommitStage::SharePayloadsBuilding {
+            proposal_id: self.draft.proposal_id,
+            bundle_index: self.bundle_index,
+        });
+        let share_payloads = crate::vote_commitment::build_share_payloads(
+            &wire_shares,
+            &bundle,
+            self.draft.choice,
+            self.draft.num_options,
+            self.draft.vc_tree_position,
+            self.draft.single_share,
+        )?;
+        stages.on_stage(VoteCommitStage::Signing {
+            proposal_id: self.draft.proposal_id,
+            bundle_index: self.bundle_index,
+        });
+        let signature = crate::vote_commitment::sign_cast_vote(
+            &self.secret,
+            self.network,
+            &bundle.vote_round_id,
+            &bundle.r_vpk_bytes,
+            &bundle.van_nullifier,
+            &bundle.vote_authority_note_new,
+            &bundle.vote_commitment,
+            bundle.proposal_id,
+            bundle.anchor_height,
+            &bundle.alpha_v,
+        )?;
+        let recovery = VoteRecoveryBundle::from_parts(
+            self.bundle_index,
+            &self.draft,
+            bundle,
+            array64("vote_auth_sig", signature.vote_auth_sig)?,
+        )?;
+        let commit = commit_from_recovery(&recovery)?;
+        Ok(PreparedVoteCommit {
+            wallet_id: self.wallet_id,
+            round_id: self.round_id,
+            bundle_index: self.bundle_index,
+            draft: self.draft,
+            recovery,
+            commit: VoteCommit {
+                encrypted_shares: wire_shares,
+                share_payloads,
+                ..commit
+            },
+            captured_state: CapturedVoteState::Fresh(self.captured),
+        })
+    }
+}
+
+impl AtomicVoteProofJob {
+    /// Runs only owned cryptographic and serialization work.
+    pub fn prove(
+        self,
+        stages: &dyn crate::types::VoteCommitStageReporter,
+    ) -> Result<PreparedAtomicVoteBatch, VotingError> {
+        self.prove_with(stages, false)
+    }
+
+    fn prove_with(
+        self,
+        stages: &dyn crate::types::VoteCommitStageReporter,
+        legacy_parallelism: bool,
+    ) -> Result<PreparedAtomicVoteBatch, VotingError> {
+        if let Some(recovered) = self.recovered {
+            return prepare_recovered_vote_batch(
+                &self.wallet_id,
+                &self.round_id,
+                self.bundle_index,
+                &self.drafts,
+                recovered,
+            );
+        }
+        let round_id_bytes =
+            hex::decode(&self.round_id).map_err(|_| VotingError::InvalidInput {
+                message: "vote round id is not canonical hex".into(),
+            })?;
+        let mut authority = self.captured[0].zkp2.proposal_authority;
+        let mut proof_plans = Vec::with_capacity(self.drafts.len());
+        for (index, (draft, state)) in self.drafts.iter().zip(&self.captured).enumerate() {
+            let transition = crate::zkp2::plan_vote_authority_transition(
+                &self.secret,
+                self.network,
+                state.zkp2.address_index,
+                state.zkp2.total_note_value,
+                &state.zkp2.gov_comm_rand,
+                &round_id_bytes,
+                draft.proposal_id,
+                authority,
+            )?;
+            authority = transition.proposal_authority_new;
+            let (auth_path, position) = if index == 0 {
+                (self.witness.auth_path_fixed()?, self.witness.position)
+            } else {
+                (
+                    single_leaf_auth_path(transition.vote_authority_note_old)?,
+                    0,
+                )
+            };
+            proof_plans.push(BatchProofPlan {
+                draft: draft.clone(),
+                state: state.clone(),
+                auth_path,
+                position,
+                proposal_authority: transition.proposal_authority_old,
+                expected_new_van: transition.vote_authority_note_new,
+            });
+        }
+        let bundles = if legacy_parallelism {
+            build_batch_proofs(
+                &self.secret,
+                self.bundle_index,
+                self.witness.anchor_height,
+                &round_id_bytes,
+                stages,
+                self.legacy_proof_concurrency,
+                &proof_plans,
+            )?
+        } else {
+            build_batch_proofs_owned(
+                &self.secret,
+                self.bundle_index,
+                self.witness.anchor_height,
+                &round_id_bytes,
+                stages,
+                &proof_plans,
+            )?
+        };
+        finish_atomic_vote_proof(
+            self.wallet_id,
+            self.round_id,
+            self.bundle_index,
+            self.witness.anchor_height,
+            self.network,
+            &self.secret,
+            proof_plans,
+            bundles,
+            stages,
+        )
+    }
+}
+
+impl VotingDb {
+    pub fn vote_proof_job(
+        &self,
+        signer: VoteSigner<'_>,
+        round_id: &str,
+        bundle_index: u32,
+        draft: &DraftVote,
+        witness: &VanWitness,
+    ) -> Result<VoteProofJob, VotingError> {
+        validate_draft_vote(draft)?;
+        let bundle_count = self.get_bundle_count(round_id)?;
+        crate::round::validate_bundle_index(bundle_count, bundle_index, "voting")?;
+        let (secret, network) = signer_secret_and_network(signer);
+        self.require_round_network(round_id, network, "vote signer")?;
+        let wallet_id = self.wallet_id();
+        let (captured, recovered) = {
+            let conn = self.conn();
+            let recovery = recovery_bundle_with_conn(
+                &conn,
+                &wallet_id,
+                round_id,
+                bundle_index,
+                draft.proposal_id,
+            )?;
+            let state = crate::storage::queries::load_vote_preparation_state(
+                &conn,
+                round_id,
+                &wallet_id,
+                bundle_index,
+                draft.proposal_id,
+            )?;
+            let recovered = if let Some(recovery) = recovery {
+                Some((
+                    crate::storage::queries::load_vote_row_state(
+                        &conn,
+                        round_id,
+                        &wallet_id,
+                        bundle_index,
+                        draft.proposal_id,
+                    )?
+                    .ok_or_else(|| {
+                        vote_not_found_error(round_id, bundle_index, draft.proposal_id)
+                    })?,
+                    recovery,
+                ))
+            } else {
+                None
+            };
+            (state, recovered)
+        };
+        if recovered.is_none() {
+            self.require_capability_delegations_confirmed(round_id)?;
+            ensure_vote_rebuild_allowed(self, round_id, bundle_index, draft.proposal_id)?;
+            validate_captured_batch_state(
+                round_id,
+                bundle_index,
+                std::slice::from_ref(draft),
+                witness,
+                network,
+                std::slice::from_ref(&captured),
+            )?;
+        }
+        Ok(VoteProofJob {
+            wallet_id,
+            round_id: round_id.into(),
+            bundle_index,
+            draft: draft.clone(),
+            witness: witness.clone(),
+            secret: zeroize::Zeroizing::new(secret.to_vec()),
+            network,
+            captured,
+            recovered,
+        })
+    }
+
+    /// Captures a complete atomic proof job while SQLite remains on its owner thread.
+    pub fn atomic_vote_proof_job(
+        &self,
+        signer: VoteSigner<'_>,
+        batch: AtomicVoteBatch<'_>,
+    ) -> Result<AtomicVoteProofJob, VotingError> {
+        capture_atomic_vote_proof_job(self, signer, batch)
+    }
+}
+
+fn capture_atomic_vote_proof_job(
     db: &VotingDb,
     signer: VoteSigner<'_>,
     batch: AtomicVoteBatch<'_>,
-) -> Result<PreparedAtomicVoteBatch, VotingError> {
+) -> Result<AtomicVoteProofJob, VotingError> {
     validate_atomic_vote_batch(batch.drafts)?;
     let bundle_count = db.get_bundle_count(batch.round_id)?;
     crate::round::validate_bundle_index(bundle_count, batch.bundle_index, "voting")?;
@@ -948,79 +1257,45 @@ pub fn prepare_atomic_vote_batch(
         (captured, recovered)
     };
 
-    if let Some(recovered) = recovered {
-        return prepare_recovered_vote_batch(
-            &wallet_id,
+    if recovered.is_none() {
+        db.require_capability_delegations_confirmed(batch.round_id)?;
+        for draft in batch.drafts {
+            ensure_vote_rebuild_allowed(db, batch.round_id, batch.bundle_index, draft.proposal_id)?;
+        }
+        validate_captured_batch_state(
             batch.round_id,
             batch.bundle_index,
             batch.drafts,
-            recovered,
-        );
-    }
-
-    db.require_capability_delegations_confirmed(batch.round_id)?;
-    for draft in batch.drafts {
-        ensure_vote_rebuild_allowed(db, batch.round_id, batch.bundle_index, draft.proposal_id)?;
-    }
-    validate_captured_batch_state(
-        batch.round_id,
-        batch.bundle_index,
-        batch.drafts,
-        batch.witness,
-        network,
-        &captured,
-    )?;
-
-    let first_state = &captured[0];
-    let round_id_bytes =
-        hex::decode(&first_state.zkp2.voting_round_id).map_err(|e| VotingError::Internal {
-            message: format!(
-                "invalid voting_round_id hex '{}': {e}",
-                first_state.zkp2.voting_round_id
-            ),
-        })?;
-    let mut authority = first_state.zkp2.proposal_authority;
-    let mut proof_plans = Vec::with_capacity(batch.drafts.len());
-    for (index, (draft, state)) in batch.drafts.iter().zip(captured.iter()).enumerate() {
-        let transition = crate::zkp2::plan_vote_authority_transition(
-            secret,
+            batch.witness,
             network,
-            state.zkp2.address_index,
-            state.zkp2.total_note_value,
-            &state.zkp2.gov_comm_rand,
-            &round_id_bytes,
-            draft.proposal_id,
-            authority,
+            &captured,
         )?;
-        authority = transition.proposal_authority_new;
-        let (auth_path, position) = if index == 0 {
-            (batch.witness.auth_path_fixed()?, batch.witness.position)
-        } else {
-            (
-                single_leaf_auth_path(transition.vote_authority_note_old)?,
-                0,
-            )
-        };
-        proof_plans.push(BatchProofPlan {
-            draft: draft.clone(),
-            state: state.clone(),
-            auth_path,
-            position,
-            proposal_authority: transition.proposal_authority_old,
-            expected_new_van: transition.vote_authority_note_new,
-        });
     }
+    Ok(AtomicVoteProofJob {
+        wallet_id,
+        round_id: batch.round_id.to_string(),
+        bundle_index: batch.bundle_index,
+        drafts: batch.drafts.to_vec(),
+        witness: batch.witness.clone(),
+        secret: zeroize::Zeroizing::new(secret.to_vec()),
+        network,
+        captured,
+        recovered,
+        legacy_proof_concurrency: batch.max_proof_concurrency.min(MAX_VOTE_BATCH_ACTIONS),
+    })
+}
 
-    let bundles = build_batch_proofs(
-        secret,
-        batch.bundle_index,
-        batch.witness.anchor_height,
-        &round_id_bytes,
-        batch.stages,
-        batch.max_proof_concurrency.min(MAX_VOTE_BATCH_ACTIONS),
-        &proof_plans,
-    )?;
-
+fn finish_atomic_vote_proof(
+    wallet_id: String,
+    round_id: String,
+    bundle_index: u32,
+    anchor_height: u32,
+    network: Network,
+    secret: &[u8],
+    proof_plans: Vec<BatchProofPlan>,
+    bundles: Vec<VoteCommitmentBundle>,
+    stages: &dyn crate::types::VoteCommitStageReporter,
+) -> Result<PreparedAtomicVoteBatch, VotingError> {
     let sighash_actions = bundles
         .iter()
         .map(
@@ -1034,28 +1309,26 @@ pub fn prepare_atomic_vote_batch(
         )
         .collect::<Vec<_>>();
     let batch_digest = crate::vote_commitment::cast_vote_batch_sighash(
-        batch.round_id,
-        batch.witness.anchor_height as u64,
+        &round_id,
+        anchor_height as u64,
         &sighash_actions,
     )?;
 
-    let batch_size = u32::try_from(batch.drafts.len()).map_err(|_| VotingError::Internal {
+    let batch_size = u32::try_from(proof_plans.len()).map_err(|_| VotingError::Internal {
         message: "vote batch length does not fit in u32".to_string(),
     })?;
-    let mut commitments = Vec::with_capacity(batch.drafts.len());
+    let mut commitments = Vec::with_capacity(proof_plans.len());
     for (index, (plan, bundle)) in proof_plans.into_iter().zip(bundles).enumerate() {
         let wire_shares = bundle
             .enc_shares
             .iter()
             .map(WireEncryptedShare::from)
             .collect::<Vec<_>>();
-        batch
-            .stages
-            .on_stage(VoteCommitStage::SharePayloadsBuilding {
-                proposal_id: plan.draft.proposal_id,
-                bundle_index: batch.bundle_index,
-            });
-        let share_payloads = db.build_share_payloads(
+        stages.on_stage(VoteCommitStage::SharePayloadsBuilding {
+            proposal_id: plan.draft.proposal_id,
+            bundle_index,
+        });
+        let share_payloads = crate::vote_commitment::build_share_payloads(
             &wire_shares,
             &bundle,
             plan.draft.choice,
@@ -1063,9 +1336,9 @@ pub fn prepare_atomic_vote_batch(
             plan.draft.vc_tree_position,
             plan.draft.single_share,
         )?;
-        batch.stages.on_stage(VoteCommitStage::Signing {
+        stages.on_stage(VoteCommitStage::Signing {
             proposal_id: plan.draft.proposal_id,
-            bundle_index: batch.bundle_index,
+            bundle_index,
         });
         let signature = crate::vote_commitment::sign_cast_vote_digest(
             secret,
@@ -1075,7 +1348,7 @@ pub fn prepare_atomic_vote_batch(
         )?;
         let vote_auth_sig = array64("vote_auth_sig", signature.vote_auth_sig)?;
         let mut recovery =
-            VoteRecoveryBundle::from_parts(batch.bundle_index, &plan.draft, bundle, vote_auth_sig)?;
+            VoteRecoveryBundle::from_parts(bundle_index, &plan.draft, bundle, vote_auth_sig)?;
         recovery.batch = Some(VoteBatchRecovery {
             digest: batch_digest,
             index: index as u32,
@@ -1084,8 +1357,8 @@ pub fn prepare_atomic_vote_batch(
         let commit = commit_from_recovery(&recovery)?;
         commitments.push(PreparedVoteCommit {
             wallet_id: wallet_id.clone(),
-            round_id: batch.round_id.to_string(),
-            bundle_index: batch.bundle_index,
+            round_id: round_id.clone(),
+            bundle_index,
             draft: plan.draft,
             recovery,
             commit: VoteCommit {
@@ -1100,12 +1373,55 @@ pub fn prepare_atomic_vote_batch(
     let batch_json = canonical_batch_json(&commitments)?;
     Ok(PreparedAtomicVoteBatch {
         wallet_id,
-        round_id: batch.round_id.to_string(),
-        bundle_index: batch.bundle_index,
+        round_id,
+        bundle_index,
         commitments,
         batch_digest,
         batch_json,
     })
+}
+
+fn build_batch_proofs_owned(
+    hotkey_seed: &[u8],
+    bundle_index: u32,
+    anchor_height: u32,
+    round_id_bytes: &[u8],
+    stages: &dyn crate::types::VoteCommitStageReporter,
+    plans: &[BatchProofPlan],
+) -> Result<Vec<VoteCommitmentBundle>, VotingError> {
+    plans.iter().map(|plan| {
+        stages.on_stage(VoteCommitStage::ProofStarting {
+            proposal_id: plan.draft.proposal_id, bundle_index,
+        });
+        let progress = VoteProofProgressReporter {
+            proposal_id: plan.draft.proposal_id, bundle_index, stages,
+        };
+        let bundle = crate::zkp2::build_vote_commitment(
+            hotkey_seed, plan.state.network, plan.state.zkp2.address_index,
+            plan.state.zkp2.total_note_value, &plan.state.zkp2.gov_comm_rand,
+            round_id_bytes, &plan.state.zkp2.ea_pk, plan.draft.proposal_id,
+            plan.draft.choice, plan.draft.num_options, &plan.auth_path, plan.position,
+            anchor_height, plan.proposal_authority, plan.draft.single_share, &progress,
+        )?;
+        if bundle.vote_authority_note_new != plan.expected_new_van {
+            return Err(VotingError::Internal {
+                message: format!("proof output disagrees with preplanned authority transition for proposal {}", plan.draft.proposal_id),
+            });
+        }
+        Ok(bundle)
+    }).collect()
+}
+
+/// Legacy synchronous wrapper. Browser orchestration captures the job and sends
+/// it through `ProofExecutor` instead.
+pub fn prepare_atomic_vote_batch(
+    db: &VotingDb,
+    signer: VoteSigner<'_>,
+    batch: AtomicVoteBatch<'_>,
+) -> Result<PreparedAtomicVoteBatch, VotingError> {
+    let stages = batch.stages;
+    db.atomic_vote_proof_job(signer, batch)?
+        .prove_with(stages, true)
 }
 
 /// Atomically persists the complete batch after revalidating every captured row.
@@ -5333,6 +5649,497 @@ mod tests {
         let err = record_vc_position(&db, ROUND_ID, 0, 99, 321).unwrap_err();
 
         assert!(matches!(err, VotingError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn canonical_singleton_vote_matches_independent_valar_golden() {
+        let submission = VoteSubmission {
+            vote_round_id: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+                .to_string(),
+            proposal_id: 7,
+            van_nullifier: [1; 32],
+            vote_authority_note_new: [2; 32],
+            vote_commitment: [3; 32],
+            proof: vec![4; 96],
+            r_vpk: [5; 32],
+            vote_auth_sig: [6; 64],
+            anchor_height: 77,
+        };
+
+        let canonical =
+            crate::vote_submission::CanonicalVoteSubmission::from_singleton(&submission).unwrap();
+        assert_eq!(
+            std::str::from_utf8(canonical.json_bytes()).unwrap(),
+            concat!(
+                "{\"van_nullifier\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\",",
+                "\"vote_authority_note_new\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\",",
+                "\"vote_commitment\":\"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\",",
+                "\"proposal_id\":7,",
+                "\"proof\":\"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",",
+                "\"vote_round_id\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",",
+                "\"vote_comm_tree_anchor_height\":77,",
+                "\"r_vpk\":\"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=\",",
+                "\"vote_auth_sig\":\"BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBg==\"}"
+            )
+        );
+        assert_eq!(
+            canonical.tx_hash(),
+            "963E07E00036D29E71394938BDA6CB0AE508FB23AF953BAE103857A9A338EE43"
+        );
+        assert_eq!(canonical.anchor_proposal_id(), 7);
+        assert!(!canonical.is_batch());
+    }
+
+    #[test]
+    fn canonical_atomic_vote_batch_matches_independent_valar_golden() {
+        let db = db_with_vote();
+        let batch =
+            persist_prepared_atomic_vote_batch(&db, prepared_atomic_vote_batch_fixture(&db))
+                .unwrap();
+        let expected_json = batch.batch_json.clone();
+
+        let canonical =
+            crate::vote_submission::CanonicalVoteSubmission::from_batch(&batch).unwrap();
+
+        assert_eq!(canonical.json_bytes(), expected_json.as_bytes());
+        assert_eq!(
+            canonical.tx_hash(),
+            "BF748E5F656E3967252AE5951C08C7CF1B109ED67C1683064014E85E7F786BAC"
+        );
+        assert_eq!(canonical.anchor_proposal_id(), 1);
+        assert_eq!(canonical.proposal_ids(), &[1, 2]);
+        assert!(canonical.is_batch());
+    }
+
+    #[test]
+    fn vote_submission_journal_preserves_canonical_batch_and_marks_every_member() {
+        use crate::vote_submission::VoteSubmissionOutcome;
+
+        let db = db_with_vote();
+        db.set_ballot_intent(ROUND_ID, 1, crate::session::Decision::Choice(0), 2)
+            .unwrap();
+        db.set_ballot_intent(ROUND_ID, 2, crate::session::Decision::Choice(1), 2)
+            .unwrap();
+        let batch =
+            persist_prepared_atomic_vote_batch(&db, prepared_atomic_vote_batch_fixture(&db))
+                .unwrap();
+        let canonical =
+            crate::vote_submission::CanonicalVoteSubmission::from_batch(&batch).unwrap();
+
+        db.prepare_vote_submission(ROUND_ID, 0, &canonical).unwrap();
+        db.prepare_vote_submission(ROUND_ID, 0, &canonical).unwrap();
+        let prepared = db.vote_submission(ROUND_ID, 0, 1).unwrap().unwrap();
+        assert_eq!(prepared.canonical.json_bytes(), batch.batch_json.as_bytes());
+        assert_eq!(prepared.outcome, VoteSubmissionOutcome::Prepared);
+        assert!(db.get_vote_tx_hash(ROUND_ID, 0, 1).unwrap().is_none());
+        assert!(db.get_vote_tx_hash(ROUND_ID, 0, 2).unwrap().is_none());
+
+        db.mark_vote_dispatching(ROUND_ID, 0, 1).unwrap();
+        let dispatching = db.vote_submission(ROUND_ID, 0, 1).unwrap().unwrap();
+        assert_eq!(dispatching.outcome, VoteSubmissionOutcome::Dispatching);
+        assert_eq!(
+            dispatching.canonical.json_bytes(),
+            batch.batch_json.as_bytes()
+        );
+        for proposal_id in [1, 2] {
+            assert_eq!(
+                db.get_vote_tx_hash(ROUND_ID, 0, proposal_id)
+                    .unwrap()
+                    .as_deref(),
+                Some(canonical.tx_hash())
+            );
+        }
+
+        db.record_vote_outcome(ROUND_ID, 0, 1, VoteSubmissionOutcome::Ambiguous)
+            .unwrap();
+        let ambiguous = db.vote_submission(ROUND_ID, 0, 1).unwrap().unwrap();
+        assert_eq!(ambiguous.outcome, VoteSubmissionOutcome::Ambiguous);
+        assert_eq!(ambiguous.canonical.tx_hash(), canonical.tx_hash());
+        assert_eq!(ambiguous.canonical.json_bytes(), canonical.json_bytes());
+    }
+
+    #[test]
+    fn vote_rest_contract_binds_canonical_identity_and_exact_status_shape() {
+        use crate::{
+            platform::{OwnedHttpResponse, RequestKind, TransportError},
+            vote_submission::{
+                parse_vote_result, parse_vote_status, vote_request, vote_status_request, VoteStatus,
+            },
+        };
+        let db = db_with_vote();
+        db.set_ballot_intent(ROUND_ID, 1, crate::session::Decision::Choice(0), 2)
+            .unwrap();
+        db.set_ballot_intent(ROUND_ID, 2, crate::session::Decision::Choice(1), 2)
+            .unwrap();
+        let batch =
+            persist_prepared_atomic_vote_batch(&db, prepared_atomic_vote_batch_fixture(&db))
+                .unwrap();
+        let canonical =
+            crate::vote_submission::CanonicalVoteSubmission::from_batch(&batch).unwrap();
+        let request = vote_request("https://vote.example/mount/", &canonical);
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.kind, RequestKind::NonIdempotent);
+        assert_eq!(
+            request.url,
+            "https://vote.example/mount/shielded-vote/v1/cast-vote-batch"
+        );
+        assert_eq!(request.body, canonical.json_bytes());
+        assert_eq!(
+            vote_status_request("https://vote.example/mount/", &canonical).url,
+            format!(
+                "https://vote.example/mount/shielded-vote/v1/tx/{}",
+                canonical.tx_hash()
+            )
+        );
+
+        let accepted = OwnedHttpResponse {
+            status: 200,
+            body: format!(
+                "{{\"tx_hash\":\"{}\",\"code\":0,\"batch_digest\":\"{}\"}}",
+                canonical.tx_hash(),
+                hex::encode(batch.batch_digest)
+            )
+            .into_bytes(),
+        };
+        assert_eq!(
+            parse_vote_result(accepted, &canonical).unwrap(),
+            crate::vote_submission::VoteSubmissionOutcome::Accepted
+        );
+        for body in [
+            format!(
+                "{{\"tx_hash\":\"wrong\",\"code\":0,\"batch_digest\":\"{}\"}}",
+                hex::encode(batch.batch_digest)
+            ),
+            format!("{{\"tx_hash\":\"{}\",\"code\":0}}", canonical.tx_hash()),
+            format!(
+                "{{\"tx_hash\":\"{}\",\"code\":0,\"batch_digest\":\"00\"}}",
+                canonical.tx_hash()
+            ),
+        ] {
+            assert!(matches!(
+                parse_vote_result(
+                    OwnedHttpResponse {
+                        status: 200,
+                        body: body.into_bytes()
+                    },
+                    &canonical
+                ),
+                Err(TransportError::Ambiguous)
+            ));
+        }
+        assert!(matches!(
+            parse_vote_status(OwnedHttpResponse {
+                status: 404,
+                body: br#"{"error":"tx not found"}"#.to_vec()
+            }),
+            Ok(VoteStatus::Pending)
+        ));
+        assert!(matches!(
+            parse_vote_status(OwnedHttpResponse {
+                status: 200,
+                body: br#"{"height":"42","code":0,"log":"","events":[]}"#.to_vec()
+            }),
+            Ok(VoteStatus::Confirmed(_))
+        ));
+        for body in [
+            br#"{"height":"042","code":0,"log":"","events":[]}"#.as_slice(),
+            br#"{"height":"42 ","code":0,"log":"","events":[]}"#,
+            br#"{"height":"42","code":0,"events":[]}"#,
+            br#"{"height":"42","code":0,"log":"","events":[],"hash":"x"}"#,
+        ] {
+            assert!(parse_vote_status(OwnedHttpResponse {
+                status: 200,
+                body: body.to_vec()
+            })
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn strict_batch_confirmation_rejects_aliases_duplicates_and_wrong_membership() {
+        use crate::confirmation::{TxEvent, TxEventAttribute};
+        let db = db_with_vote();
+        db.set_ballot_intent(ROUND_ID, 1, crate::session::Decision::Choice(0), 2)
+            .unwrap();
+        db.set_ballot_intent(ROUND_ID, 2, crate::session::Decision::Choice(1), 2)
+            .unwrap();
+        let batch =
+            persist_prepared_atomic_vote_batch(&db, prepared_atomic_vote_batch_fixture(&db))
+                .unwrap();
+        let canonical =
+            crate::vote_submission::CanonicalVoteSubmission::from_batch(&batch).unwrap();
+        db.prepare_vote_submission(ROUND_ID, 0, &canonical).unwrap();
+        db.mark_vote_dispatching(ROUND_ID, 0, 1).unwrap();
+        db.record_vote_outcome(
+            ROUND_ID,
+            0,
+            1,
+            crate::vote_submission::VoteSubmissionOutcome::Accepted,
+        )
+        .unwrap();
+        let event = |overrides: &[(&str, &str)]| {
+            let values = [
+                ("vote_round_id", ROUND_ID.to_string()),
+                ("batch_digest", hex::encode(batch.batch_digest)),
+                ("batch_size", "2".into()),
+                ("final_van_leaf_index", "40".into()),
+                ("vote_commitment_leaf_indices", "41,42".into()),
+                ("proposal_ids", "1,2".into()),
+                (
+                    "van_nullifiers",
+                    batch
+                        .commitments
+                        .iter()
+                        .map(|v| hex::encode(v.van_nullifier))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+            ];
+            TxEvent {
+                event_type: "cast_vote_batch".into(),
+                attributes: values
+                    .into_iter()
+                    .map(|(key, mut value)| {
+                        if let Some((_, replacement)) =
+                            overrides.iter().find(|(candidate, _)| *candidate == key)
+                        {
+                            value = (*replacement).into();
+                        }
+                        TxEventAttribute {
+                            key: key.into(),
+                            value,
+                        }
+                    })
+                    .collect(),
+            }
+        };
+        for bad in [
+            event(&[("proposal_ids", "2,1")]),
+            event(&[("batch_size", "02")]),
+            event(&[("final_van_leaf_index", "40 ")]),
+            event(&[(
+                "vote_round_id",
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            )]),
+        ] {
+            assert!(db
+                .confirm_journaled_vote(ROUND_ID, 0, 1, canonical.tx_hash(), &[bad])
+                .is_err());
+        }
+        let mut alias = event(&[]);
+        alias.attributes[0].key = "round_id".into();
+        assert!(db
+            .confirm_journaled_vote(ROUND_ID, 0, 1, canonical.tx_hash(), &[alias])
+            .is_err());
+        let mut duplicate = event(&[]);
+        duplicate.attributes.push(duplicate.attributes[0].clone());
+        assert!(db
+            .confirm_journaled_vote(ROUND_ID, 0, 1, canonical.tx_hash(), &[duplicate])
+            .is_err());
+
+        db.confirm_journaled_vote(ROUND_ID, 0, 1, canonical.tx_hash(), &[event(&[])])
+            .unwrap();
+        let attempt = db.vote_submission(ROUND_ID, 0, 1).unwrap().unwrap();
+        assert_eq!(
+            attempt.outcome,
+            crate::vote_submission::VoteSubmissionOutcome::Accepted
+        );
+        assert_eq!(db.load_van_position(ROUND_ID, 0).unwrap(), 40);
+        let vc_position = |proposal_id| {
+            db.conn().query_row(
+            "SELECT vc_tree_position FROM votes WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=0 AND proposal_id=?3",
+            rusqlite::params![ROUND_ID, WALLET_ID, proposal_id], |row| row.get::<_, Option<u64>>(0)).unwrap()
+        };
+        assert_eq!(vc_position(1), Some(41));
+        assert_eq!(vc_position(2), Some(42));
+    }
+
+    #[test]
+    fn vote_history_rejects_a_missing_middle_authority_transition() {
+        use crate::confirmation::{TxEvent, TxEventAttribute};
+        let db = db_with_vote();
+        configure_prepared_vote_fixture_bundle(&db);
+        let hotkey = db.ensure_voting_hotkey(ROUND_ID).unwrap();
+        let zkp2 = queries::load_zkp2_inputs(&db.conn(), ROUND_ID, WALLET_ID, 0).unwrap();
+        let round_bytes = hex::decode(ROUND_ID).unwrap();
+        let mut authority = 65_535u64;
+        let mut recoveries = Vec::new();
+        for proposal_id in 1..=3 {
+            let transition = crate::zkp2::plan_vote_authority_transition(
+                hotkey.stored_secret(),
+                Network::Testnet,
+                zkp2.address_index,
+                zkp2.total_note_value,
+                &zkp2.gov_comm_rand,
+                &round_bytes,
+                proposal_id,
+                authority,
+            )
+            .unwrap();
+            if proposal_id == 1 {
+                db.conn().execute(
+                    "UPDATE bundles SET gov_comm=?1,delegation_tx_hash='delegation' WHERE round_id=?2 AND wallet_id=?3 AND bundle_index=0",
+                    rusqlite::params![transition.vote_authority_note_old.to_vec(), ROUND_ID, WALLET_ID],
+                ).unwrap();
+                db.conn().execute(
+                    "INSERT INTO delegation_attempts(round_id,wallet_id,bundle_index,canonical_json,tx_hash,outcome,confirmation_tx_hash,confirmation_van_position)
+                     VALUES(?1,?2,0,x'00','delegation','accepted','delegation',7)",
+                    rusqlite::params![ROUND_ID, WALLET_ID],
+                ).unwrap();
+            }
+            authority = transition.proposal_authority_new;
+            let mut recovery = recovery_bundle_fixture();
+            recovery.proposal_id = proposal_id;
+            recovery.vote_decision = 0;
+            recovery.num_options = 2;
+            recovery.vote_authority_note_new = transition.vote_authority_note_new;
+            recovery.van_nullifier[0] = proposal_id as u8;
+            recovery.vote_commitment[0] = proposal_id as u8;
+            recoveries.push(recovery);
+        }
+        for (index, recovery) in recoveries.into_iter().enumerate() {
+            let proposal_id = recovery.proposal_id;
+            persist_prepared_commit(&db, prepared_vote_from_recovery(&db, recovery)).unwrap();
+            let canonical = crate::vote_submission::CanonicalVoteSubmission::from_singleton(
+                &submission(&db, ROUND_ID, 0, proposal_id).unwrap(),
+            )
+            .unwrap();
+            db.prepare_vote_submission(ROUND_ID, 0, &canonical).unwrap();
+            db.mark_vote_dispatching(ROUND_ID, 0, proposal_id).unwrap();
+            db.record_vote_outcome(
+                ROUND_ID,
+                0,
+                proposal_id,
+                crate::vote_submission::VoteSubmissionOutcome::Accepted,
+            )
+            .unwrap();
+            let van = 10 + (index as u32 * 2);
+            let leaf = format!("{van},{}", van + 1);
+            db.confirm_journaled_vote(
+                ROUND_ID,
+                0,
+                proposal_id,
+                canonical.tx_hash(),
+                &[TxEvent {
+                    event_type: "cast_vote".into(),
+                    attributes: vec![
+                        TxEventAttribute {
+                            key: "vote_round_id".into(),
+                            value: ROUND_ID.into(),
+                        },
+                        TxEventAttribute {
+                            key: "leaf_index".into(),
+                            value: leaf,
+                        },
+                    ],
+                }],
+            )
+            .unwrap();
+        }
+        db.validate_vote_submission_state(ROUND_ID).unwrap();
+
+        db.conn().execute(
+            "DELETE FROM votes WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=0 AND proposal_id=2",
+            rusqlite::params![ROUND_ID, WALLET_ID],
+        ).unwrap();
+        assert!(db.validate_vote_submission_state(ROUND_ID).is_err());
+    }
+
+    #[test]
+    fn vote_journal_reopens_with_identical_bytes_and_never_reposts_after_dispatch() {
+        use crate::{
+            confirmation::{TxEvent, TxEventAttribute},
+            vote_submission::{vote_request, vote_status_request, VoteSubmissionOutcome},
+        };
+        let db = db_with_vote();
+        db.set_ballot_intent(ROUND_ID, 1, crate::session::Decision::Choice(0), 2)
+            .unwrap();
+        db.set_ballot_intent(ROUND_ID, 2, crate::session::Decision::Choice(1), 2)
+            .unwrap();
+        let signed =
+            persist_prepared_atomic_vote_batch(&db, prepared_atomic_vote_batch_fixture(&db))
+                .unwrap();
+        let canonical =
+            crate::vote_submission::CanonicalVoteSubmission::from_batch(&signed).unwrap();
+        let original = canonical.json_bytes().to_vec();
+        db.prepare_vote_submission(ROUND_ID, 0, &canonical).unwrap();
+
+        let prepared = VotingDb::open_browser(
+            WALLET_ID,
+            Network::Testnet,
+            Some(&db.serialize_bytes().unwrap()),
+        )
+        .unwrap();
+        let recovered = prepared.vote_submission(ROUND_ID, 0, 1).unwrap().unwrap();
+        assert_eq!(recovered.outcome, VoteSubmissionOutcome::Prepared);
+        assert_eq!(
+            vote_request("https://vote.example", &recovered.canonical).body,
+            original
+        );
+        prepared.mark_vote_dispatching(ROUND_ID, 0, 1).unwrap();
+        prepared
+            .record_vote_outcome(ROUND_ID, 0, 1, VoteSubmissionOutcome::Ambiguous)
+            .unwrap();
+
+        let dispatched = VotingDb::open_browser(
+            WALLET_ID,
+            Network::Testnet,
+            Some(&prepared.serialize_bytes().unwrap()),
+        )
+        .unwrap();
+        let recovered = dispatched.vote_submission(ROUND_ID, 0, 1).unwrap().unwrap();
+        assert_eq!(recovered.outcome, VoteSubmissionOutcome::Ambiguous);
+        assert_eq!(recovered.canonical.json_bytes(), original);
+        let lookup = vote_status_request("https://vote.example", &recovered.canonical);
+        assert_eq!(lookup.method, "GET");
+        assert!(lookup.body.is_empty());
+        assert!(lookup.url.ends_with(recovered.canonical.tx_hash()));
+
+        let nullifiers = signed
+            .commitments
+            .iter()
+            .map(|vote| hex::encode(vote.van_nullifier))
+            .collect::<Vec<_>>()
+            .join(",");
+        dispatched
+            .confirm_journaled_vote(
+                ROUND_ID,
+                0,
+                1,
+                recovered.canonical.tx_hash(),
+                &[TxEvent {
+                    event_type: "cast_vote_batch".into(),
+                    attributes: [
+                        ("vote_round_id", ROUND_ID.to_string()),
+                        ("batch_digest", hex::encode(signed.batch_digest)),
+                        ("batch_size", "2".into()),
+                        ("final_van_leaf_index", "40".into()),
+                        ("vote_commitment_leaf_indices", "41,42".into()),
+                        ("proposal_ids", "1,2".into()),
+                        ("van_nullifiers", nullifiers),
+                    ]
+                    .into_iter()
+                    .map(|(key, value)| TxEventAttribute {
+                        key: key.into(),
+                        value,
+                    })
+                    .collect(),
+                }],
+            )
+            .unwrap();
+        let confirmed = VotingDb::open_browser(
+            WALLET_ID,
+            Network::Testnet,
+            Some(&dispatched.serialize_bytes().unwrap()),
+        )
+        .unwrap();
+        let recovered = confirmed.vote_submission(ROUND_ID, 0, 1).unwrap().unwrap();
+        assert_eq!(recovered.canonical.json_bytes(), original);
+        assert_eq!(recovered.confirmation_van_position, Some(40));
+        assert_eq!(
+            recovered.confirmation_vc_positions.as_deref(),
+            Some([41, 42].as_slice())
+        );
     }
 
     fn scalar_bytes(value: u8) -> [u8; 32] {

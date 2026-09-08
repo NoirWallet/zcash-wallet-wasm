@@ -63,6 +63,71 @@ pub(crate) fn classify_ballot_intents(
 }
 
 impl VotingDb {
+    /// Atomically records one terminal decision for every authenticated proposal.
+    ///
+    /// `proposal_options` is the complete authenticated proposal roster as
+    /// `(proposal_id, num_options)`. Validation of both inputs finishes before
+    /// any ballot, vote-recovery, or helper-share row is changed.
+    pub fn set_complete_ballot_intents(
+        &self,
+        round_id: &str,
+        proposal_options: &[(u32, u32)],
+        decisions: &[(u32, Decision)],
+    ) -> Result<(), VotingError> {
+        let mut roster = BTreeMap::new();
+        for &(proposal_id, num_options) in proposal_options {
+            validate_proposal_id(proposal_id)?;
+            validate_vote_options(num_options)?;
+            if roster.insert(proposal_id, num_options).is_some() {
+                return Err(VotingError::InvalidInput {
+                    message: format!("proposal roster contains duplicate id {proposal_id}"),
+                });
+            }
+        }
+        if roster.is_empty() {
+            return Err(VotingError::InvalidInput {
+                message: "proposal roster must not be empty".to_string(),
+            });
+        }
+
+        let mut validated = BTreeMap::new();
+        for &(proposal_id, decision) in decisions {
+            validate_proposal_id(proposal_id)?;
+            let num_options =
+                roster
+                    .get(&proposal_id)
+                    .ok_or_else(|| VotingError::InvalidInput {
+                        message: format!("ballot contains unknown proposal id {proposal_id}"),
+                    })?;
+            validate_ballot_intent_decision(decision, *num_options)?;
+            if validated.insert(proposal_id, decision).is_some() {
+                return Err(VotingError::InvalidInput {
+                    message: format!("ballot contains duplicate proposal id {proposal_id}"),
+                });
+            }
+        }
+        if validated.len() != roster.len() {
+            return Err(VotingError::InvalidInput {
+                message: "ballot must contain exactly one decision for every proposal".to_string(),
+            });
+        }
+
+        let now = now_secs();
+        let wallet_id = self.wallet_id();
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| VotingError::Internal {
+                message: format!("set_complete_ballot_intents transaction failed: {e}"),
+            })?;
+        for (proposal_id, decision) in validated {
+            write_ballot_intent_with_conn(&tx, &wallet_id, round_id, proposal_id, decision, now)?;
+        }
+        tx.commit().map_err(|e| VotingError::Internal {
+            message: format!("set_complete_ballot_intents commit failed: {e}"),
+        })
+    }
+
     /// Record (insert or replace) the voter's decision for one proposal.
     ///
     /// `num_options` must be the proposal's declared option count. Choice
@@ -97,10 +162,6 @@ impl VotingDb {
         proposal_id: u32,
         decision: Decision,
     ) -> Result<(), VotingError> {
-        let (skipped, choice): (i64, Option<i64>) = match decision {
-            Decision::Choice(c) => (0, Some(c as i64)),
-            Decision::Skipped => (1, None),
-        };
         let now = now_secs();
         let mut conn = self.conn();
         let wallet_id = self.wallet_id();
@@ -109,49 +170,7 @@ impl VotingDb {
             .map_err(|e| VotingError::Internal {
                 message: format!("set_ballot_intent transaction failed: {e}"),
             })?;
-        let skipped_bool = skipped != 0;
-        let choice_u32 = choice.map(|c| c as u32);
-        queries::ensure_no_submitted_vote_conflict_for_intent(
-            &tx,
-            round_id,
-            &wallet_id,
-            proposal_id,
-            skipped_bool,
-            choice_u32,
-        )?;
-        crate::vote::invalidate_unsubmitted_vote_recoveries_for_intent(
-            &tx,
-            &wallet_id,
-            round_id,
-            proposal_id,
-            choice_u32,
-        )?;
-        tx.execute(
-            "INSERT INTO ballot_intent
-                (round_id, wallet_id, proposal_id, skipped, choice, created_at, updated_at)
-             VALUES (:round_id, :wallet_id, :proposal_id, :skipped, :choice, :now, :now)
-             ON CONFLICT(round_id, wallet_id, proposal_id)
-             DO UPDATE SET skipped = :skipped, choice = :choice, updated_at = :now",
-            named_params! {
-                ":round_id": round_id,
-                ":wallet_id": wallet_id,
-                ":proposal_id": proposal_id as i64,
-                ":skipped": skipped,
-                ":choice": choice,
-                ":now": now,
-            },
-        )
-        .map_err(|e| VotingError::Internal {
-            message: format!("set_ballot_intent failed: {e}"),
-        })?;
-        queries::clear_stale_share_delegations_for_intent(
-            &tx,
-            round_id,
-            &wallet_id,
-            proposal_id,
-            skipped_bool,
-            choice_u32,
-        )?;
+        write_ballot_intent_with_conn(&tx, &wallet_id, round_id, proposal_id, decision, now)?;
         tx.commit().map_err(|e| VotingError::Internal {
             message: format!("set_ballot_intent commit failed: {e}"),
         })?;
@@ -194,6 +213,64 @@ impl VotingDb {
                 message: format!("collect ballot_intents: {e}"),
             })
     }
+}
+
+fn write_ballot_intent_with_conn(
+    conn: &rusqlite::Connection,
+    wallet_id: &str,
+    round_id: &str,
+    proposal_id: u32,
+    decision: Decision,
+    now: i64,
+) -> Result<(), VotingError> {
+    let (skipped, choice): (i64, Option<i64>) = match decision {
+        Decision::Choice(choice) => (0, Some(i64::from(choice))),
+        Decision::Skipped => (1, None),
+    };
+    let skipped_bool = skipped != 0;
+    let choice_u32 = choice.map(|choice| choice as u32);
+    queries::ensure_no_submitted_vote_conflict_for_intent(
+        conn,
+        round_id,
+        wallet_id,
+        proposal_id,
+        skipped_bool,
+        choice_u32,
+    )?;
+    crate::vote::invalidate_unsubmitted_vote_recoveries_for_intent(
+        conn,
+        wallet_id,
+        round_id,
+        proposal_id,
+        choice_u32,
+    )?;
+    conn.execute(
+        "INSERT INTO ballot_intent
+            (round_id, wallet_id, proposal_id, skipped, choice, created_at, updated_at)
+         VALUES (:round_id, :wallet_id, :proposal_id, :skipped, :choice, :now, :now)
+         ON CONFLICT(round_id, wallet_id, proposal_id)
+         DO UPDATE SET skipped = :skipped, choice = :choice, updated_at = :now",
+        named_params! {
+            ":round_id": round_id,
+            ":wallet_id": wallet_id,
+            ":proposal_id": proposal_id as i64,
+            ":skipped": skipped,
+            ":choice": choice,
+            ":now": now,
+        },
+    )
+    .map_err(|e| VotingError::Internal {
+        message: format!("set_ballot_intent failed: {e}"),
+    })?;
+    queries::clear_stale_share_delegations_for_intent(
+        conn,
+        round_id,
+        wallet_id,
+        proposal_id,
+        skipped_bool,
+        choice_u32,
+    )?;
+    Ok(())
 }
 
 fn validate_ballot_intent_decision(
@@ -1761,6 +1838,67 @@ mod tests {
                 },
             )
             .is_err());
+    }
+
+    #[test]
+    fn complete_ballot_intents_are_atomic_and_require_the_exact_roster() {
+        let db = db_with_bundle();
+        let roster = [(1, 2), (2, 3), (3, 2)];
+
+        for decisions in [
+            vec![(1, Decision::Choice(0)), (2, Decision::Skipped)],
+            vec![
+                (1, Decision::Choice(0)),
+                (2, Decision::Skipped),
+                (3, Decision::Choice(1)),
+                (4, Decision::Skipped),
+            ],
+            vec![
+                (1, Decision::Choice(0)),
+                (2, Decision::Skipped),
+                (2, Decision::Choice(1)),
+            ],
+            vec![
+                (1, Decision::Choice(0)),
+                (2, Decision::Choice(3)),
+                (3, Decision::Skipped),
+            ],
+        ] {
+            assert!(db
+                .set_complete_ballot_intents(ROUND, &roster, &decisions)
+                .is_err());
+            assert!(db.ballot_intents(ROUND).unwrap().is_empty());
+        }
+
+        db.set_complete_ballot_intents(
+            ROUND,
+            &roster,
+            &[
+                (3, Decision::Skipped),
+                (1, Decision::Choice(1)),
+                (2, Decision::Choice(2)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            db.ballot_intents(ROUND).unwrap(),
+            vec![
+                (1, Decision::Choice(1)),
+                (2, Decision::Choice(2)),
+                (3, Decision::Skipped),
+            ]
+        );
+    }
+
+    #[test]
+    fn complete_ballot_rejects_an_invalid_or_duplicate_authenticated_roster() {
+        let db = db_with_bundle();
+        for roster in [vec![], vec![(0, 2)], vec![(1, 1)], vec![(1, 2), (1, 2)]] {
+            assert!(db
+                .set_complete_ballot_intents(ROUND, &roster, &[(1, Decision::Choice(0))])
+                .is_err());
+            assert!(db.ballot_intents(ROUND).unwrap().is_empty());
+        }
     }
 
     #[test]

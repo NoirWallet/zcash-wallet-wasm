@@ -18,6 +18,26 @@ mod tests {
             serde_json::to_string(&VotingRoundPhase::ConfigAuthenticated).unwrap(),
             "\"config_authenticated\""
         );
+        assert_eq!(
+            serde_json::from_str::<BallotDecision>(
+                r#"{"kind":"choice","proposalId":7,"option":1}"#
+            )
+            .unwrap(),
+            BallotDecision::Choice {
+                proposal_id: 7,
+                option: 1
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<BallotDecision>(r#"{"kind":"skip","proposalId":8}"#).unwrap(),
+            BallotDecision::Skip { proposal_id: 8 }
+        );
+        assert!(
+            serde_json::from_str::<BallotDecision>(
+                r#"{"kind":"choice","proposal_id":7,"option":1}"#
+            )
+            .is_err()
+        );
     }
 }
 use serde::{Deserialize, Serialize};
@@ -117,6 +137,18 @@ pub struct VotingActionResult {
     pub completed_bundles: u32,
     pub total_bundles: u32,
     pub next_action: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind",
+    deny_unknown_fields
+)]
+pub enum BallotDecision {
+    Choice { proposal_id: u32, option: u32 },
+    Skip { proposal_id: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

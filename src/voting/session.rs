@@ -30,11 +30,16 @@ pub(crate) struct VotingSessionInner {
     pub(crate) trusted_rounds: RefCell<BTreeMap<String, TrustedRound>>,
     pub(crate) selected_round_id: RefCell<Option<String>>,
     pub(crate) mutation_active: Rc<Cell<bool>>,
+    pub(crate) vote_tree_sync: zcash_voting::tree_sync::VoteTreeSync,
     eligibility: RefCell<BTreeMap<String, VotingEligibility>>,
 }
 
 fn conflict(_: impl Sized) -> VotingApiError {
     VotingApiError::new(VotingErrorCode::RecoveryConflict)
+}
+
+fn all_expected_votes_confirmed(confirmed: u32, expected: u32) -> bool {
+    expected > 0 && confirmed == expected
 }
 pub(crate) fn now_secs() -> Result<u64, VotingApiError> {
     u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).map_err(conflict)
@@ -106,6 +111,9 @@ impl VotingSessionInner {
         drop(usk);
         let id = config::normalize_round_id(id)?;
         self.db.validate_delegation_state(&id).map_err(conflict)?;
+        self.db
+            .validate_vote_submission_state(&id)
+            .map_err(conflict)?;
         let round = authenticate().await?;
         self.validate_delegation_round(&id, &round, now()?)?;
         let roster = round
@@ -368,6 +376,458 @@ impl VotingSessionInner {
             .map_err(conflict)
     }
 
+    fn validate_submission_state(&self, id: &str) -> Result<(), VotingApiError> {
+        self.db.validate_delegation_state(id).map_err(conflict)?;
+        self.db.validate_vote_submission_state(id).map_err(conflict)
+    }
+
+    pub(crate) async fn submit_ballot_with<A, B, C>(
+        &self,
+        id: &str,
+        decisions: Option<Vec<BallotDecision>>,
+        transport: &impl zcash_voting::platform::HttpTransport,
+        authenticate: impl Fn() -> A,
+        build: impl FnMut(TrustedRound, u32, Vec<zcash_voting::vote::DraftVote>) -> B,
+        checkpoint: impl Fn() -> C,
+        now: impl Fn() -> Result<u64, VotingApiError>,
+    ) -> Result<VotingActionResult, VotingApiError>
+    where
+        A: Future<Output = Result<TrustedRound, VotingApiError>>,
+        B: Future<
+            Output = Result<zcash_voting::vote_submission::CanonicalVoteSubmission, VotingApiError>,
+        >,
+        C: Future<Output = Result<(), VotingApiError>>,
+    {
+        let _guard = self.mutation_guard()?;
+        let id = config::normalize_round_id(id)?;
+        self.validate_submission_state(&id)?;
+        let round = authenticate().await?;
+        self.validate_delegation_round(&id, &round, now()?)?;
+        if let Some(decisions) = decisions {
+            let roster = round
+                .proposals
+                .iter()
+                .map(|proposal| {
+                    Ok((
+                        proposal.proposal_id,
+                        u32::try_from(proposal.options.len()).map_err(conflict)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, VotingApiError>>()?;
+            let decisions = decisions
+                .into_iter()
+                .map(|decision| match decision {
+                    BallotDecision::Choice {
+                        proposal_id,
+                        option,
+                    } => (proposal_id, zcash_voting::session::Decision::Choice(option)),
+                    BallotDecision::Skip { proposal_id } => {
+                        (proposal_id, zcash_voting::session::Decision::Skipped)
+                    }
+                })
+                .collect::<Vec<_>>();
+            self.db
+                .set_complete_ballot_intents(&id, &roster, &decisions)
+                .map_err(conflict)?;
+            checkpoint()
+                .await
+                .map_err(|_| VotingApiError::new(VotingErrorCode::PersistenceFailed))?;
+        }
+        self.drive_resume_plan(&id, transport, authenticate, build, checkpoint, now)
+            .await
+    }
+
+    async fn drive_resume_plan<A, B, C>(
+        &self,
+        id: &str,
+        transport: &impl zcash_voting::platform::HttpTransport,
+        authenticate: impl Fn() -> A,
+        mut build: impl FnMut(TrustedRound, u32, Vec<zcash_voting::vote::DraftVote>) -> B,
+        checkpoint: impl Fn() -> C,
+        now: impl Fn() -> Result<u64, VotingApiError>,
+    ) -> Result<VotingActionResult, VotingApiError>
+    where
+        A: Future<Output = Result<TrustedRound, VotingApiError>>,
+        B: Future<
+            Output = Result<zcash_voting::vote_submission::CanonicalVoteSubmission, VotingApiError>,
+        >,
+        C: Future<Output = Result<(), VotingApiError>>,
+    {
+        use zcash_voting::{
+            delegation_submission::{
+                DelegationOutcome, DelegationStatus, delegation_status_request,
+                parse_delegation_status,
+            },
+            platform::TransportError,
+            vote_submission::{
+                CanonicalVoteSubmission, VoteStatus, VoteSubmissionOutcome, parse_vote_result,
+                parse_vote_status, vote_request, vote_status_request,
+            },
+        };
+        loop {
+            self.validate_submission_state(id)?;
+            let round = authenticate().await?;
+            self.validate_delegation_round(id, &round, now()?)?;
+            let roster = round
+                .proposals
+                .iter()
+                .map(|proposal| proposal.proposal_id)
+                .collect::<Vec<_>>();
+            let plan = resume_plan(&self.db, id, &roster).map_err(conflict)?;
+            let Some(step) = plan.next_steps.first().cloned() else {
+                return self.delegation_progress(id, now()?);
+            };
+            match step {
+                NextStep::Delegate { .. } => return self.delegation_progress(id, now()?),
+                NextStep::PollDelegation { bundle_index } => {
+                    let attempt = self
+                        .db
+                        .delegation_submission(id, bundle_index)
+                        .map_err(conflict)?
+                        .ok_or_else(|| conflict(()))?;
+                    let mut confirmed = false;
+                    for base in &round.vote_server_urls {
+                        let response = match transport
+                            .execute(delegation_status_request(base, &attempt.canonical))
+                            .await
+                        {
+                            Ok(response) => response,
+                            Err(TransportError::Definite) => continue,
+                            Err(_) => return Err(conflict(())),
+                        };
+                        match parse_delegation_status(response).map_err(conflict)? {
+                            DelegationStatus::Pending => continue,
+                            DelegationStatus::Rejected => {
+                                self.db
+                                    .record_delegation_outcome(
+                                        id,
+                                        bundle_index,
+                                        DelegationOutcome::Rejected,
+                                    )
+                                    .map_err(conflict)?;
+                                checkpoint().await.map_err(|_| {
+                                    VotingApiError::new(VotingErrorCode::SubmissionUnknown)
+                                })?;
+                                return Err(VotingApiError::new(
+                                    VotingErrorCode::SubmissionRejected,
+                                ));
+                            }
+                            DelegationStatus::Confirmed(events) => {
+                                self.db
+                                    .confirm_journaled_delegation(
+                                        id,
+                                        bundle_index,
+                                        attempt.canonical.tx_hash(),
+                                        &events,
+                                    )
+                                    .map_err(conflict)?;
+                                checkpoint().await.map_err(|_| {
+                                    VotingApiError::new(VotingErrorCode::SubmissionUnknown)
+                                })?;
+                                confirmed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !confirmed {
+                        return self.delegation_progress(id, now()?);
+                    }
+                }
+                NextStep::SubmitShares { .. } | NextStep::ConfirmShare { .. } => {
+                    return self.delegation_progress(id, now()?);
+                }
+                NextStep::CastVote { bundle_index, .. } => {
+                    let before_share = plan.next_steps.iter().take_while(|step| {
+                        !matches!(
+                            step,
+                            NextStep::SubmitShares { .. } | NextStep::ConfirmShare { .. }
+                        )
+                    });
+                    let drafts = before_share
+                        .filter_map(|step| match step {
+                            NextStep::CastVote {
+                                bundle_index: candidate,
+                                proposal_id,
+                                choice,
+                            } if *candidate == bundle_index => {
+                                let options = round
+                                    .proposals
+                                    .iter()
+                                    .find(|proposal| proposal.proposal_id == *proposal_id)?
+                                    .options
+                                    .len();
+                                Some(zcash_voting::vote::DraftVote {
+                                    proposal_id: *proposal_id,
+                                    choice: *choice,
+                                    num_options: u32::try_from(options).ok()?,
+                                    single_share: false,
+                                    vc_tree_position: 0,
+                                })
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    if drafts.is_empty() {
+                        return Err(conflict(()));
+                    }
+                    let canonical = build(round.clone(), bundle_index, drafts).await?;
+                    self.db
+                        .prepare_vote_submission(id, bundle_index, &canonical)
+                        .map_err(conflict)?;
+                    checkpoint()
+                        .await
+                        .map_err(|_| VotingApiError::new(VotingErrorCode::PersistenceFailed))?;
+                }
+                NextStep::SubmitVote {
+                    bundle_index,
+                    proposal_id,
+                }
+                | NextStep::SubmitVoteBatch {
+                    bundle_index,
+                    proposal_id,
+                } => {
+                    let mut attempt = self
+                        .db
+                        .vote_submission(id, bundle_index, proposal_id)
+                        .map_err(conflict)?;
+                    if attempt.is_none() {
+                        let canonical = match step {
+                            NextStep::SubmitVote { .. } => CanonicalVoteSubmission::from_singleton(
+                                &zcash_voting::vote::submission(
+                                    &self.db,
+                                    id,
+                                    bundle_index,
+                                    proposal_id,
+                                )
+                                .map_err(conflict)?,
+                            )
+                            .map_err(conflict)?,
+                            _ => CanonicalVoteSubmission::from_batch(
+                                &zcash_voting::vote::recover_atomic_vote_batch(
+                                    &self.db,
+                                    id,
+                                    bundle_index,
+                                    proposal_id,
+                                )
+                                .map_err(conflict)?,
+                            )
+                            .map_err(conflict)?,
+                        };
+                        self.db
+                            .prepare_vote_submission(id, bundle_index, &canonical)
+                            .map_err(conflict)?;
+                        checkpoint()
+                            .await
+                            .map_err(|_| VotingApiError::new(VotingErrorCode::PersistenceFailed))?;
+                        attempt = self
+                            .db
+                            .vote_submission(id, bundle_index, proposal_id)
+                            .map_err(conflict)?;
+                    }
+                    let attempt = attempt.ok_or_else(|| conflict(()))?;
+                    if attempt.outcome != VoteSubmissionOutcome::Prepared {
+                        continue;
+                    }
+                    self.db
+                        .mark_vote_dispatching(id, bundle_index, proposal_id)
+                        .map_err(conflict)?;
+                    checkpoint()
+                        .await
+                        .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                    let outcome = transport
+                        .execute(vote_request(
+                            round.vote_server_urls.first().ok_or_else(|| conflict(()))?,
+                            &attempt.canonical,
+                        ))
+                        .await
+                        .and_then(|response| parse_vote_result(response, &attempt.canonical));
+                    let recorded = match outcome {
+                        Ok(outcome) => outcome,
+                        Err(TransportError::Definite) => VoteSubmissionOutcome::Rejected,
+                        Err(_) => VoteSubmissionOutcome::Ambiguous,
+                    };
+                    self.db
+                        .record_vote_outcome(id, bundle_index, proposal_id, recorded)
+                        .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                    checkpoint()
+                        .await
+                        .map_err(|_| VotingApiError::new(VotingErrorCode::SubmissionUnknown))?;
+                    if recorded == VoteSubmissionOutcome::Rejected {
+                        return Err(VotingApiError::new(VotingErrorCode::SubmissionRejected));
+                    }
+                }
+                NextStep::PollVote {
+                    bundle_index,
+                    proposal_id,
+                }
+                | NextStep::PollVoteBatch {
+                    bundle_index,
+                    proposal_id,
+                } => {
+                    let attempt = self
+                        .db
+                        .vote_submission(id, bundle_index, proposal_id)
+                        .map_err(conflict)?
+                        .ok_or_else(|| conflict(()))?;
+                    let mut confirmed = false;
+                    for base in &round.vote_server_urls {
+                        let response = match transport
+                            .execute(vote_status_request(base, &attempt.canonical))
+                            .await
+                        {
+                            Ok(response) => response,
+                            Err(TransportError::Definite) => continue,
+                            Err(_) => return Err(conflict(())),
+                        };
+                        match parse_vote_status(response).map_err(conflict)? {
+                            VoteStatus::Pending => continue,
+                            VoteStatus::Rejected => {
+                                self.db
+                                    .record_vote_outcome(
+                                        id,
+                                        bundle_index,
+                                        proposal_id,
+                                        VoteSubmissionOutcome::Rejected,
+                                    )
+                                    .map_err(conflict)?;
+                                checkpoint().await.map_err(|_| {
+                                    VotingApiError::new(VotingErrorCode::SubmissionUnknown)
+                                })?;
+                                return Err(VotingApiError::new(
+                                    VotingErrorCode::SubmissionRejected,
+                                ));
+                            }
+                            VoteStatus::Confirmed(events) => {
+                                self.db
+                                    .confirm_journaled_vote(
+                                        id,
+                                        bundle_index,
+                                        proposal_id,
+                                        attempt.canonical.tx_hash(),
+                                        &events,
+                                    )
+                                    .map_err(conflict)?;
+                                checkpoint().await.map_err(|_| {
+                                    VotingApiError::new(VotingErrorCode::SubmissionUnknown)
+                                })?;
+                                confirmed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !confirmed {
+                        return self.delegation_progress(id, now()?);
+                    }
+                }
+                _ => return Err(conflict(())),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn submit_ballot(
+        &self,
+        id: &str,
+        decisions: Option<Vec<BallotDecision>>,
+    ) -> Result<VotingActionResult, VotingApiError> {
+        self.submit_ballot_with(
+            id,
+            decisions,
+            &self.transport,
+            || self.ensure_trusted_round(id),
+            |round, bundle, drafts| self.build_vote_submission(round, bundle, drafts),
+            || self.persistence.checkpoint(&self.db),
+            now_secs,
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn build_vote_submission(
+        &self,
+        round: TrustedRound,
+        bundle_index: u32,
+        drafts: Vec<zcash_voting::vote::DraftVote>,
+    ) -> Result<zcash_voting::vote_submission::CanonicalVoteSubmission, VotingApiError> {
+        use zcash_voting::proof_executor::ProofExecutor;
+        let api = zcash_voting::tree_sync::AsyncHttpTreeSyncApi::new(
+            round.tree_url.clone(),
+            round.summary.round_id.clone(),
+            std::sync::Arc::new(self.transport),
+        )
+        .map_err(conflict)?;
+        let height = self
+            .vote_tree_sync
+            .sync_with_async_api(&self.db, &round.summary.round_id, &api)
+            .await
+            .map_err(conflict)?;
+        let witness = self
+            .vote_tree_sync
+            .generate_van_witness(&self.db, &round.summary.round_id, bundle_index, height)
+            .map_err(conflict)?;
+        let hotkey = self
+            .db
+            .load_voting_hotkey(&round.summary.round_id)
+            .map_err(conflict)?
+            .ok_or_else(|| conflict(()))?;
+        #[cfg(feature = "wasm-parallel")]
+        let executor = super::proof_executor::RayonProofExecutor;
+        #[cfg(not(feature = "wasm-parallel"))]
+        let executor = zcash_voting::proof_executor::SequentialProofExecutor;
+        if drafts.len() == 1 {
+            let job = self
+                .db
+                .vote_proof_job(
+                    zcash_voting::vote::VoteSigner::hotkey(&hotkey),
+                    &round.summary.round_id,
+                    bundle_index,
+                    &drafts[0],
+                    &witness,
+                )
+                .map_err(conflict)?;
+            let prepared = executor
+                .prove(job, |job| {
+                    job.prove(&zcash_voting::types::NoopProgressReporter)
+                })
+                .await
+                .map_err(|_| VotingApiError::new(VotingErrorCode::ProofFailed))?;
+            let committed = zcash_voting::vote::persist_prepared_commit(&self.db, prepared)
+                .map_err(conflict)?;
+            let signed = committed.signed_commitment(&self.db).map_err(conflict)?;
+            return zcash_voting::vote_submission::CanonicalVoteSubmission::from_singleton(
+                &zcash_voting::vote::submission(
+                    &self.db,
+                    &round.summary.round_id,
+                    bundle_index,
+                    signed.proposal_id,
+                )
+                .map_err(conflict)?,
+            )
+            .map_err(conflict);
+        }
+        let batch = zcash_voting::vote::AtomicVoteBatch::new(
+            &round.summary.round_id,
+            bundle_index,
+            &drafts,
+            &witness,
+            &zcash_voting::types::NoopProgressReporter,
+        );
+        let job = self
+            .db
+            .atomic_vote_proof_job(zcash_voting::vote::VoteSigner::hotkey(&hotkey), batch)
+            .map_err(conflict)?;
+        let prepared = executor
+            .prove(job, |job| {
+                job.prove(&zcash_voting::types::NoopProgressReporter)
+            })
+            .await
+            .map_err(|_| VotingApiError::new(VotingErrorCode::ProofFailed))?;
+        let signed = zcash_voting::vote::persist_prepared_atomic_vote_batch(&self.db, prepared)
+            .map_err(conflict)?;
+        zcash_voting::vote_submission::CanonicalVoteSubmission::from_batch(&signed)
+            .map_err(conflict)
+    }
+
     pub(crate) fn validate_delegation_key(
         &self,
         usk: &zcash_keys::keys::UnifiedSpendingKey,
@@ -458,6 +918,7 @@ impl VotingSessionInner {
             trusted_rounds: RefCell::new(BTreeMap::new()),
             selected_round_id: RefCell::new(None),
             mutation_active: Rc::new(Cell::new(false)),
+            vote_tree_sync: zcash_voting::tree_sync::VoteTreeSync::new(),
             eligibility: RefCell::new(BTreeMap::new()),
         };
         let mut pending = None;
@@ -715,9 +1176,7 @@ impl VotingSessionInner {
                 } else {
                     VotingRoundPhase::Uninitialized
                 }
-            } else if status.confirmed_votes > 0
-                && !votes.iter().any(|(_, _, p)| *p != VotePhase::Confirmed)
-            {
+            } else if all_expected_votes_confirmed(status.confirmed_votes, status.total_votes) {
                 VotingRoundPhase::VoteConfirmed
             } else if !votes.is_empty() {
                 VotingRoundPhase::VotePending
@@ -1035,11 +1494,11 @@ impl Drop for MutationGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "../../zcash_voting/zcash_voting/tests/support/delegation_fixture.rs"]
 mod delegation_fixture;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use futures_util::{future::pending, poll};
@@ -1048,6 +1507,98 @@ mod tests {
     };
     use zcash_protocol::consensus::BlockHeight;
     const ID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn multi_bundle_partial_confirmation_is_not_round_vote_confirmation() {
+        // One choice across two bundles requires two independently confirmed votes.
+        assert!(!all_expected_votes_confirmed(1, 2));
+        assert!(all_expected_votes_confirmed(2, 2));
+        assert!(!all_expected_votes_confirmed(1, 0));
+    }
+
+    #[tokio::test]
+    async fn complete_ballot_checkpoints_before_any_vote_build_or_network_effect() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use zcash_voting::platform::{
+            HttpTransport, OwnedHttpRequest, TransportError, TransportFuture,
+        };
+        struct Transport(AtomicUsize);
+        impl HttpTransport for Transport {
+            fn execute(&self, _: OwnedHttpRequest) -> TransportFuture {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(Err(TransportError::Ambiguous)))
+            }
+        }
+        let (session, mut round) = session().await;
+        round.params.snapshot_height = delegation_fixture::height();
+        round.summary.snapshot_height = round.params.snapshot_height;
+        session
+            .db
+            .init_round(
+                zcash_voting::Network::Testnet,
+                &round.params,
+                Some(
+                    &serde_json::to_string(&VotingSessionEnvelope {
+                        version: 1,
+                        authenticated_round: round.identity(),
+                    })
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        let canonical = delegation_fixture::prepare_bundles(&session.db, &round.params, 17, 2);
+        for (bundle, submission) in canonical.iter().enumerate() {
+            session
+                .db
+                .prepare_delegation_submission(ID, bundle as u32, submission)
+                .unwrap();
+            session
+                .db
+                .mark_delegation_dispatching(ID, bundle as u32)
+                .unwrap();
+            session
+                .db
+                .confirm_journaled_delegation(
+                    ID,
+                    bundle as u32,
+                    submission.tx_hash(),
+                    &[delegation_fixture::event(ID, &(41 + bundle).to_string())],
+                )
+                .unwrap();
+        }
+        let decisions = round
+            .proposals
+            .iter()
+            .map(|proposal| BallotDecision::Choice {
+                proposal_id: proposal.proposal_id,
+                option: 0,
+            })
+            .collect::<Vec<_>>();
+        let transport = Transport(AtomicUsize::new(0));
+        let builds = Cell::new(0);
+        let result = session
+            .submit_ballot_with(
+                ID,
+                Some(decisions),
+                &transport,
+                || std::future::ready(Ok(round.clone())),
+                |_, _, _| {
+                    builds.set(builds.get() + 1);
+                    std::future::ready(Err(VotingApiError::new(VotingErrorCode::ProofFailed)))
+                },
+                || std::future::ready(Err(VotingApiError::new(VotingErrorCode::PersistenceFailed))),
+                || Ok(1500),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(result.code, VotingErrorCode::PersistenceFailed);
+        assert_eq!(builds.get(), 0);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            session.db.ballot_intents(ID).unwrap().len(),
+            round.proposals.len()
+        );
+    }
 
     #[tokio::test]
     async fn delegation_signing_rejects_wrong_fingerprint_and_account_before_work() {
@@ -2486,6 +3037,11 @@ mod tests {
             )
             .unwrap();
         }
+        std::fs::write(
+            path.join("delegation-confirmed.bin"),
+            session.export_state().unwrap(),
+        )
+        .unwrap();
     }
     #[tokio::test]
     async fn mutation_gate_rejects_overlap_and_releases_on_cancellation() {

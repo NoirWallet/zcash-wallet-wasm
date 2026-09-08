@@ -944,7 +944,7 @@ mod tests {
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         for index in 0..2 {
             let data =
                 queries::load_zkp2_inputs(&conn, &params.vote_round_id, WALLET, index).unwrap();
@@ -1449,16 +1449,24 @@ mod tests {
             first_transition.vote_authority_note_new
         );
 
-        let committed = crate::vote::commit_atomic_vote_batch(
-            &customer,
+        use crate::proof_executor::{ProofExecutor, SequentialProofExecutor};
+        let batch = crate::vote::AtomicVoteBatch::new(
             &params.vote_round_id,
             0,
             &drafts,
             &witness,
-            VoteSigner::hotkey(&hotkey),
             &NoopProgressReporter,
+        );
+        let job = customer
+            .atomic_vote_proof_job(VoteSigner::hotkey(&hotkey), batch)
+            .unwrap();
+        let prepared = futures_util::future::FutureExt::now_or_never(
+            SequentialProofExecutor.prove(job, |job| job.prove(&NoopProgressReporter)),
         )
+        .expect("sequential proof executor must complete eagerly")
         .unwrap();
+        let committed =
+            crate::vote::persist_prepared_atomic_vote_batch(&customer, prepared).unwrap();
 
         assert_eq!(committed.commitments.len(), 2);
         assert_eq!(

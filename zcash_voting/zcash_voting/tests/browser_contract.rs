@@ -6,6 +6,18 @@ mod browser_storage_cases;
 mod delegation_fixture;
 
 #[test]
+fn vote_recovery_browser_surface_uses_one_durable_driver_and_owned_jobs() {
+    let bindgen = include_str!("../../../src/bindgen/voting.rs");
+    let session = include_str!("../../../src/voting/session.rs");
+    assert!(bindgen.contains("js_name = submitBallot"));
+    assert!(bindgen.contains("js_name = resumeRound"));
+    assert_eq!(session.matches("async fn drive_resume_plan").count(), 1);
+    assert!(session.contains("vote_proof_job"));
+    assert!(session.contains("atomic_vote_proof_job"));
+    assert!(!session.contains("std::thread::"));
+}
+
+#[test]
 fn delegation_restored_confirmed_corruption_blocks_all_planned_work() {
     use zcash_voting::{
         session::{delegation_resume_steps, NextStep},
@@ -1070,6 +1082,118 @@ mod wallet_inputs {
         );
     }
 
+    /// Deterministic real ZKP2 entry point for optimized browser proof checks.
+    ///
+    /// This remains ignored in normal suites because it builds both Halo2
+    /// proofs, but it deliberately drops SQLite before the vote proof runs.
+    #[tokio::test]
+    #[ignore = "real Halo2 vote proof fixture for browser sequential/Rayon checks"]
+    async fn vote_owned_proof_job_survives_database_drop() {
+        use voting_circuits::delegation::{ImtProvider, SpacedLeafImtProvider};
+        use vote_commitment_tree::MemoryTreeServer;
+        use zcash_voting::{
+            backend::pasta_curves::{group::ff::PrimeField, pallas::Base},
+            proof_executor::{ProofExecutor, SequentialProofExecutor},
+            tree_sync::VoteTreeSync,
+            vote::{DraftVote, VoteSigner},
+        };
+
+        let (note, account, tree, witness) = fixture();
+        let id = "02".repeat(32);
+        let imt = SpacedLeafImtProvider::new();
+        let db = VotingDb::open_browser("vote-proof-fixture", Network::Regtest, None).unwrap();
+        let params = VotingRoundParams {
+            vote_round_id: id.clone(),
+            snapshot_height: HEIGHT,
+            ea_pk: vec![7; 32],
+            nc_root: witness.root.clone(),
+            nullifier_imt_root: imt.root().to_repr().to_vec(),
+        };
+        db.init_round(Network::Regtest, &params, None).unwrap();
+        let hotkey = db.ensure_voting_hotkey(&id).unwrap();
+        let keys = zcash_voting::delegate::DelegationKeys::with_voting_hotkey(
+            account.orchard_fvk_bytes.to_vec(),
+            &hotkey,
+            account.seed_fingerprint,
+            account.account_index,
+            "vote-proof-fixture".into(),
+        )
+        .unwrap();
+        let notes = vec![note];
+        db.ensure_bundles(&id, &notes).unwrap();
+        db.ensure_padded_secrets(&id, 0, &notes).unwrap();
+        store_tree_state_and_witnesses(&db, &id, 0, &tree.encode_to_vec(), &notes, &[witness])
+            .unwrap();
+        db.precompute_delegation_pir_async(&id, 0, &notes, Network::Regtest, |nullifiers| async {
+            Ok(nullifiers
+                .into_iter()
+                .map(|nf| {
+                    let proof = imt.non_membership_proof(nf).unwrap();
+                    zcash_voting::pir::ImtProofData {
+                        root: proof.root,
+                        nf_bounds: proof.nf_bounds,
+                        leaf_pos: proof.leaf_pos,
+                        path: proof.path,
+                    }
+                })
+                .collect())
+        })
+        .await
+        .unwrap();
+        db.build_governance_pczt(
+            &id,
+            0,
+            &notes,
+            &keys,
+            zcash_voting::delegate::branch_id_for_height(Network::Regtest, HEIGHT).unwrap(),
+        )
+        .unwrap();
+        let delegation = db.delegation_proof_job(&id, 0, notes, keys).unwrap();
+        let delegation = SequentialProofExecutor
+            .prove(delegation, |job| job(&zcash_voting::types::NoopProgressReporter))
+            .await
+            .unwrap();
+        db.store_delegation_proof(&id, 0, &delegation).unwrap();
+        db.store_van_position(&id, 0, 0).unwrap();
+
+        let leaf = Base::from_repr(delegation.van_comm.try_into().unwrap())
+            .into_option()
+            .unwrap();
+        let mut tree = MemoryTreeServer::empty();
+        tree.append(leaf).unwrap();
+        tree.checkpoint(HEIGHT as u32).unwrap();
+        let sync = VoteTreeSync::new();
+        let tree = super::async_tree_contract::AsyncServer::from_tree(tree);
+        let height = sync.sync_with_async_api(&db, &id, &tree).await.unwrap();
+        let van_witness = sync.generate_van_witness(&db, &id, 0, height).unwrap();
+        let draft = DraftVote {
+            proposal_id: 1,
+            choice: 0,
+            num_options: 2,
+            single_share: false,
+            vc_tree_position: 0,
+        };
+        db.set_ballot_intent(&id, 1, zcash_voting::session::Decision::Choice(0), 2)
+            .unwrap();
+        let job = db
+            .vote_proof_job(VoteSigner::hotkey(&hotkey), &id, 0, &draft, &van_witness)
+            .unwrap();
+        let bytes = db.serialize_bytes().unwrap();
+        drop(db);
+
+        let prepared = SequentialProofExecutor
+            .prove(job, |job| job.prove(&zcash_voting::types::NoopProgressReporter))
+            .await
+            .unwrap();
+        let restored =
+            VotingDb::open_browser("vote-proof-fixture", Network::Regtest, Some(&bytes)).unwrap();
+        zcash_voting::vote::persist_prepared_commit(&restored, prepared).unwrap();
+        assert_eq!(
+            restored.vote_phase(&id, 0, 1).unwrap(),
+            zcash_voting::phases::VotePhase::Committed
+        );
+    }
+
     #[tokio::test]
     async fn pir_preparation_persists_witnesses_padding_cache_and_resume_plan() {
         use voting_circuits::delegation::{ImtProvider, SpacedLeafImtProvider};
@@ -1605,10 +1729,11 @@ mod async_tree_contract {
     const ROUND_ID: &str = "0101010101010101010101010101010101010101010101010101010101010101";
     const WALLET_ID: &str = "browser-async-tree";
 
-    type TreeFuture<T> = Pin<Box<dyn Future<Output = Result<T, FixtureError>> + Send + 'static>>;
+    pub(super) type TreeFuture<T> =
+        Pin<Box<dyn Future<Output = Result<T, FixtureError>> + Send + 'static>>;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum FixtureError {
+    pub(super) enum FixtureError {
         Fetch,
     }
 
@@ -1620,7 +1745,7 @@ mod async_tree_contract {
         Truncated,
     }
 
-    struct AsyncServer {
+    pub(super) struct AsyncServer {
         server: Mutex<MemoryTreeServer>,
         page_span: u32,
         calls: Mutex<Vec<(u32, u32)>>,
@@ -1636,6 +1761,23 @@ mod async_tree_contract {
     }
 
     impl AsyncServer {
+        pub(super) fn from_tree(server: MemoryTreeServer) -> Self {
+            Self {
+                server: Mutex::new(server),
+                page_span: u32::MAX,
+                calls: Mutex::new(vec![]),
+                page_number: AtomicUsize::new(0),
+                fail_page: AtomicUsize::new(usize::MAX),
+                fail_state: AtomicBool::new(false),
+                corrupt_root: false,
+                corrupt_state_root: false,
+                corrupt_anchor_root: false,
+                omit_empty_blocks: false,
+                root_requests: Mutex::new(vec![]),
+                cursor_fault: CursorFault::None,
+            }
+        }
+
         fn new(blocks: u32, page_span: u32) -> Self {
             Self {
                 server: Mutex::new(server(blocks)),

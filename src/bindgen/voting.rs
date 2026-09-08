@@ -100,6 +100,23 @@ impl WebVotingSession {
         )
     }
 
+    #[wasm_bindgen(js_name = submitBallot)]
+    pub async fn submit_ballot(
+        &self,
+        round_id: String,
+        decisions: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let decisions: Vec<crate::voting::types::BallotDecision> =
+            serde_wasm_bindgen::from_value(decisions)
+                .map_err(|_| VotingApiError::new(VotingErrorCode::RecoveryConflict))?;
+        value(&self.inner.submit_ballot(&round_id, Some(decisions)).await?)
+    }
+
+    #[wasm_bindgen(js_name = resumeRound)]
+    pub async fn resume_round(&self, round_id: String) -> Result<JsValue, JsValue> {
+        value(&self.inner.submit_ballot(&round_id, None).await?)
+    }
+
     /// The host obtains explicit user confirmation naming this round before calling.
     #[wasm_bindgen(js_name = clearRound)]
     pub async fn clear_round(&self, round_id: String) -> Result<(), JsValue> {

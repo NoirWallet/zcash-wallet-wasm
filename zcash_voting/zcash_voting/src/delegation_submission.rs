@@ -270,11 +270,39 @@ impl VotingDb {
                 ) {
                     (None, None, None) => None,
                     (Some(confirmed_hash), Some(position), Some(current_position))
-                        if confirmed_hash == hash
-                            && outcome == DelegationOutcome::Accepted
-                            && position == current_position =>
+                        if confirmed_hash == hash && outcome == DelegationOutcome::Accepted =>
                     {
-                        Some(u32::try_from(position).map_err(|_| invalid())?)
+                        let original_position = u32::try_from(position).map_err(|_| invalid())?;
+                        let current_position =
+                            u32::try_from(current_position).map_err(|_| invalid())?;
+                        if current_position != original_position {
+                            // A cast vote advances the bundle's current VAN. The immutable
+                            // delegation position may therefore differ only when the vote
+                            // journal has recorded that exact successor position.
+                            let journaled_successor: bool = self
+                                .conn()
+                                .query_row(
+                                    "SELECT EXISTS(
+                                        SELECT 1 FROM vote_attempts
+                                        WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=?3
+                                          AND outcome='accepted'
+                                          AND confirmation_tx_hash=tx_hash
+                                          AND confirmation_van_position=?4
+                                    )",
+                                    params![
+                                        round,
+                                        self.wallet_id(),
+                                        bundle,
+                                        current_position
+                                    ],
+                                    |row| row.get(0),
+                                )
+                                .map_err(|_| invalid())?;
+                            if current_position < original_position || !journaled_successor {
+                                return Err(invalid());
+                            }
+                        }
+                        Some(original_position)
                     }
                     _ => return Err(invalid()),
                 };
