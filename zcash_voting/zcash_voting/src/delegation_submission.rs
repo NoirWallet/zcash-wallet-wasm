@@ -19,6 +19,8 @@ use crate::{
     VotingError,
 };
 
+const LEGACY_BASE64_DELEGATE_VOTE_EVENT: &str = "ZGVsZWdhdGVfdm90ZQ==";
+
 fn invalid() -> VotingError {
     VotingError::InvalidInput {
         message: "invalid delegation recovery state".into(),
@@ -417,9 +419,12 @@ fn strict_delegation_confirmation(
     }
     if events
         .iter()
-        .filter(|event| event.event_type == "delegate_vote")
-        .count()
-        != 1
+        .any(|event| event.event_type == LEGACY_BASE64_DELEGATE_VOTE_EVENT)
+        || events
+            .iter()
+            .filter(|event| event.event_type == "delegate_vote")
+            .count()
+            != 1
     {
         return Err(invalid());
     }

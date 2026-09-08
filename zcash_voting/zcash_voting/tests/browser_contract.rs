@@ -131,6 +131,66 @@ fn delegation_rest_events_reject_legacy_repairs_and_noncanonical_values() {
 }
 
 #[test]
+fn delegation_rest_events_reject_encoded_aliases_but_allow_unrelated_events() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use zcash_voting::{
+        confirmation::{TxEvent, TxEventAttribute},
+        storage::VotingDb,
+        Network, VotingRoundParams,
+    };
+
+    let id = "01".repeat(32);
+    let db = VotingDb::open_browser("owner", Network::Testnet, None).unwrap();
+    let params = VotingRoundParams {
+        vote_round_id: id.clone(),
+        snapshot_height: delegation_fixture::height(),
+        ea_pk: vec![0; 32],
+        nc_root: vec![0; 32],
+        nullifier_imt_root: vec![0; 32],
+    };
+    db.init_round(Network::Testnet, &params, None).unwrap();
+    let canonical = delegation_fixture::prepare(&db, &params, 17);
+    db.prepare_delegation_submission(&id, 0, &canonical)
+        .unwrap();
+    db.mark_delegation_dispatching(&id, 0).unwrap();
+    let bytes = db.serialize_bytes().unwrap();
+
+    let plain = delegation_fixture::event(&id, "3753");
+    let mut encoded = plain.clone();
+    encoded.event_type = STANDARD.encode("delegate_vote");
+    let mut conflicting_encoded = delegation_fixture::event(&"02".repeat(32), "1");
+    conflicting_encoded.event_type = STANDARD.encode("delegate_vote");
+    for events in [
+        vec![plain.clone(), encoded.clone()],
+        vec![encoded.clone(), plain.clone()],
+        vec![plain.clone(), conflicting_encoded.clone()],
+        vec![conflicting_encoded, plain.clone()],
+    ] {
+        let restored = VotingDb::open_browser("owner", Network::Testnet, Some(&bytes)).unwrap();
+        assert!(restored
+            .confirm_journaled_delegation(&id, 0, canonical.tx_hash(), &events)
+            .is_err());
+    }
+
+    let unrelated = TxEvent {
+        event_type: "transfer".into(),
+        attributes: vec![TxEventAttribute {
+            key: "sender".into(),
+            value: "unrelated".into(),
+        }],
+    };
+    for events in [
+        vec![unrelated.clone(), plain.clone()],
+        vec![plain.clone(), unrelated.clone()],
+    ] {
+        let restored = VotingDb::open_browser("owner", Network::Testnet, Some(&bytes)).unwrap();
+        restored
+            .confirm_journaled_delegation(&id, 0, canonical.tx_hash(), &events)
+            .unwrap();
+    }
+}
+
+#[test]
 fn delegation_confirmation_is_atomic_immutable_and_v20_migration_is_fail_closed() {
     use zcash_voting::{
         delegation_submission::DelegationOutcome,
