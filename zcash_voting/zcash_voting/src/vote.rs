@@ -5921,10 +5921,17 @@ mod tests {
                 "vote_round_id",
                 "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
             )]),
+            event(&[("vote_commitment_leaf_indices", "41,41")]),
+            event(&[("vote_commitment_leaf_indices", "42,41")]),
+            event(&[("vote_commitment_leaf_indices", "40,42")]),
+            event(&[("vote_commitment_leaf_indices", "41,16777216")]),
+            event(&[("final_van_leaf_index", "16777216")]),
         ] {
+            let before = db.serialize_bytes().unwrap();
             assert!(db
                 .confirm_journaled_vote(ROUND_ID, 0, 1, canonical.tx_hash(), &[bad])
                 .is_err());
+            assert_eq!(db.serialize_bytes().unwrap(), before);
         }
         let mut alias = event(&[]);
         alias.attributes[0].key = "round_id".into();
@@ -5952,6 +5959,48 @@ mod tests {
         };
         assert_eq!(vc_position(1), Some(41));
         assert_eq!(vc_position(2), Some(42));
+        db.conn().execute(
+            "UPDATE votes SET vc_tree_position=NULL WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=0 AND proposal_id=2",
+            rusqlite::params![ROUND_ID, WALLET_ID],
+        ).unwrap();
+        let restored = VotingDb::open_browser(
+            WALLET_ID,
+            Network::Testnet,
+            Some(&db.serialize_bytes().unwrap()),
+        ).unwrap();
+        assert!(restored.validate_vote_submission_state(ROUND_ID).is_err());
+    }
+
+    #[test]
+    fn singleton_confirmation_rejects_decreasing_positions_without_writing_evidence() {
+        use crate::confirmation::{TxEvent, TxEventAttribute};
+        let db = db_with_vote();
+        let committed = persist_prepared_commit(&db, prepared_vote_fixture(&db)).unwrap();
+        let canonical = crate::vote_submission::CanonicalVoteSubmission::from_singleton(
+            &submission(&db, ROUND_ID, 0, committed.proposal_id()).unwrap(),
+        )
+        .unwrap();
+        db.prepare_vote_submission(ROUND_ID, 0, &canonical).unwrap();
+        db.mark_vote_dispatching(ROUND_ID, 0, 1).unwrap();
+        db.record_vote_outcome(
+            ROUND_ID,
+            0,
+            1,
+            crate::vote_submission::VoteSubmissionOutcome::Accepted,
+        )
+        .unwrap();
+        let before = db.serialize_bytes().unwrap();
+        let event = TxEvent {
+            event_type: "cast_vote".into(),
+            attributes: vec![
+                TxEventAttribute { key: "vote_round_id".into(), value: ROUND_ID.into() },
+                TxEventAttribute { key: "leaf_index".into(), value: "40,39".into() },
+            ],
+        };
+        assert!(db
+            .confirm_journaled_vote(ROUND_ID, 0, 1, canonical.tx_hash(), &[event])
+            .is_err());
+        assert_eq!(db.serialize_bytes().unwrap(), before);
     }
 
     #[test]

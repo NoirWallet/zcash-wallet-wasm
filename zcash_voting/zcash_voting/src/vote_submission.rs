@@ -624,6 +624,15 @@ impl VotingDb {
         if !replay && parsed.van_position <= current_van {
             return Err(invalid());
         }
+        if !replay {
+            validate_confirmation_positions(
+                &tx,
+                &wallet_id,
+                round_id,
+                bundle_index,
+                &parsed,
+            )?;
+        }
         for (proposal_id, vc_position) in attempt
             .canonical
             .proposal_ids
@@ -837,9 +846,13 @@ impl VotingDb {
                     if hash != attempt.canonical.tx_hash
                         || vc_positions.len() != attempt.canonical.proposal_ids.len()
                         || u64::from(van) <= tree_frontier
+                        || u64::from(van) >= (1u64 << vote_commitment_tree::TREE_DEPTH)
                         || vc_positions
                             .iter()
-                            .any(|position| *position <= u64::from(van))
+                            .any(|position| {
+                                *position <= u64::from(van)
+                                    || *position >= (1u64 << vote_commitment_tree::TREE_DEPTH)
+                            })
                         || vc_positions
                             .windows(2)
                             .any(|positions| positions[0] >= positions[1])
@@ -860,6 +873,15 @@ impl VotingDb {
                     latest_van = van;
                     tree_frontier = *vc_positions.last().ok_or_else(invalid)?;
                 } else {
+                    for proposal in &attempt.canonical.proposal_ids {
+                        let stored: Option<u64> = conn.query_row(
+                            "SELECT vc_tree_position FROM votes WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=?3 AND proposal_id=?4",
+                            params![round_id, wallet_id, bundle, proposal], |row| row.get(0)
+                        ).map_err(|_| invalid())?;
+                        if stored.is_some() {
+                            return Err(invalid());
+                        }
+                    }
                     saw_unconfirmed = true;
                 }
             }
@@ -1134,6 +1156,47 @@ fn strict_csv_u64(raw: &str) -> Result<Vec<u64>, VotingError> {
         return Err(invalid());
     }
     raw.split(',').map(strict_u64).collect()
+}
+
+fn validate_confirmation_positions(
+    conn: &rusqlite::Connection,
+    wallet_id: &str,
+    round_id: &str,
+    bundle_index: u32,
+    parsed: &ParsedConfirmation,
+) -> Result<(), VotingError> {
+    let tree_limit = 1u64 << vote_commitment_tree::TREE_DEPTH;
+    if u64::from(parsed.van_position) >= tree_limit
+        || parsed.vc_positions.is_empty()
+        || parsed
+            .vc_positions
+            .iter()
+            .any(|position| {
+                *position <= u64::from(parsed.van_position)
+                    || *position >= tree_limit
+                    || *position > i64::MAX as u64
+            })
+        || parsed
+            .vc_positions
+            .windows(2)
+            .any(|positions| positions[0] >= positions[1])
+    {
+        return Err(invalid());
+    }
+    // A new VAN must follow every persisted tree position, not merely the
+    // current VAN pointer, so a later confirmation cannot overlap history.
+    let frontier: Option<u64> = conn
+        .query_row(
+            "SELECT MAX(vc_tree_position) FROM votes
+             WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=?3",
+            params![round_id, wallet_id, bundle_index],
+            |row| row.get(0),
+        )
+        .map_err(|_| invalid())?;
+    if frontier.is_some_and(|position| u64::from(parsed.van_position) <= position) {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn load_attempt_with_conn(
