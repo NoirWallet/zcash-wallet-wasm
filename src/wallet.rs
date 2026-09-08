@@ -10,7 +10,7 @@ use sapling::ProofGenerationKey;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
@@ -54,7 +54,10 @@ use zcash_primitives::transaction::fees::{FeeRule, zip317 as prim_zip317};
 use zcash_primitives::transaction::{TxId, TxVersion};
 use zcash_proofs::prover::LocalTxProver;
 
-use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+use zcash_keys::{
+    encoding::AddressCodec,
+    keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
+};
 use zcash_protocol::ShieldedPool;
 use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkUpgrade, Parameters};
 use zcash_protocol::memo::MemoBytes;
@@ -878,7 +881,7 @@ where
     }
 
     pub(crate) async fn process_pending_transaction_requests(&self) -> Result<(), Error> {
-        let requests = {
+        let transaction_requests = {
             let db = self.db.read().await;
             db.transaction_data_requests()?.into_iter().fold(
                 BTreeMap::new(),
@@ -897,12 +900,8 @@ where
             )
         };
 
-        if requests.is_empty() {
-            return Ok(());
-        }
-
         let mut client = self.client.clone();
-        for (requested_txid, needs_enhancement) in requests {
+        for (requested_txid, needs_enhancement) in transaction_requests {
             let raw = match client
                 .get_transaction(service::TxFilter {
                     block: None,
@@ -962,6 +961,88 @@ where
 
             let mut db = self.db.write().await;
             decrypt_and_store_transaction(&self.network, &mut *db, &tx, mined_height)?;
+        }
+
+        let address_requests = {
+            let db = self.db.read().await;
+            db.transaction_data_requests()?
+                .into_iter()
+                .filter_map(|request| match request {
+                    TransactionDataRequest::TransactionsInvolvingAddress(request) => Some(request),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+
+        for request in address_requests {
+            if request
+                .request_at()
+                .is_some_and(|request_at| request_at > std::time::SystemTime::now())
+            {
+                continue;
+            }
+
+            let chain_tip_height = {
+                let db = self.db.read().await;
+                db.chain_height()?.ok_or_else(|| {
+                    Error::Generic(
+                        "Unable to process transparent transaction request without chain height"
+                            .to_string(),
+                    )
+                })?
+            };
+            let block_range_end = request
+                .block_range_end()
+                .unwrap_or(chain_tip_height + 1)
+                .min(chain_tip_height + 1);
+            if block_range_end <= request.block_range_start() {
+                continue;
+            }
+            let as_of_height = block_range_end - 1;
+
+            let mut transactions = client
+                .get_taddress_txids(service::TransparentAddressBlockFilter {
+                    address: request.address().encode(&self.network),
+                    range: Some(service::BlockRange {
+                        start: Some(service::BlockId {
+                            height: u64::from(request.block_range_start()),
+                            hash: vec![],
+                        }),
+                        end: Some(service::BlockId {
+                            height: u64::from(as_of_height),
+                            hash: vec![],
+                        }),
+                        pool_types: vec![],
+                    }),
+                })
+                .await?
+                .into_inner();
+
+            while let Some(raw) = transactions.try_next().await? {
+                let mined_height = match raw.height {
+                    0 | u64::MAX => {
+                        return Err(Error::Generic(format!(
+                            "Transparent transaction query returned unmined transaction at height {}",
+                            raw.height
+                        )));
+                    }
+                    height => BlockHeight::from_u32(u32::try_from(height).map_err(|_| {
+                        Error::Generic(format!(
+                            "Invalid mined height {height} returned for transparent transaction"
+                        ))
+                    })?),
+                };
+                let tx = zcash_primitives::transaction::Transaction::read(
+                    raw.data.as_slice(),
+                    BranchId::for_height(&self.network, mined_height),
+                )?;
+
+                let mut db = self.db.write().await;
+                decrypt_and_store_transaction(&self.network, &mut *db, &tx, Some(mined_height))?;
+            }
+
+            let mut db = self.db.write().await;
+            db.notify_address_checked(request, as_of_height)?;
         }
 
         Ok(())

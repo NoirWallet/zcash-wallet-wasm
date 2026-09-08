@@ -178,6 +178,98 @@ fn transparent_balance_tracks_pending_confirmations() {
 }
 
 #[test]
+fn recoverable_ephemeral_output_requests_spend_discovery() {
+    use zcash_client_backend::data_api::TransactionDataRequest;
+
+    let mut st = TestBuilder::new()
+        .with_data_store_factory(TestMemDbFactory::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+
+    let account_id = st.test_account().unwrap().id();
+    let ephemeral_address = st
+        .wallet_mut()
+        .reserve_next_n_ephemeral_addresses(account_id, 1)
+        .unwrap()[0]
+        .0;
+    let mined_height = st.test_account().unwrap().birthday().height() + 100;
+    let chain_tip = mined_height + 20;
+    st.wallet_mut().update_chain_tip(chain_tip).unwrap();
+
+    let outpoint = OutPoint::new([9; 32], 0);
+    let output = WalletTransparentOutput::from_parts(
+        outpoint.clone(),
+        TxOut::new(
+            Zatoshis::const_from_u64(20_000),
+            ephemeral_address.script().into(),
+        ),
+        Some(mined_height),
+        Some(account_id),
+        Some(TransparentKeyScope::EPHEMERAL),
+        None,
+    )
+    .unwrap();
+    st.wallet_mut()
+        .put_received_transparent_utxo(&output)
+        .unwrap();
+
+    let request = st
+        .wallet()
+        .transaction_data_requests()
+        .unwrap()
+        .into_iter()
+        .find_map(|request| match request {
+            TransactionDataRequest::TransactionsInvolvingAddress(request) => Some(request),
+            _ => None,
+        })
+        .expect("ephemeral output should request transparent spend discovery");
+    assert_eq!(request.address(), ephemeral_address);
+    assert_eq!(request.block_range_start(), mined_height);
+    assert_eq!(request.block_range_end(), Some(chain_tip + 1));
+
+    st.wallet_mut()
+        .notify_address_checked(request, chain_tip)
+        .unwrap();
+    assert!(
+        !st.wallet()
+            .transaction_data_requests()
+            .unwrap()
+            .iter()
+            .any(|request| matches!(
+                request,
+                TransactionDataRequest::TransactionsInvolvingAddress(_)
+            ))
+    );
+
+    st.wallet_mut().update_chain_tip(chain_tip + 1).unwrap();
+    let next_request = st
+        .wallet()
+        .transaction_data_requests()
+        .unwrap()
+        .into_iter()
+        .find_map(|request| match request {
+            TransactionDataRequest::TransactionsInvolvingAddress(request) => Some(request),
+            _ => None,
+        })
+        .expect("a new block should advance transparent spend discovery");
+    assert_eq!(next_request.block_range_start(), chain_tip + 1);
+
+    st.wallet_mut()
+        .mark_transparent_output_spent(&TxId::from_bytes([10; 32]), &outpoint)
+        .unwrap();
+    assert!(
+        !st.wallet()
+            .transaction_data_requests()
+            .unwrap()
+            .iter()
+            .any(|request| matches!(
+                request,
+                TransactionDataRequest::TransactionsInvolvingAddress(_)
+            ))
+    );
+}
+
+#[test]
 fn transparent_balance_across_shielding() {
     zcash_client_backend::data_api::testing::transparent::transparent_balance_across_shielding(
         TestMemDbFactory::new(),
