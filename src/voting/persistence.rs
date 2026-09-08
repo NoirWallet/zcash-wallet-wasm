@@ -137,6 +137,7 @@ impl Default for Persistence {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn pending_checkpoint_survives_rejection_and_dropped_retries_until_acknowledged() {
         let persistence = Persistence::default();
