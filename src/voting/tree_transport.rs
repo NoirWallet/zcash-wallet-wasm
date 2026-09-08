@@ -41,3 +41,46 @@ impl zcash_voting::tree_sync::AsyncTransport for BrowserFetchTransport {
         })
     }
 }
+
+#[cfg(debug_assertions)]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = votingTestTreeFixture)]
+pub fn voting_test_tree_fixture() -> Vec<String> {
+    let (leaf, root) = zcash_voting::tree_sync::browser_runtime_fixture();
+    vec![leaf, root]
+}
+
+#[cfg(debug_assertions)]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = votingTestTreeSync)]
+pub async fn voting_test_tree_sync(base_url: String) -> Result<bool, wasm_bindgen::JsValue> {
+    let failed = || super::types::VotingApiError::new(super::types::VotingErrorCode::ProofFailed);
+    let round_id = "0303030303030303030303030303030303030303030303030303030303030303";
+    let db = zcash_voting::storage::VotingDb::open_browser(
+        "browser-tree-runtime",
+        zcash_voting::Network::Testnet,
+        None,
+    )
+    .map_err(|_| failed())?;
+    db.create_round(
+        zcash_voting::Network::Testnet,
+        &zcash_voting::round::RoundParams {
+            vote_round_id: round_id.into(),
+            snapshot_height: 1,
+            ea_pk: vec![1; 32],
+            nc_root: vec![2; 32],
+            nullifier_imt_root: vec![3; 32],
+        },
+        None,
+    )
+    .map_err(|_| failed())?;
+    let api = zcash_voting::tree_sync::AsyncHttpTreeSyncApi::new(
+        base_url,
+        round_id,
+        std::sync::Arc::new(BrowserFetchTransport),
+    )
+    .map_err(|_| failed())?;
+    let height = zcash_voting::tree_sync::VoteTreeSync::new()
+        .sync_with_async_api(&db, round_id, &api)
+        .await
+        .map_err(|_| failed())?;
+    Ok(height == 1)
+}

@@ -10,8 +10,11 @@
 //! marked positions.
 
 use std::collections::BTreeSet;
+use std::convert::Infallible;
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use incrementalmerkletree::{Hashable, Level, Retention};
 use shardtree::{store::memory::MemoryShardStore, ShardTree};
@@ -19,7 +22,9 @@ use voting_crypto_deps::pasta_curves::Fp;
 
 use crate::hash::{MerkleHashVote, MAX_CHECKPOINTS, SHARD_HEIGHT, TREE_DEPTH};
 use crate::path::MerklePath;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::sync_api::TreeSyncApi;
+use crate::sync_api::{BlockCommitmentsPage, TreeState};
 
 /// Resource limits applied to one complete tree synchronization.
 #[derive(Clone, Copy, Debug)]
@@ -77,6 +82,8 @@ pub enum SyncError<E: fmt::Debug> {
     PageLimitExceeded { max_pages: usize },
     /// The complete sync exceeded its wall-clock budget.
     TimeLimitExceeded { max_duration: Duration },
+    /// The local checkpoint is ahead of the advertised server checkpoint.
+    CheckpointHeightMismatch { local: Option<u32>, server: u32 },
 }
 
 impl<E: fmt::Debug> fmt::Display for SyncError<E> {
@@ -120,6 +127,10 @@ impl<E: fmt::Debug> fmt::Display for SyncError<E> {
             SyncError::TimeLimitExceeded { max_duration } => {
                 write!(f, "sync time limit exceeded: max_duration={max_duration:?}")
             }
+            SyncError::CheckpointHeightMismatch { local, server } => write!(
+                f,
+                "checkpoint height mismatch: local={local:?}, server={server}"
+            ),
         }
     }
 }
@@ -206,6 +217,7 @@ impl TreeClient {
     ///   server's root at that height (the consistency check described in the README).
     /// - After pagination completes, the client must match the tip advertised by
     ///   `get_tree_state()`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn sync<A: TreeSyncApi>(&mut self, api: &A) -> Result<(), SyncError<A::Error>> {
         self.sync_with_limits(api, SyncLimits::default())
     }
@@ -215,6 +227,7 @@ impl TreeClient {
     /// API implementations should also bound each individual request. The
     /// duration here bounds a sequence of otherwise valid pages and is checked
     /// between calls; it cannot interrupt an API implementation that blocks.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn sync_with_limits<A: TreeSyncApi>(
         &mut self,
         api: &A,
@@ -257,52 +270,7 @@ impl TreeClient {
             pages_fetched += 1;
             Self::check_sync_duration(started_at, limits.max_duration)?;
 
-            for block in &page.blocks {
-                // Validate start_index continuity: the block's first leaf index must
-                // match exactly where the client expects the next leaf. A mismatch
-                // means missed blocks, duplicates, or wrong ordering.
-                if !block.leaves.is_empty() && block.start_index != self.next_position {
-                    return Err(SyncError::StartIndexMismatch {
-                        height: block.height,
-                        expected: self.next_position,
-                        got: block.start_index,
-                    });
-                }
-
-                for leaf in &block.leaves {
-                    // Use Marked retention for positions the client registered
-                    // interest in; Ephemeral for everything else. This gives
-                    // ShardTree the signal to retain witness data only where needed.
-                    let retention = if self.marked_positions.contains(&self.next_position) {
-                        Retention::Marked
-                    } else {
-                        Retention::Ephemeral
-                    };
-                    self.inner
-                        .append(*leaf, retention)
-                        .expect("append must succeed (tree not full)");
-                    self.next_position += 1;
-                }
-
-                // Checkpoint after each block's leaves, mirroring the server's
-                // EndBlocker snapshots.
-                self.inner
-                    .checkpoint(block.height)
-                    .expect("checkpoint must succeed");
-                self.last_synced_height = Some(block.height);
-
-                // Root consistency check: verify the client's computed root matches
-                // the server's root at this height. This catches corrupted leaf data,
-                // hash mismatches, or tree implementation differences.
-                let local = self.root_at_height(block.height);
-                if local != Some(block.root) {
-                    return Err(SyncError::RootMismatch {
-                        height: block.height,
-                        local,
-                        server: block.root,
-                    });
-                }
-            }
+            self.apply_block_commitments_page_inner(&page)?;
 
             // A zero cursor means this page completed the requested height range.
             if page.next_from_height == 0 {
@@ -352,6 +320,97 @@ impl TreeClient {
         Ok(())
     }
 
+    /// Apply one already-fetched commitment page without performing I/O or
+    /// consulting a platform clock.
+    pub fn apply_block_commitments_page(
+        &mut self,
+        page: &BlockCommitmentsPage,
+    ) -> Result<(), SyncError<Infallible>> {
+        self.apply_block_commitments_page_inner(page)
+    }
+
+    fn apply_block_commitments_page_inner<E: fmt::Debug>(
+        &mut self,
+        page: &BlockCommitmentsPage,
+    ) -> Result<(), SyncError<E>> {
+        for block in &page.blocks {
+            if !block.leaves.is_empty() && block.start_index != self.next_position {
+                return Err(SyncError::StartIndexMismatch {
+                    height: block.height,
+                    expected: self.next_position,
+                    got: block.start_index,
+                });
+            }
+
+            for leaf in &block.leaves {
+                let retention = if self.marked_positions.contains(&self.next_position) {
+                    Retention::Marked
+                } else {
+                    Retention::Ephemeral
+                };
+                self.inner
+                    .append(*leaf, retention)
+                    .expect("append must succeed (tree not full)");
+                self.next_position += 1;
+            }
+
+            self.inner
+                .checkpoint(block.height)
+                .expect("checkpoint must succeed");
+            self.last_synced_height = Some(block.height);
+
+            let local = self.root_at_height(block.height);
+            if local != Some(block.root) {
+                return Err(SyncError::RootMismatch {
+                    height: block.height,
+                    local,
+                    server: block.root,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind the local tree to a previously advertised tip. If commitment pages
+    /// omit empty blocks, this records their authenticated final checkpoint.
+    pub fn finalize_advertised_state(
+        &mut self,
+        state: &TreeState,
+    ) -> Result<(), SyncError<Infallible>> {
+        if self.next_position != state.next_index {
+            return Err(SyncError::IncompleteSync {
+                local_next_index: self.next_position,
+                server_next_index: state.next_index,
+            });
+        }
+        if self
+            .last_synced_height
+            .is_some_and(|height| height > state.height)
+        {
+            return Err(SyncError::CheckpointHeightMismatch {
+                local: self.last_synced_height,
+                server: state.height,
+            });
+        }
+        if self.last_synced_height != Some(state.height) {
+            self.inner
+                .checkpoint(state.height)
+                .expect("checkpoint must succeed");
+            self.last_synced_height = Some(state.height);
+        }
+
+        let local = self.root_at_height(state.height);
+        if local != Some(state.root) {
+            return Err(SyncError::RootMismatch {
+                height: state.height,
+                local,
+                server: state.root,
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn check_sync_duration<E: fmt::Debug>(
         started_at: Instant,
         max_duration: Duration,

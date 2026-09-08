@@ -67,6 +67,9 @@ pub enum AsyncHttpSyncError {
     #[error("server returned no tree state")]
     NoTreeState,
 
+    #[error("tree root response height does not match the requested checkpoint")]
+    AnchorHeightMismatch,
+
     #[error("tree endpoint is not a strict HTTP(S) base URL for a lowercase 32-byte round ID")]
     InvalidEndpoint,
 }
@@ -99,10 +102,14 @@ fn parse_tree_state(body: &[u8]) -> Result<TreeState, HttpSyncError> {
 }
 
 fn parse_root(body: &[u8]) -> Result<Option<Fp>, HttpSyncError> {
+    parse_root_state(body).map(|state| state.map(|state| state.root))
+}
+
+fn parse_root_state(body: &[u8]) -> Result<Option<TreeState>, HttpSyncError> {
     let response: QueryCommitmentTreeResponse = serde_json::from_slice(body)?;
     response
         .tree
-        .map(|state| state.into_tree_state().map(|state| state.root))
+        .map(|state| state.into_tree_state())
         .transpose()
         .map_err(HttpSyncError::Parse)
 }
@@ -322,7 +329,11 @@ impl AsyncTreeSyncApi for AsyncHttpTreeSyncApi {
             let body = api
                 .response_body(root_url(&api.base_url, &api.round_id, height))
                 .await?;
-            parse_root(&body).map_err(Self::map_parse)
+            let state = parse_root_state(&body).map_err(Self::map_parse)?;
+            if state.as_ref().is_some_and(|state| state.height != height) {
+                return Err(AsyncHttpSyncError::AnchorHeightMismatch);
+            }
+            Ok(state.map(|state| state.root))
         })
     }
 

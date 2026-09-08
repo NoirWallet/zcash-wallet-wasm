@@ -31,6 +31,33 @@ try {
       wallet.free();
     });
   } else {
+    await test('async vote tree applies one page and finalizes in the browser runtime', async () => {
+      const [leaf, root] = bindings.votingTestTreeFixture();
+      const round = '03'.repeat(32);
+      const base = 'https://tree.example';
+      const prefix = `/shielded-vote/v1/commitment-tree/${round}`;
+      const hits = [];
+      const original = window.fetch;
+      window.fetch = async request => {
+        const url = new URL(request.url);
+        hits.push(`${url.pathname}${url.search}`);
+        assert(request.method === 'GET', 'tree sync must use GET');
+        assert(request.credentials === 'omit' && request.redirect === 'error', 'unsafe tree Fetch options');
+        const tree = {next_index:1,root,height:1};
+        if (url.pathname === `${prefix}/latest`) return new Response(JSON.stringify({tree}));
+        if (url.pathname === `${prefix}/leaves`) return new Response(JSON.stringify({
+          blocks:[{height:1,start_index:0,leaves:[leaf],root}],next_from_height:0,
+        }));
+        if (url.pathname === `${prefix}/1`) return new Response(JSON.stringify({tree}));
+        return new Response('', {status:404});
+      };
+      try {
+        assert(await bindings.votingTestTreeSync(base), 'tree page/finalization failed');
+        assert(JSON.stringify(hits) === JSON.stringify([
+          `${prefix}/latest`,`${prefix}/leaves?from_height=0&to_height=1`,`${prefix}/1`,
+        ]), `unexpected tree request trace: ${JSON.stringify(hits)}`);
+      } finally { window.fetch = original; }
+    });
   await test('owned proof execution on the initialized global pool and sequential executor', async () => {
     assert(await bindings.votingTestProofExecutor(), 'executor result or worker mismatch');
   });

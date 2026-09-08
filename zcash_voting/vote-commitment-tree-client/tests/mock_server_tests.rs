@@ -539,6 +539,23 @@ fn async_http_api_uses_canonical_routes_and_parsers() {
 }
 
 #[test]
+fn async_http_api_rejects_root_from_a_different_height() {
+    const ROUND: &str = "abababababababababababababababababababababababababababababababab";
+    let base = "https://node.example";
+    let url = format!("{base}/shielded-vote/v1/commitment-tree/{ROUND}/7");
+    let transport = MockAsyncTransport::with_responses([(
+        url,
+        Ok(json_response(format!(
+            r#"{{"tree":{{"next_index":1,"root":"{}","height":6}}}}"#,
+            fp_bytes_to_b64(fp(10))
+        ))),
+    )]);
+    let api = AsyncHttpTreeSyncApi::new(base, ROUND, transport).unwrap();
+    let error = poll_ready(api.get_root_at_height(7)).unwrap_err();
+    assert!(error.to_string().contains("height"), "{error}");
+}
+
+#[test]
 fn async_http_api_rejects_unbound_urls_rounds_and_oversized_bodies() {
     const ROUND: &str = "abababababababababababababababababababababababababababababababab";
     let transport = MockAsyncTransport::with_responses([]);

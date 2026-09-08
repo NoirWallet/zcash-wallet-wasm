@@ -4499,6 +4499,7 @@ dependencies = [
  "vote-commitment-tree-client",
  "voting-circuits",
  "voting-crypto-deps",
+ "web-sys",
  "zakura-wallet-lib",
  "zcash_client_backend",
  "zcash_client_sqlite",

@@ -8,12 +8,16 @@
 pub(crate) use crate::backend::pasta_curves;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
+#[cfg(test)]
+use vote_commitment_tree::sync_api::{BlockCommitmentsPage, TreeState};
 pub use vote_commitment_tree::AsyncTreeSyncApi;
-use vote_commitment_tree::{
-    sync_api::{BlockCommitmentsPage, TreeState},
-    MerklePath, SyncError, TreeClient, TreeSyncApi,
-};
+use vote_commitment_tree::{MerklePath, TreeClient};
+#[cfg(not(target_arch = "wasm32"))]
+use vote_commitment_tree::{SyncError, TreeSyncApi};
 #[cfg(not(target_arch = "wasm32"))]
 use vote_commitment_tree_client::http_sync_api::HttpTreeSyncApi;
 pub use vote_commitment_tree_client::{
@@ -51,7 +55,14 @@ mod tests {
     use super::*;
     use pasta_curves::group::ff::PrimeField;
     use pasta_curves::Fp;
-    use std::sync::mpsc;
+    use std::collections::VecDeque;
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
     use std::time::Duration;
     use vote_commitment_tree::MemoryTreeServer;
 
@@ -321,6 +332,118 @@ mod tests {
         assert_eq!(second_result.unwrap().unwrap(), 0);
     }
 
+    struct ScriptedClock {
+        values: Mutex<VecDeque<Duration>>,
+        last: Mutex<Duration>,
+    }
+
+    impl MonotonicClock for ScriptedClock {
+        fn now(&self) -> Duration {
+            if let Some(value) = self.values.lock().unwrap().pop_front() {
+                *self.last.lock().unwrap() = value;
+                value
+            } else {
+                *self.last.lock().unwrap()
+            }
+        }
+    }
+
+    struct TwoPageAsyncApi {
+        server: MemoryTreeServer,
+        calls: AtomicUsize,
+    }
+
+    impl AsyncTreeSyncApi for TwoPageAsyncApi {
+        type Error = Infallible;
+
+        fn get_tree_state(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<TreeState, Self::Error>> + Send>> {
+            let state = TreeSyncApi::get_tree_state(&self.server).unwrap();
+            Box::pin(async move { Ok(state) })
+        }
+
+        fn get_root_at_height(
+            &self,
+            height: u32,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<Fp>, Self::Error>> + Send>> {
+            let root = TreeSyncApi::get_root_at_height(&self.server, height).unwrap();
+            Box::pin(async move { Ok(root) })
+        }
+
+        fn get_block_commitments(
+            &self,
+            from_height: u32,
+            to_height: u32,
+        ) -> Pin<Box<dyn Future<Output = Result<BlockCommitmentsPage, Self::Error>> + Send>>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let page_height = from_height.max(1).min(to_height);
+            let page =
+                TreeSyncApi::get_block_commitments(&self.server, from_height, page_height).unwrap();
+            Box::pin(async move {
+                Ok(BlockCommitmentsPage {
+                    blocks: page.blocks,
+                    next_from_height: (page_height < to_height)
+                        .then_some(page_height + 1)
+                        .unwrap_or(0),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn async_sync_duration_expiry_retains_progress_without_validating_witnesses() {
+        let db = db_for_round(ROUND_ID);
+        db.ensure_bundles(ROUND_ID, &[note(0)]).unwrap();
+        db.store_van_position(ROUND_ID, 0, 0).unwrap();
+        db.conn()
+            .execute(
+                "UPDATE bundles SET gov_comm = ?1
+                 WHERE round_id = ?2 AND wallet_id = ?3 AND bundle_index = 0",
+                rusqlite::params![Fp::from(1).to_repr().as_slice(), ROUND_ID, WALLET_ID],
+            )
+            .unwrap();
+        let api = TwoPageAsyncApi {
+            server: server_with_single_leaf_blocks(2),
+            calls: AtomicUsize::new(0),
+        };
+        let clock = Arc::new(ScriptedClock {
+            values: Mutex::new(VecDeque::from([
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::from_secs(301),
+            ])),
+            last: Mutex::new(Duration::ZERO),
+        });
+        let sync = VoteTreeSync::with_clock(clock);
+
+        let error = sync
+            .sync_with_async_api(&db, ROUND_ID, &api)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("time limit"), "{error}");
+        assert_eq!(api.calls.load(Ordering::SeqCst), 1);
+        let round_client = sync.clients.lock().unwrap().get(ROUND_ID).cloned().unwrap();
+        assert_eq!(round_client.lock().unwrap().client.size(), 1);
+        assert!(sync.generate_van_witness(&db, ROUND_ID, 0, 1).is_err());
+
+        assert_eq!(
+            sync.sync_with_async_api(&db, ROUND_ID, &api).await.unwrap(),
+            2
+        );
+        assert_eq!(api.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            sync.generate_van_witness(&db, ROUND_ID, 0, 2)
+                .unwrap()
+                .position,
+            0
+        );
+    }
+
     fn db_for_round(round_id: &str) -> VotingDb {
         let db = VotingDb::open_in_memory().unwrap();
         db.set_wallet_id(WALLET_ID);
@@ -429,35 +552,50 @@ impl Drop for SyncLease {
     }
 }
 
-#[derive(Clone)]
-struct BufferedTreeApi {
-    state: TreeState,
-    page: BlockCommitmentsPage,
-}
-
-impl TreeSyncApi for BufferedTreeApi {
-    type Error = std::convert::Infallible;
-
-    fn get_block_commitments(
-        &self,
-        _from_height: u32,
-        _to_height: u32,
-    ) -> Result<BlockCommitmentsPage, Self::Error> {
-        Ok(self.page.clone())
-    }
-
-    fn get_root_at_height(&self, _height: u32) -> Result<Option<pasta_curves::Fp>, Self::Error> {
-        Ok(None)
-    }
-
-    fn get_tree_state(&self) -> Result<TreeState, Self::Error> {
-        Ok(self.state.clone())
-    }
-}
-
 enum VanValidationFailure {
     Invalid(VotingError),
     Pending(VotingError),
+}
+
+trait MonotonicClock: Send + Sync {
+    fn now(&self) -> Duration;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PlatformMonotonicClock(Instant);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PlatformMonotonicClock {
+    fn new() -> Self {
+        Self(Instant::now())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MonotonicClock for PlatformMonotonicClock {
+    fn now(&self) -> Duration {
+        self.0.elapsed()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct PlatformMonotonicClock;
+
+#[cfg(target_arch = "wasm32")]
+impl PlatformMonotonicClock {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl MonotonicClock for PlatformMonotonicClock {
+    fn now(&self) -> Duration {
+        web_sys::window()
+            .and_then(|window| window.performance())
+            .map(|performance| Duration::from_secs_f64(performance.now().max(0.0) / 1_000.0))
+            .unwrap_or(Duration::ZERO)
+    }
 }
 
 /// Manages per-round in-memory vote commitment trees for VAN witness generation.
@@ -466,6 +604,7 @@ enum VanValidationFailure {
 /// lock, so a remote sync cannot block unrelated rounds for the same wallet.
 pub struct VoteTreeSync {
     clients: Mutex<HashMap<String, Arc<Mutex<RoundTreeClient>>>>,
+    clock: Arc<dyn MonotonicClock>,
     #[cfg(not(target_arch = "wasm32"))]
     transport: Arc<HyperTransport>,
 }
@@ -474,6 +613,17 @@ impl VoteTreeSync {
     pub fn new() -> Self {
         Self {
             clients: Mutex::new(HashMap::new()),
+            clock: Arc::new(PlatformMonotonicClock::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            transport: Arc::new(HyperTransport::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_clock(clock: Arc<dyn MonotonicClock>) -> Self {
+        Self {
+            clients: Mutex::new(HashMap::new()),
+            clock,
             #[cfg(not(target_arch = "wasm32"))]
             transport: Arc::new(HyperTransport::new()),
         }
@@ -501,6 +651,7 @@ impl VoteTreeSync {
         self.sync_with_api(db, round_id, &api)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn sync_with_api<A>(
         &self,
         db: &VotingDb,
@@ -562,6 +713,8 @@ impl VoteTreeSync {
         round_id: &str,
         api: &A,
     ) -> Result<u32, VotingError> {
+        let limits = vote_commitment_tree::SyncLimits::default();
+        let started_at = self.clock.now();
         let wallet_id = db.wallet_id();
         let entries = queries::load_van_tree_entries(&db.conn(), round_id, &wallet_id)?;
         let positions = entries
@@ -570,12 +723,12 @@ impl VoteTreeSync {
             .collect::<BTreeSet<_>>();
         let lease = self.acquire_async_lease(round_id, &positions)?;
 
-        let state = api
-            .get_tree_state()
-            .await
-            .map_err(|_| VotingError::Internal {
-                message: "vote tree state fetch failed".to_string(),
-            })?;
+        self.check_async_duration(started_at, limits.max_duration)?;
+        let state_result = api.get_tree_state().await;
+        self.check_async_duration(started_at, limits.max_duration)?;
+        let state = state_result.map_err(|_| VotingError::Internal {
+            message: "vote tree state fetch failed".to_string(),
+        })?;
         self.ensure_current(round_id, &lease)?;
 
         let (mut page_from, to_height, needs_pages) = {
@@ -585,32 +738,38 @@ impl VoteTreeSync {
                 .map_err(|e| VotingError::Internal {
                     message: format!("round tree client lock poisoned: {e}"),
                 })?;
+            let local_height = client.client.last_synced_height();
+            let page_from = match local_height {
+                Some(height) => height.checked_add(1).unwrap_or(u32::MAX),
+                None => 0,
+            };
+            let height_is_behind = local_height
+                .map(|height| height < state.height)
+                .unwrap_or(state.height > 0);
             (
-                client
-                    .client
-                    .last_synced_height()
-                    .map(|h| h + 1)
-                    .unwrap_or(0),
+                page_from,
                 state.height,
-                client.client.size() != state.next_index,
+                client.client.size() != state.next_index || height_is_behind,
             )
         };
 
         if needs_pages && page_from <= to_height {
-            let max_pages = vote_commitment_tree::SyncLimits::default().max_pages;
             let mut pages_fetched = 0usize;
             loop {
-                if pages_fetched >= max_pages {
+                if pages_fetched >= limits.max_pages {
                     return Err(VotingError::Internal {
-                        message: format!("vote tree sync page limit exceeded: {max_pages}"),
+                        message: format!(
+                            "vote tree sync page limit exceeded: {}",
+                            limits.max_pages
+                        ),
                     });
                 }
-                let page = api
-                    .get_block_commitments(page_from, to_height)
-                    .await
-                    .map_err(|_| VotingError::Internal {
-                        message: "vote tree commitment page fetch failed".to_string(),
-                    })?;
+                self.check_async_duration(started_at, limits.max_duration)?;
+                let page_result = api.get_block_commitments(page_from, to_height).await;
+                self.check_async_duration(started_at, limits.max_duration)?;
+                let page = page_result.map_err(|_| VotingError::Internal {
+                    message: "vote tree commitment page fetch failed".to_string(),
+                })?;
                 pages_fetched += 1;
                 self.ensure_current(round_id, &lease)?;
 
@@ -651,47 +810,7 @@ impl VoteTreeSync {
                         return Err(Self::stale_sync_error());
                     }
                     client.validated_height = None;
-                    let added = page.blocks.iter().try_fold(0u64, |total, block| {
-                        let count = u64::try_from(block.leaves.len()).map_err(|_| ())?;
-                        total.checked_add(count).ok_or(())
-                    });
-                    let added = match added {
-                        Ok(added) => added,
-                        Err(()) => {
-                            client.clear_tree();
-                            return Err(VotingError::Internal {
-                                message: "vote tree commitment page size overflow".to_string(),
-                            });
-                        }
-                    };
-                    let next_index = match client.client.size().checked_add(added) {
-                        Some(next_index) => next_index,
-                        None => {
-                            client.clear_tree();
-                            return Err(VotingError::Internal {
-                                message: "vote tree position overflow".to_string(),
-                            });
-                        }
-                    };
-                    let page_state = if let Some(last) = page.blocks.last() {
-                        TreeState {
-                            next_index,
-                            root: last.root,
-                            height: last.height,
-                        }
-                    } else {
-                        TreeState {
-                            next_index,
-                            root: client.client.root(),
-                            height: client.client.last_synced_height().unwrap_or(0),
-                        }
-                    };
-                    let mut buffered_page = page.clone();
-                    buffered_page.next_from_height = 0;
-                    client.client.sync(&BufferedTreeApi {
-                        state: page_state,
-                        page: buffered_page,
-                    })
+                    client.client.apply_block_commitments_page(&page)
                 };
                 if let Err(error) = apply_result {
                     self.invalidate_current(round_id, &lease)?;
@@ -714,45 +833,39 @@ impl VoteTreeSync {
                 .map_err(|e| VotingError::Internal {
                     message: format!("round tree client lock poisoned: {e}"),
                 })?;
-            let final_check = client.client.sync(&BufferedTreeApi {
-                state: state.clone(),
-                page: BlockCommitmentsPage {
-                    blocks: Vec::new(),
-                    next_from_height: 0,
-                },
-            });
+            let final_check = client.client.finalize_advertised_state(&state);
             if let Err(error) = final_check {
                 client.clear_tree();
                 return Err(VotingError::Internal {
                     message: format!("vote tree final state validation failed: {error}"),
                 });
             }
-            client.client.last_synced_height().unwrap_or(0)
+            state.height
         };
 
-        if state.next_index > 0 {
-            let server_root =
-                api.get_root_at_height(anchor_height)
-                    .await
-                    .map_err(|_| VotingError::Internal {
-                        message: "vote tree anchor root fetch failed".to_string(),
-                    })?;
-            self.ensure_current(round_id, &lease)?;
-            let matches = {
-                let client = lease
-                    .round_client
-                    .lock()
-                    .map_err(|e| VotingError::Internal {
-                        message: format!("round tree client lock poisoned: {e}"),
-                    })?;
-                server_root == client.client.root_at_height(anchor_height)
-            };
-            if !matches {
-                self.invalidate_current(round_id, &lease)?;
-                return Err(VotingError::Internal {
-                    message: "vote tree anchor root does not match the verified tree".to_string(),
-                });
-            }
+        self.check_async_duration(started_at, limits.max_duration)?;
+        let server_root_result = api.get_root_at_height(anchor_height).await;
+        self.check_async_duration(started_at, limits.max_duration)?;
+        let server_root = server_root_result.map_err(|_| VotingError::Internal {
+            message: "vote tree anchor root fetch failed".to_string(),
+        })?;
+        self.ensure_current(round_id, &lease)?;
+        let matches = {
+            let client = lease
+                .round_client
+                .lock()
+                .map_err(|e| VotingError::Internal {
+                    message: format!("round tree client lock poisoned: {e}"),
+                })?;
+            server_root == Some(state.root)
+                && client.client.root_at_height(anchor_height) == Some(state.root)
+        };
+        if !matches {
+            self.invalidate_current(round_id, &lease)?;
+            return Err(VotingError::Internal {
+                message: "vote tree anchor root does not match the advertised verified tree"
+                    .to_string(),
+            });
         }
 
         let registry = self.clients.lock().map_err(|e| VotingError::Internal {
@@ -774,7 +887,8 @@ impl VoteTreeSync {
             return Err(Self::stale_sync_error());
         }
         if client.client.size() != state.next_index
-            || (state.next_index > 0 && client.client.root() != state.root)
+            || client.client.last_synced_height() != Some(state.height)
+            || client.client.root_at_height(state.height) != Some(state.root)
         {
             client.clear_tree();
             return Err(VotingError::Internal {
@@ -788,6 +902,20 @@ impl VoteTreeSync {
                 Err(error)
             }
             Err(VanValidationFailure::Pending(error)) => Err(error),
+        }
+    }
+
+    fn check_async_duration(
+        &self,
+        started_at: Duration,
+        max_duration: Duration,
+    ) -> Result<(), VotingError> {
+        if self.clock.now().saturating_sub(started_at) > max_duration {
+            Err(VotingError::Internal {
+                message: format!("vote tree sync time limit exceeded: {max_duration:?}"),
+            })
+        } else {
+            Ok(())
         }
     }
 
@@ -985,4 +1113,23 @@ impl VoteTreeSync {
         }
         Ok(())
     }
+}
+
+/// Public inputs for the root Chrome harness's mocked tree endpoint.
+#[cfg(all(target_arch = "wasm32", debug_assertions))]
+pub fn browser_runtime_fixture() -> (String, String) {
+    use base64::prelude::*;
+    use vote_commitment_tree::{MemoryTreeServer, TreeSyncApi};
+    use voting_crypto_deps::pasta_curves::{group::ff::PrimeField, Fp};
+
+    let mut server = MemoryTreeServer::empty();
+    server.append(Fp::one()).expect("fixture append succeeds");
+    server.checkpoint(1).expect("fixture checkpoint succeeds");
+    let root = TreeSyncApi::get_root_at_height(&server, 1)
+        .unwrap()
+        .expect("fixture checkpoint root exists");
+    (
+        BASE64_STANDARD.encode(Fp::one().to_repr()),
+        BASE64_STANDARD.encode(root.to_repr()),
+    )
 }

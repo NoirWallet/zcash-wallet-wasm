@@ -90,6 +90,7 @@ rusqlite = { version = "=0.37.0", features = ["bundled", "serialize", "backup"] 
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Performance", "Window"] }
 getrandom = { version = "0.2", features = ["js"] }
 rusqlite-browser = { package = "rusqlite", path = "../browser-deps/rusqlite", version = "=0.40.2", default-features = false, features = ["cache", "ffi-sqlite-wasm-rs", "serialize", "fallible_uint"] }
 sqlite-wasm-rs = { version = "=0.5.5", default-features = false }

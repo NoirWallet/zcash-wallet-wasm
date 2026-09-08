@@ -1628,7 +1628,10 @@ mod async_tree_contract {
         fail_page: AtomicUsize,
         fail_state: AtomicBool,
         corrupt_root: bool,
+        corrupt_state_root: bool,
         corrupt_anchor_root: bool,
+        omit_empty_blocks: bool,
+        root_requests: Mutex<Vec<u32>>,
         cursor_fault: CursorFault,
     }
 
@@ -1642,7 +1645,10 @@ mod async_tree_contract {
                 fail_page: AtomicUsize::new(usize::MAX),
                 fail_state: AtomicBool::new(false),
                 corrupt_root: false,
+                corrupt_state_root: false,
                 corrupt_anchor_root: false,
+                omit_empty_blocks: false,
+                root_requests: Mutex::new(Vec::new()),
                 cursor_fault: CursorFault::None,
             }
         }
@@ -1654,12 +1660,22 @@ mod async_tree_contract {
             server.checkpoint(height).unwrap();
         }
 
+        fn append_empty_block(&self) {
+            let mut server = self.server.lock().unwrap();
+            let height = server.latest_checkpoint().unwrap_or(0) + 1;
+            server.checkpoint(height).unwrap();
+        }
+
         fn fail_once_on_page(&self, page: usize) {
             self.fail_page.store(page, Ordering::SeqCst);
         }
 
         fn requests(&self) -> Vec<(u32, u32)> {
             self.calls.lock().unwrap().clone()
+        }
+
+        fn root_requests(&self) -> Vec<u32> {
+            self.root_requests.lock().unwrap().clone()
         }
     }
 
@@ -1670,11 +1686,15 @@ mod async_tree_contract {
             if self.fail_state.swap(false, Ordering::SeqCst) {
                 return Box::pin(async { Err(FixtureError::Fetch) });
             }
-            let state = TreeSyncApi::get_tree_state(&*self.server.lock().unwrap()).unwrap();
+            let mut state = TreeSyncApi::get_tree_state(&*self.server.lock().unwrap()).unwrap();
+            if self.corrupt_state_root {
+                state.root += Fp::one();
+            }
             Box::pin(async move { Ok(state) })
         }
 
         fn get_root_at_height(&self, height: u32) -> TreeFuture<Option<Fp>> {
+            self.root_requests.lock().unwrap().push(height);
             let mut root =
                 TreeSyncApi::get_root_at_height(&*self.server.lock().unwrap(), height).unwrap();
             if self.corrupt_anchor_root {
@@ -1706,6 +1726,9 @@ mod async_tree_contract {
                 page_to,
             )
             .unwrap();
+            if self.omit_empty_blocks {
+                page.blocks.retain(|block| !block.leaves.is_empty());
+            }
             page.next_from_height = if page_to < to_height { page_to + 1 } else { 0 };
             if self.corrupt_root {
                 if let Some(block) = page.blocks.last_mut() {
@@ -1724,6 +1747,9 @@ mod async_tree_contract {
 
     fn server(blocks: u32) -> MemoryTreeServer {
         let mut server = MemoryTreeServer::empty();
+        if blocks == 0 {
+            server.checkpoint(0).unwrap();
+        }
         for height in 1..=blocks {
             server.append(Fp::from(u64::from(height))).unwrap();
             server.checkpoint(height).unwrap();
@@ -1798,6 +1824,58 @@ mod async_tree_contract {
             .requests()
             .iter()
             .any(|(from, to)| *from == 4 && *to == 4));
+    }
+
+    #[tokio::test]
+    async fn async_tree_binds_same_size_empty_height_advancement() {
+        let db = db(Some((0, Fp::from(1))));
+        let mut api = AsyncServer::new(1, 1);
+        api.omit_empty_blocks = true;
+        let sync = VoteTreeSync::new();
+        assert_eq!(
+            sync.sync_with_async_api(&db, ROUND_ID, &api).await.unwrap(),
+            1
+        );
+
+        api.append_empty_block();
+        assert_eq!(
+            sync.sync_with_async_api(&db, ROUND_ID, &api).await.unwrap(),
+            2
+        );
+        assert_eq!(api.requests().last(), Some(&(2, 2)));
+        assert_eq!(api.root_requests().last(), Some(&2));
+        assert_eq!(
+            sync.generate_van_witness(&db, ROUND_ID, 0, 2)
+                .unwrap()
+                .anchor_height,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn async_tree_authenticates_initial_empty_checkpoint() {
+        let db = db(None);
+        let mut valid = AsyncServer::new(0, 1);
+        valid.omit_empty_blocks = true;
+        valid.append_empty_block();
+        let sync = VoteTreeSync::new();
+        assert_eq!(
+            sync.sync_with_async_api(&db, ROUND_ID, &valid)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(valid.root_requests(), vec![1]);
+
+        let mut mismatched = AsyncServer::new(0, 1);
+        mismatched.omit_empty_blocks = true;
+        mismatched.append_empty_block();
+        mismatched.corrupt_state_root = true;
+        let sync = VoteTreeSync::new();
+        assert!(sync
+            .sync_with_async_api(&db, ROUND_ID, &mismatched)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

@@ -31,6 +31,9 @@ pub enum ParseError {
 
     #[error("non-canonical Fp encoding ({context})")]
     NonCanonicalFp { context: &'static str },
+
+    #[error("numeric field {field} is out of range: {value}")]
+    NumericOutOfRange { field: &'static str, value: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +109,10 @@ fn decode_fp_base64(b64: &str, context: &'static str) -> Result<Fp, ParseError> 
 impl ChainTreeState {
     /// Convert to the domain `TreeState`.
     pub fn into_tree_state(self) -> Result<TreeState, ParseError> {
+        let height = u32::try_from(self.height).map_err(|_| ParseError::NumericOutOfRange {
+            field: "tree_state.height",
+            value: self.height,
+        })?;
         let root = match &self.root {
             Some(b64) if !b64.is_empty() => decode_fp_base64(b64, "tree_state.root")?,
             _ => Fp::zero(),
@@ -113,7 +120,7 @@ impl ChainTreeState {
         Ok(TreeState {
             next_index: self.next_index,
             root,
-            height: self.height as u32,
+            height,
         })
     }
 }
@@ -121,6 +128,10 @@ impl ChainTreeState {
 impl ChainBlockCommitments {
     /// Convert to the domain `BlockCommitments`.
     pub fn into_block_commitments(self) -> Result<BlockCommitments, ParseError> {
+        let height = u32::try_from(self.height).map_err(|_| ParseError::NumericOutOfRange {
+            field: "block_commitments.height",
+            value: self.height,
+        })?;
         let mut leaves = Vec::with_capacity(self.leaves.len());
         for (i, b64) in self.leaves.iter().enumerate() {
             let fp = decode_fp_base64(b64, "block_commitments.leaf")?;
@@ -128,7 +139,7 @@ impl ChainBlockCommitments {
             let _ = i; // suppress unused warning in non-debug
         }
         Ok(BlockCommitments {
-            height: self.height as u32,
+            height,
             start_index: self.start_index,
             leaves,
             root: decode_fp_base64(
@@ -144,6 +155,11 @@ impl ChainBlockCommitments {
 impl QueryCommitmentLeavesResponse {
     /// Convert to the domain `BlockCommitmentsPage`.
     pub fn into_block_commitments_page(self) -> Result<BlockCommitmentsPage, ParseError> {
+        let next_from_height =
+            u32::try_from(self.next_from_height).map_err(|_| ParseError::NumericOutOfRange {
+                field: "commitment_leaves.next_from_height",
+                value: self.next_from_height,
+            })?;
         let blocks = self
             .blocks
             .into_iter()
@@ -151,7 +167,7 @@ impl QueryCommitmentLeavesResponse {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(BlockCommitmentsPage {
             blocks,
-            next_from_height: self.next_from_height as u32,
+            next_from_height,
         })
     }
 }
@@ -192,6 +208,20 @@ mod tests {
         let json = r#"{"tree":null}"#;
         let resp: QueryLatestTreeResponse = serde_json::from_str(json).unwrap();
         assert!(resp.tree.is_none());
+    }
+
+    #[test]
+    fn parse_tree_state_rejects_height_above_u32() {
+        let json = r#"{"tree":{"height":4294967296}}"#;
+        let resp: QueryLatestTreeResponse = serde_json::from_str(json).unwrap();
+        let err = resp.tree.unwrap().into_tree_state().unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::NumericOutOfRange {
+                field: "tree_state.height",
+                value: 4_294_967_296
+            }
+        ));
     }
 
     #[test]
@@ -246,6 +276,38 @@ mod tests {
         assert!(matches!(
             err,
             ParseError::MissingField("block_commitments.root")
+        ));
+    }
+
+    #[test]
+    fn parse_block_commitments_rejects_height_above_u32() {
+        let zero_b64 = BASE64_STANDARD.encode([0u8; 32]);
+        let json = format!(
+            r#"{{"blocks":[{{"height":4294967296,"root":"{}"}}]}}"#,
+            zero_b64
+        );
+        let resp: QueryCommitmentLeavesResponse = serde_json::from_str(&json).unwrap();
+        let err = resp.into_block_commitments_page().unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::NumericOutOfRange {
+                field: "block_commitments.height",
+                value: 4_294_967_296
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_block_commitments_rejects_cursor_above_u32() {
+        let json = r#"{"blocks":[],"next_from_height":4294967296}"#;
+        let resp: QueryCommitmentLeavesResponse = serde_json::from_str(json).unwrap();
+        let err = resp.into_block_commitments_page().unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::NumericOutOfRange {
+                field: "commitment_leaves.next_from_height",
+                value: 4_294_967_296
+            }
         ));
     }
 
