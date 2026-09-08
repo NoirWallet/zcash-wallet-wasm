@@ -275,6 +275,12 @@ impl VotingDb {
                         let original_position = u32::try_from(position).map_err(|_| invalid())?;
                         let current_position =
                             u32::try_from(current_position).map_err(|_| invalid())?;
+                        let capacity = 1u64 << vote_commitment_tree::TREE_DEPTH;
+                        if u64::from(original_position) >= capacity
+                            || u64::from(current_position) >= capacity
+                        {
+                            return Err(invalid());
+                        }
                         if current_position != original_position {
                             // A cast vote advances the bundle's current VAN. The immutable
                             // delegation position may therefore differ only when the vote
@@ -289,12 +295,7 @@ impl VotingDb {
                                           AND confirmation_tx_hash=tx_hash
                                           AND confirmation_van_position=?4
                                     )",
-                                    params![
-                                        round,
-                                        self.wallet_id(),
-                                        bundle,
-                                        current_position
-                                    ],
+                                    params![round, self.wallet_id(), bundle, current_position],
                                     |row| row.get(0),
                                 )
                                 .map_err(|_| invalid())?;

@@ -27,7 +27,8 @@ The browser patch categories are:
   dependency adapters documented in [browser-deps/README.md](browser-deps/README.md).
 - Input-based wallet boundary: native wallet DB convenience entry points are
   gated. Protocol types, note bundling, signing, and witness validation remain
-  compiled; the browser input adapter is added in the subsequent wallet task.
+  compiled. The browser input adapter gathers owned wallet notes and witnesses,
+  validates snapshot identity, and prepares the existing protocol inputs.
 - SQLite serialization: `serialize` is enabled for both SQLite variants.
   Browser connections own byte loading and serialization on the caller thread;
   sensitive voting SQLite bytes are owner-bound and are not exposed through
@@ -64,9 +65,9 @@ of the complete stored protocol parameters and network for recovery identity
 comparison, with safe errors for missing or unreadable records.
 
 The browser voting database upgrades in place from launched schema v13 through
-current schema v22: v17 binds bytes to one wallet owner and network, v18 adds a
-wallet/round-scoped voting hotkey, v19 adds the canonical delegation-attempt
-journal, v20 adds immutable delegation confirmation evidence, and v22 adds the
+current schema v22: v18 binds bytes to one wallet owner and network, v19 adds a
+wallet/round-scoped voting hotkey, v20 adds the canonical delegation-attempt
+journal, v21 adds immutable delegation confirmation evidence, and v22 adds the
 canonical vote-attempt journal. Pre-launch databases reset; launched databases
 retain recoverable state and reject unknown newer versions. Hotkeys and
 canonical recovery material remain only in sensitive owner-bound voting SQLite
@@ -81,8 +82,8 @@ upstream decoding; query encoding and proof verification remain unchanged.
 Owned proof inputs may run sequentially or on the host's initialized Rayon pool;
 native large-stack proof behavior remains target-gated and unchanged.
 
-Delegation's schema v19 owner/round/bundle-scoped canonical journal and schema
-v20 confirmation fields preserve immutable original submission identity and
+Delegation's schema v20 owner/round/bundle-scoped canonical journal and schema
+v21 confirmation fields preserve immutable original submission identity and
 validated VAN position. Vote schema v22 journals canonical batch bytes,
 precomputed transaction identity, ordered membership, outcome, and confirmation
 evidence. Recovery polls by the canonical precomputed hash after a possible
@@ -92,6 +93,14 @@ the sensitive voting SQLite export. An owned proof job separates synchronous
 database reads and writes from executor work. The explicit delegation planner
 covers prepared bundles without creating ballot choices or changing the
 ordinary ballot/helper resume planner.
+
+Initial delegation confirmation and restored original/current positions are
+bounded by the vote commitment tree's protocol depth even before any vote.
+Unsigned PCZT/proof continuation validates the original TX1 effects with the
+selected backend's V6 transaction digest, the snapshot-derived branch ID, and
+the account's randomized verification key before root-wallet signing. It never
+rebuilds an existing PCZT or replaces write-once effects; a completed proof is
+reused. Native compatibility event parsing remains unchanged.
 
 The pinned voting library has no vote-chain HTTP client. The local
 `delegation_submission` adapter uses the exact REST routes, request/response

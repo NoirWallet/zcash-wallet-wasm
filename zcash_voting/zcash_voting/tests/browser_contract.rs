@@ -11,6 +11,58 @@ use zcash_voting as fixture_sdk;
 mod owned_proof_fixture;
 
 #[test]
+fn delegation_tree_capacity_is_checked_atomically_and_after_reload() {
+    use zcash_voting::{storage::VotingDb, Network, VotingRoundParams};
+    let db = VotingDb::open_browser("owner", Network::Testnet, None).unwrap();
+    let id = "01".repeat(32);
+    let params = VotingRoundParams {
+        vote_round_id: id.clone(),
+        snapshot_height: delegation_fixture::height(),
+        ea_pk: vec![0; 32],
+        nc_root: vec![0; 32],
+        nullifier_imt_root: vec![0; 32],
+    };
+    db.init_round(Network::Testnet, &params, None).unwrap();
+    let canonical = delegation_fixture::prepare(&db, &params, 17);
+    db.prepare_delegation_submission(&id, 0, &canonical)
+        .unwrap();
+    db.mark_delegation_dispatching(&id, 0).unwrap();
+    let pending = db.serialize_bytes().unwrap();
+    let limit = 1u64 << vote_commitment_tree::TREE_DEPTH;
+    for position in [limit, u64::from(u32::MAX)] {
+        assert!(db
+            .confirm_journaled_delegation(
+                &id,
+                0,
+                canonical.tx_hash(),
+                &[delegation_fixture::event(&id, &position.to_string())]
+            )
+            .is_err());
+        assert_eq!(db.serialize_bytes().unwrap(), pending);
+    }
+    db.confirm_journaled_delegation(
+        &id,
+        0,
+        canonical.tx_hash(),
+        &[delegation_fixture::event(&id, &(limit - 1).to_string())],
+    )
+    .unwrap();
+    let confirmed = db.serialize_bytes().unwrap();
+    for position in [limit, u64::from(u32::MAX)] {
+        for sql in [
+            format!("UPDATE bundles SET van_leaf_position={position}"),
+            format!("UPDATE delegation_attempts SET confirmation_van_position={position}"),
+            format!("UPDATE bundles SET van_leaf_position={position}; UPDATE delegation_attempts SET confirmation_van_position={position}"),
+        ] {
+            let bytes = delegation_fixture::corrupt(&confirmed, &sql);
+            let restored = VotingDb::open_browser("owner", Network::Testnet, Some(&bytes)).unwrap();
+            assert!(restored.validate_delegation_state(&id).is_err(), "{sql}");
+            assert_eq!(restored.serialize_bytes().unwrap(), bytes);
+        }
+    }
+}
+
+#[test]
 fn vote_recovery_browser_surface_uses_one_durable_driver_and_owned_jobs() {
     let bindgen = include_str!("../../../src/bindgen/voting.rs");
     let session = include_str!("../../../src/voting/session.rs");
@@ -134,7 +186,8 @@ fn delegation_rest_events_reject_legacy_repairs_and_noncanonical_values() {
             zcash_voting::phases::DelegationPhase::Confirmed
         );
     }
-    for position in ["0", "3753", "4294967295"] {
+    let largest_position = ((1u64 << vote_commitment_tree::TREE_DEPTH) - 1).to_string();
+    for position in ["0", "3753", largest_position.as_str()] {
         let restored = VotingDb::open_browser("owner", Network::Testnet, Some(&bytes)).unwrap();
         restored
             .confirm_journaled_delegation(

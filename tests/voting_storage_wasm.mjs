@@ -32,9 +32,9 @@ try {
   },metadata);
   expect(result.equal).toBe(true);expect(result.walletEqual).toBe(true);expect(result.revision).toBe('11');
   await page.goto(origin+'/test_voting.html');
-  await expect(page.locator('#wallet-status')).toHaveText('Wallet restored',{timeout:120000});
+  await expect(page.locator('#wallet-status')).toHaveText(/Wallet restored\s+Scanned height: 3000000\s+Balance: 0 zats \| Spendable: 0 zats \| Pending: 0 zats\s+Chain tip: (\d+|unavailable)/,{timeout:120000});
   await expect(page.locator('#mnemonic')).toHaveValue('');
-  await page.reload();await expect(page.locator('#wallet-status')).toHaveText('Wallet restored',{timeout:120000});
+  await page.reload();await expect(page.locator('#wallet-status')).toHaveText(/Wallet restored\s+Scanned height: 3000000\s+Balance: 0 zats \| Spendable: 0 zats \| Pending: 0 zats\s+Chain tip: (\d+|unavailable)/,{timeout:120000});
   page.once('dialog',dialog=>dialog.accept());await page.locator('#clear').click();
   await expect(page.locator('#wallet-status')).toHaveText('Local state cleared');
   await page.reload();await expect(page.locator('#initialize')).toBeEnabled({timeout:120000});await expect(page.locator('#sync')).toBeDisabled();

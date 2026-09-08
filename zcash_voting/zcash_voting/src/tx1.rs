@@ -49,6 +49,73 @@ pub fn validate_tx1_effects(effects: &[u8]) -> Result<(), VotingError> {
     Ok(())
 }
 
+/// Reconstructs the fixed TX1 profile using the selected backend's V6 digest.
+pub fn tx1_sighash(
+    effects: &[u8],
+    branch: zcash_protocol::consensus::BranchId,
+) -> Result<[u8; 32], VotingError> {
+    use crate::backend::zcash_primitives::transaction::{
+        txid::{to_txid, TxIdDigester},
+        Authorization, Authorized, TransactionData, TxVersion,
+    };
+    use orchard::{
+        bundle::{BundleVersion, EffectsOnly, Flags},
+        note::{ExtractedNoteCommitment, Nullifier, TransmittedNoteCiphertext},
+        primitives::redpallas::VerificationKey,
+        value::ValueCommitment,
+        Action, Anchor, Bundle,
+    };
+    use zcash_protocol::value::ZatBalance;
+    let invalid = || VotingError::InvalidInput {
+        message: "invalid stored delegation signing effects".into(),
+    };
+    validate_tx1_effects(effects)?;
+    if TxVersion::suggested_for_branch(branch) != TxVersion::V6 {
+        return Err(invalid());
+    }
+    let field = |start| -> [u8; 32] { effects[start..start + 32].try_into().unwrap() };
+    struct Effects;
+    impl Authorization for Effects {
+        type TransparentAuth = <Authorized as Authorization>::TransparentAuth;
+        type SaplingAuth = <Authorized as Authorization>::SaplingAuth;
+        type OrchardAuth = EffectsOnly;
+    }
+    let action = Action::from_parts(
+        Option::from(Nullifier::from_bytes(&field(33))).ok_or_else(invalid)?,
+        VerificationKey::try_from(field(65)).map_err(|_| invalid())?,
+        Option::from(ExtractedNoteCommitment::from_bytes(&field(97))).ok_or_else(invalid)?,
+        TransmittedNoteCiphertext {
+            epk_bytes: field(129),
+            enc_ciphertext: effects[161..741].try_into().unwrap(),
+            out_ciphertext: effects[741..821].try_into().unwrap(),
+        },
+        Option::from(ValueCommitment::from_bytes(&field(1))).ok_or_else(invalid)?,
+        (),
+    )
+    .map_err(|_| invalid())?;
+    let version = BundleVersion::ironwood_v3();
+    let bundle = Bundle::from_parts(
+        nonempty::NonEmpty::new(action),
+        Flags::from_byte(7, version).ok_or_else(invalid)?,
+        ZatBalance::from_i64(1).map_err(|_| invalid())?,
+        Anchor::empty_tree(),
+        EffectsOnly,
+        version,
+    )
+    .map_err(|_| invalid())?;
+    let tx = TransactionData::<Effects>::from_parts_v6(
+        branch,
+        0,
+        0.into(),
+        None,
+        None,
+        None,
+        Some(bundle),
+    );
+    // With no transparent bundle, the shielded signature digest is the V6 txid digest.
+    Ok(*to_txid(TxVersion::V6, branch, &tx.digest(TxIdDigester)).as_ref())
+}
+
 /// Encodes the finalized Ironwood action as:
 ///
 /// `version || (cv_net || nullifier || rk || cmx || ephemeral_key ||
@@ -216,6 +283,10 @@ mod tests {
         );
 
         let sighash = decode_array::<32>(&fixture.sighash);
+        assert_eq!(
+            tx1_sighash(&effects, zcash_protocol::consensus::BranchId::Nu6_3).unwrap(),
+            sighash
+        );
         let signature = Signature::<SpendAuth>::from(decode_array::<64>(&fixture.spend_auth_sig));
         VerificationKey::<SpendAuth>::try_from(rk)
             .unwrap()

@@ -823,6 +823,175 @@ impl VotingDb {
         })
     }
 
+    /// Loads and validates the original, definitely unsigned browser delegation request.
+    pub fn get_delegation_resume_signing_request(
+        &self,
+        round_id: &str,
+        bundle_index: u32,
+        keys: &DelegationKeys,
+        notes: &[NoteInfo],
+    ) -> Result<(DelegationSigningRequest, [u8; 32]), VotingError> {
+        let invalid = || VotingError::InvalidInput {
+            message: "invalid persisted delegation signing request".into(),
+        };
+        if self
+            .get_delegation_tx_hash(round_id, bundle_index)?
+            .is_some()
+        {
+            return Err(invalid());
+        }
+        let request = self.get_delegation_signing_request(round_id, bundle_index, keys)?;
+        let conn = self.conn();
+        let (params, network) =
+            queries::load_round_params_with_network(&conn, round_id, &self.wallet_id())?;
+        let branch = zcash_protocol::consensus::BranchId::try_from(
+            crate::delegate::branch_id_for_height(network, params.snapshot_height)?,
+        )
+        .map_err(|_| invalid())?;
+        let (effects,nf,cmx,rk): (Vec<u8>,Vec<u8>,Vec<u8>,Vec<u8>) = conn.query_row(
+            "SELECT tx1_effects,nf_signed,cmx_new,rk FROM bundles WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=?3",
+            rusqlite::params![round_id,self.wallet_id(),bundle_index],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).map_err(|_|invalid())?;
+        if crate::tx1::tx1_sighash(&effects, branch)? != request.sighash
+            || effects[33..65] != nf
+            || effects[65..97] != rk
+            || effects[97..129] != cmx
+        {
+            return Err(invalid());
+        }
+        let alpha = Option::<pallas::Scalar>::from(pallas::Scalar::from_repr(request.alpha))
+            .ok_or_else(invalid)?;
+        let fvk = FullViewingKey::from_bytes(
+            &keys
+                .fvk_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| invalid())?,
+        )
+        .ok_or_else(invalid)?;
+        let expected: [u8; 32] =
+            (&orchard::keys::SpendValidatingKey::from(fvk.clone()).randomize(&alpha)).into();
+        if rk != expected {
+            return Err(invalid());
+        }
+        queries::require_bundle_notes(&conn, round_id, &self.wallet_id(), bundle_index, notes)?;
+        let padded =
+            queries::load_padded_note_secrets(&conn, round_id, &self.wallet_id(), bundle_index)?;
+        if notes.is_empty() || notes.len() + padded.len() != BUNDLE_NOTE_SLOTS {
+            return Err(invalid());
+        }
+        let mut commitments = notes
+            .iter()
+            .map(|n| n.commitment.clone())
+            .collect::<Vec<_>>();
+        let mut nullifiers = notes
+            .iter()
+            .map(|n| n.nullifier.clone())
+            .collect::<Vec<_>>();
+        for (index, (rho, rseed)) in padded.iter().enumerate() {
+            let rho = Option::<Rho>::from(Rho::from_bytes(
+                &rho.as_slice().try_into().map_err(|_| invalid())?,
+            ))
+            .ok_or_else(invalid)?;
+            let rseed = Option::<RandomSeed>::from(RandomSeed::from_bytes(
+                rseed.as_slice().try_into().map_err(|_| invalid())?,
+                &rho,
+            ))
+            .ok_or_else(invalid)?;
+            let parts = synthetic_padding_note_parts(&fvk, notes.len() + index, rho, rseed)
+                .map_err(|_| invalid())?;
+            commitments.push(parts.cmx.to_vec());
+            nullifiers.push(parts.nullifier.to_vec());
+        }
+        let raw: [u8; 43] = keys
+            .hotkey_raw_address
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid())?;
+        let recipient =
+            Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(&raw))
+                .ok_or_else(invalid)?;
+        let (gx, px) = crate::action::derive_hotkey_x_coords_from_raw_address(&raw)?;
+        let weight = notes
+            .iter()
+            .try_fold(0u64, |total, n| total.checked_add(n.value))
+            .ok_or_else(invalid)?;
+        let round = hex::decode(round_id).map_err(|_| invalid())?;
+        let van_rand =
+            queries::load_van_comm_rand(&conn, round_id, &self.wallet_id(), bundle_index)?;
+        let van = crate::governance::construct_van(&gx, &px, weight, &round, &van_rand)?;
+        let domain = crate::governance::compute_nullifier_domain(&round)?;
+        let gov_nullifiers = nullifiers
+            .iter()
+            .map(|nf| crate::governance::derive_gov_nullifier(&keys.fvk_bytes[32..64], &domain, nf))
+            .collect::<Result<Vec<_>, _>>()?
+            .concat();
+        let (stored_van,stored_nullifiers): (Vec<u8>,Vec<u8>) = conn.query_row(
+            "SELECT gov_comm,gov_nullifiers_blob FROM bundles WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=?3",
+            rusqlite::params![round_id,self.wallet_id(),bundle_index],|row|Ok((row.get(0)?,row.get(1)?)),
+        ).map_err(|_|invalid())?;
+        if stored_van != van || stored_nullifiers != gov_nullifiers {
+            return Err(invalid());
+        }
+        let rho = crate::governance::compute_rho_binding(
+            &commitments[0],
+            &commitments[1],
+            &commitments[2],
+            &commitments[3],
+            &commitments[4],
+            &van,
+            &round,
+        )?;
+        let rho = Option::<Rho>::from(Rho::from_bytes(
+            &rho.as_slice().try_into().map_err(|_| invalid())?,
+        ))
+        .ok_or_else(invalid)?;
+        let signed_seed =
+            queries::load_rseed_signed(&conn, round_id, &self.wallet_id(), bundle_index)?;
+        let signed_seed = Option::<RandomSeed>::from(RandomSeed::from_bytes(
+            signed_seed.as_slice().try_into().map_err(|_| invalid())?,
+            &rho,
+        ))
+        .ok_or_else(invalid)?;
+        let signed = Option::<orchard::Note>::from(orchard::Note::from_parts(
+            fvk.address_at(0u32, zip32::Scope::External),
+            orchard::value::NoteValue::from_raw(1),
+            rho,
+            signed_seed,
+            orchard::NoteVersion::V3,
+        ))
+        .ok_or_else(invalid)?;
+        if signed.nullifier(&fvk).to_bytes().as_slice() != nf {
+            return Err(invalid());
+        }
+        let output_rho = Option::<Rho>::from(Rho::from_bytes(
+            &nf.as_slice().try_into().map_err(|_| invalid())?,
+        ))
+        .ok_or_else(invalid)?;
+        let output_seed =
+            queries::load_rseed_output(&conn, round_id, &self.wallet_id(), bundle_index)?;
+        let output_seed = Option::<RandomSeed>::from(RandomSeed::from_bytes(
+            output_seed.as_slice().try_into().map_err(|_| invalid())?,
+            &output_rho,
+        ))
+        .ok_or_else(invalid)?;
+        let output = Option::<orchard::Note>::from(orchard::Note::from_parts(
+            recipient,
+            orchard::value::NoteValue::from_raw(0),
+            output_rho,
+            output_seed,
+            orchard::NoteVersion::V3,
+        ))
+        .ok_or_else(invalid)?;
+        let output_cmx =
+            orchard::note::ExtractedNoteCommitment::from(output.commitment()).to_bytes();
+        if output_cmx.as_slice() != cmx {
+            return Err(invalid());
+        }
+        Ok((request, expected))
+    }
+
     /// Build a governance-specific PCZT for Keystone signing.
     /// Loads round params from db. Notes come from caller.
     /// Computes governance values and builds a PCZT whose governance action

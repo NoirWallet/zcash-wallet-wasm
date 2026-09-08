@@ -27,16 +27,58 @@ pub fn prepare_bundles(
     seed: u8,
     count: u8,
 ) -> Vec<CanonicalDelegation> {
+    prepare_selected_bundles(db, params, seed, count, None)
+}
+
+pub fn complete_bundle(
+    db: &VotingDb,
+    params: &VotingRoundParams,
+    seed: u8,
+    count: u8,
+    bundle: u32,
+    canonical: &CanonicalDelegation,
+) -> CanonicalDelegation {
+    if db.delegation_phase(&params.vote_round_id, bundle).unwrap()
+        == zcash_voting::phases::DelegationPhase::Prepared
+    {
+        return prepare_selected_bundles(db, params, seed, count, Some(bundle)).remove(0);
+    }
+    if db.delegation_phase(&params.vote_round_id, bundle).unwrap()
+        == zcash_voting::phases::DelegationPhase::Proved
+    {
+        return canonical.clone();
+    }
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let wire: zcash_voting::wire::DelegationSubmissionWire =
+        serde_json::from_slice(canonical.json_bytes()).unwrap();
+    let decode = |value: &str| STANDARD.decode(value).unwrap();
+    db.store_delegation_proof(
+        &params.vote_round_id,
+        bundle,
+        &zcash_voting::DelegationProofResult {
+            proof: decode(&wire.proof),
+            public_inputs: vec![],
+            nf_signed: decode(&wire.nf_signed),
+            cmx_new: decode(&wire.cmx_new),
+            gov_nullifiers: wire.gov_nullifiers.iter().map(|v| decode(v)).collect(),
+            van_comm: decode(&wire.gov_comm),
+            rk: decode(&wire.rk),
+        },
+    )
+    .unwrap();
+    canonical.clone()
+}
+
+pub fn notes(seed: u8, count: u8) -> Vec<NoteInfo> {
     let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
         &Network::Testnet,
         &[seed; 32],
         zip32::AccountId::ZERO,
     )
     .unwrap();
-    let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&[seed; 32]).unwrap();
     let ufvk = usk.to_unified_full_viewing_key();
     let fvk = ufvk.orchard().unwrap();
-    let notes = (0..count)
+    (0..count)
         .map(|index| {
             let rho = orchard::note::Rho::from_bytes(&[index + 1; 32]).unwrap();
             let rseed = (0..=255)
@@ -59,7 +101,26 @@ pub fn prepare_bundles(
             )
             .unwrap()
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
+
+fn prepare_selected_bundles(
+    db: &VotingDb,
+    params: &VotingRoundParams,
+    seed: u8,
+    count: u8,
+    selected: Option<u32>,
+) -> Vec<CanonicalDelegation> {
+    let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+        &Network::Testnet,
+        &[seed; 32],
+        zip32::AccountId::ZERO,
+    )
+    .unwrap();
+    let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&[seed; 32]).unwrap();
+    let ufvk = usk.to_unified_full_viewing_key();
+    let fvk = ufvk.orchard().unwrap();
+    let notes = notes(seed, count);
     let id = &params.vote_round_id;
     db.ensure_bundles_with_policy(id, &notes, zcash_voting::BundlePolicy::new(1).unwrap())
         .unwrap();
@@ -75,6 +136,7 @@ pub fn prepare_bundles(
     notes
         .into_iter()
         .enumerate()
+        .filter(|(index, _)| selected.is_none_or(|bundle| *index as u32 == bundle))
         .map(|(index, note)| {
             let index = index as u32;
             let setup = db
@@ -162,6 +224,8 @@ pub fn corrupt(bytes: &[u8], sql: &str) -> Vec<u8> {
 
 pub fn confirmed_corruptions() -> Vec<&'static str> {
     vec![
+        "UPDATE bundles SET van_leaf_position=16777216 WHERE bundle_index=1; UPDATE delegation_attempts SET confirmation_van_position=16777216 WHERE bundle_index=1",
+        "UPDATE bundles SET van_leaf_position=4294967295 WHERE bundle_index=1; UPDATE delegation_attempts SET confirmation_van_position=4294967295 WHERE bundle_index=1",
         "UPDATE proofs SET proof=x'02' WHERE bundle_index=1",
         "DELETE FROM proofs WHERE bundle_index=1",
         "UPDATE bundles SET pczt_sighash=zeroblob(32) WHERE bundle_index=1",

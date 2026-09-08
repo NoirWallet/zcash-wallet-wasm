@@ -13,7 +13,7 @@ wasm-opt = ["-O4", "-O4", "--enable-threads", "--enable-bulk-memory", "--enable-
 default = ["wasm-parallel"]
 multicore = ["zcash_proofs/multicore", "zcash_primitives/multicore", "zcash_client_memory/multicore", "orchard/multicore"]
 wasm-parallel = ["wasm-bindgen-rayon", "multicore"]
-voting = ["dep:zcash_voting", "dep:futures-channel", "dep:web-sys", "dep:serde_json", "dep:base64"]
+voting = ["dep:zcash_voting", "dep:futures-channel", "dep:web-sys", "dep:serde_json", "dep:base64", "dep:rand_core"]
 voting-test-fixtures = ["voting", "zcash_voting/test-fixtures"]
 
 [dependencies.zcash_voting]
@@ -23,6 +23,7 @@ features = ["lrz", "browser"]
 optional = true
 
 [dependencies]
+rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 serde_json = { version = "1", optional = true }
 base64 = { version = "0.22", optional = true }
 wasm-bindgen = { version = "0.2" }

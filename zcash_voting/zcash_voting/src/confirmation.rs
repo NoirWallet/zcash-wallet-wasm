@@ -101,6 +101,11 @@ pub(crate) fn record_delegation_confirmation_fields(
     bundle_index: u32,
     confirmation: &DelegationConfirmation,
 ) -> Result<(), VotingError> {
+    if u64::from(confirmation.van_leaf_position) >= (1u64 << vote_commitment_tree::TREE_DEPTH) {
+        return Err(VotingError::InvalidInput {
+            message: "delegation position exceeds vote commitment tree capacity".into(),
+        });
+    }
     let (stored_hash, stored_van_position) =
         load_bundle_confirmation_fields(conn, round_id, wallet_id, bundle_index)?;
     check_text_conflict(

@@ -32,12 +32,35 @@ dependency name across targets.
 - Release archive: https://static.crates.io/crates/pir-client/pir-client-0.7.2.crate
 - SHA-256: `ba1965648d9ea094809794710b0a654c9376d034b38405fba610905d91150bbd`
 
-The normalized manifest moves Tokio to a non-WASM dependency table.
-`src/lib.rs` gates `PirClientBlocking` and its implementation to native targets,
-and uses the existing `futures::try_join!` for the two independent tier fetches.
-The asynchronous `PirClient`, local proof APIs, parsing, protocol validation,
-and transport traits remain compiled on both targets. Native blocking behavior
-is retained. The voting crate uses this same path dependency on both targets.
+The maintained release-to-local patch categories are:
+
+- The normalized manifest moves Tokio to a non-WASM dependency table and adds
+  WASM-only `js-sys`. `PirClientBlocking` and its implementation remain native;
+  the async client and proof APIs compile on both targets.
+- WASM timing uses a `Date::now()` adapter with negative elapsed time clamped
+  to zero; native timing retains `std::time::Instant`.
+- Root/layout/geometry validation precedes large asset downloads.
+  `futures::join!` finishes both tier fetches and independently validates every
+  successful asset, including Tier 0 length/root and Tier 1 scenario geometry.
+  A permanent validation error dominates a sibling retryable transport error.
+- `RetryableTransportError` is a typed host classification, retained through
+  `anyhow::Context` error chains. Limit, identity, decode and proof failures
+  must not carry this marker. Non-success query responses use the marker.
+- Before assertion-based SimplePIR decoding, response length is checked against
+  the codec's ciphertext geometry and instance count using checked arithmetic.
+- Query failure logging omits raw transport errors and response bodies.
+  Query encoding and cryptographic proof verification remain upstream.
+
+The voting crate uses this same adapter on both targets. The reviewed complete
+release-to-local diff SHA-256 is
+`ddab09cabd842d5a0828066f3396d4ffc6983300653b1bd769b072e7884706f0`.
+Final maintained file SHA-256 values (release source/archives remain above):
+
+| File | SHA-256 |
+| --- | --- |
+| `Cargo.toml` | `2a92f58cfd349c20c20391454b85e60f28bef15ee287baeef24b8821dc255a7d` |
+| `src/lib.rs` | `7b78f0cef77c098a251768e86096cb5382b170884579884656364d124d8c7f03` |
+| `src/transport.rs` | `45b9920ad251d0e4dbc51fe122aafe0b54a1ebe77ebeb52f6a102acd004a80a3` |
 
 ## Import Verification
 

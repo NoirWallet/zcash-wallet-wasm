@@ -9,8 +9,16 @@ export class WebWallet {
   async create_account() { await new Promise(resolve => setTimeout(resolve, 250)); return 0; }
   async db_to_bytes() { return this.bytes; }
   async sync_next_batch() { await new Promise(resolve => setTimeout(resolve, 250)); this.bytes = new Uint8Array([13,14]); return false; }
-  async get_wallet_summary() { return undefined; }
-  async get_latest_height() { return 3771641; }
+  async get_wallet_summary() {
+    if (this.bytes[0] !== 13) return undefined;
+    return {
+      chain_tip_height: 3771741, fully_scanned_height: 3771700,
+      account_balances: [[0, {sapling_balance:0,orchard_balance:100000000,ironwood_balance:0,unshielded_balance:0,sapling_pending_balance:0,orchard_pending_balance:20000000,ironwood_pending_balance:0,unshielded_pending_balance:0,sapling_total_balance:0,orchard_total_balance:120000000,ironwood_total_balance:0,unshielded_total_balance:0,spendable_balance:100000000,pending_balance:20000000,total_balance:120000000}]],
+      next_sapling_subtree_index:0n,next_orchard_subtree_index:0n,next_ironwood_subtree_index:0n,
+      free() {},
+    };
+  }
+  async get_latest_height() { return 3771800; }
   free() {}
 }
 export class WebVotingSession {
@@ -19,7 +27,7 @@ export class WebVotingSession {
   async discoverRounds() { return { configFingerprint:'fixture', accepted:[{roundId:'accepted',name:'Community round',snapshotHeight:3771641,startsAt:'2026-01-01',endsAt:'2099-01-01',proposalCount:1}],rejected:[{roundId:'rejected',code:'ROUND_UNAUTHENTICATED',message:'Unauthenticated round'}] }; }
   async roundProposals() { return [{proposalId:1,title:'Community allocation',options:['Approve','Decline']}]; }
   async checkEligibility() { return {roundId:'accepted',eligible:true,selectedValueZats:'100000000',votingPower:'1',selectedNoteCount:1,bundleCount:1,trimmedValueZats:'0'}; }
-  async roundStatus() { return {roundId:'accepted',phase:this.phase??(this.bytes?'round_prepared':'uninitialized'),completedBundles:0,totalBundles:1,confirmedVotes:0,totalVotes:1,confirmedHelpers:0,requiredHelpers:1,nextAction:'prepare_round'}; }
+  async roundStatus() { return {roundId:'accepted',phase:this.phase??(this.bytes?'round_prepared':'uninitialized'),completedBundles:0,totalBundles:1,confirmedVotes:0,totalVotes:1,confirmedHelpers:0,requiredHelpers:1,nextAction:this.bytes?'submit_delegation':'prepare_round'}; }
   async submitDelegation(id,key,fingerprint) { key.consume();fingerprint.consume();this.phase='delegation_confirmed';await this.persist(new Uint8Array([24]),++this.revision); }
   async submitBallot(id,decisions) { if(decisions.length!==1||decisions[0].proposalId!==1||decisions[0].kind!=='skip') throw new Error('incorrect fixture ballot');this.phase='shares_confirmed';await this.persist(new Uint8Array([25]),++this.revision); }
   async prepareRound() { this.bytes=new Uint8Array([21,22]); await this.persist(this.bytes,++this.revision); return {roundId:'accepted',bundleCount:1,selectedNoteCount:1,votingPower:'1',state:'round_prepared'}; }
