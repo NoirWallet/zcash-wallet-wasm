@@ -1201,6 +1201,15 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
             .delete_starts_greater_than_equal_to(truncation_height + 1);
         self.scan_queue.truncate_ends_to(truncation_height + 1);
 
+        #[cfg(feature = "transparent-inputs")]
+        for account in self.accounts.values_mut() {
+            for candidate in account.internal_address_discovery.values_mut() {
+                candidate.checked_height = candidate
+                    .checked_height
+                    .map(|height| height.min(truncation_height));
+            }
+        }
+
         // Mark transparent utxos as un-mined. Since the TXO is now not mined, it would ideally be
         // considered to have been returned to the mempool; it _might_ be spendable in this state, but
         // we must also set its max_observed_unspent_height field to NULL because the transaction may
@@ -1445,6 +1454,8 @@ Instead derive the ufvk in the calling code and import it using `import_account_
     ) -> Result<(), Self::Error> {
         tracing::debug!("set_transaction_status");
         self.tx_table.set_transaction_status(&txid, status)?;
+        #[cfg(feature = "transparent-inputs")]
+        self.ensure_internal_address_gaps()?;
         let request_resolved = match status {
             TransactionStatus::Mined(_) => true,
             TransactionStatus::TxidNotRecognized | TransactionStatus::NotInMainChain => {
@@ -1556,8 +1567,34 @@ Instead derive the ufvk in the calling code and import it using `import_account_
         request: TransactionsInvolvingAddress,
         as_of_height: BlockHeight,
     ) -> Result<(), Self::Error> {
+        use zcash_client_backend::data_api::{OutputStatusFilter, TransactionStatusFilter};
+
+        // Only complete mined history proves the absence of historical uses or
+        // spends. UTXO-only and mempool-only responses cannot advance this cursor.
+        let full_history = request.output_status_filter() == &OutputStatusFilter::All
+            && request.tx_status_filter() != &TransactionStatusFilter::Mempool;
+        for account in self.accounts.values_mut() {
+            let birthday = account.birthday().height();
+            for candidate in account.internal_address_discovery.values_mut() {
+                if full_history && candidate.address == request.address() {
+                    let next = candidate
+                        .checked_height
+                        .map_or(birthday, |height| height + 1);
+                    // Only contiguous, fully completed history ranges advance
+                    // discovery. An out-of-order suffix cannot skip older use.
+                    if request.block_range_start() <= next && as_of_height >= next {
+                        candidate.checked_height = Some(as_of_height);
+                    }
+                }
+            }
+        }
+        self.transaction_data_request_queue.0.retain(|pending| {
+            !matches!(pending, zcash_client_backend::data_api::TransactionDataRequest::TransactionsInvolvingAddress(queued)
+                if queued == &request && queued.block_range_end().is_some_and(|end| as_of_height >= end - 1))
+        });
         for (outpoint, output) in self.transparent_received_outputs.iter_mut() {
-            if output.address == request.address()
+            if full_history
+                && output.address == request.address()
                 && !self
                     .transparent_received_output_spends
                     .contains_key(outpoint)

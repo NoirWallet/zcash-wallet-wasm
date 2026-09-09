@@ -234,6 +234,14 @@ pub(crate) struct InternalAddress {
     pub(crate) exposed_at_height: BlockHeight,
 }
 
+/// Recovery candidates are not reservations. Keep checked empty addresses too,
+/// so an in-flight response remains recognizable after the gap advances.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InternalAddressDiscovery {
+    pub(crate) address: TransparentAddress,
+    pub(crate) checked_height: Option<BlockHeight>,
+}
+
 impl EphemeralAddress {
     #[cfg(feature = "transparent-inputs")]
     fn mark_used(&mut self, tx: TxId) {
@@ -262,6 +270,7 @@ pub struct Account {
     addresses: BTreeMap<DiversifierIndex, UnifiedAddress>,
     pub(crate) ephemeral_addresses: BTreeMap<u32, EphemeralAddress>, // NonHardenedChildIndex (< 1 << 31)
     pub(crate) internal_addresses: BTreeMap<u32, InternalAddress>,
+    pub(crate) internal_address_discovery: BTreeMap<u32, InternalAddressDiscovery>,
     _notes: BTreeSet<NoteId>,
 }
 
@@ -280,6 +289,7 @@ impl PartialEq for Account {
             && self.addresses == other.addresses
             && self.ephemeral_addresses == other.ephemeral_addresses
             && self.internal_addresses == other.internal_addresses
+            && self.internal_address_discovery == other.internal_address_discovery
             && self._notes == other._notes
     }
 }
@@ -300,6 +310,7 @@ impl Account {
             birthday,
             ephemeral_addresses: BTreeMap::new(),
             internal_addresses: BTreeMap::new(),
+            internal_address_discovery: BTreeMap::new(),
             addresses: BTreeMap::new(),
             _notes: BTreeSet::new(),
         };
@@ -309,7 +320,10 @@ impl Account {
             acc.default_address(UnifiedAddressRequest::AllAvailableKeys)?;
         acc.addresses.insert(diversifier_index, ua);
         #[cfg(feature = "transparent-inputs")]
-        acc.reserve_until(0)?;
+        {
+            acc.reserve_until(0)?;
+            acc.ensure_internal_gap(0)?;
+        }
         Ok(acc)
     }
 
@@ -447,15 +461,69 @@ impl Account {
 #[cfg(feature = "transparent-inputs")]
 impl Account {
     pub(crate) fn contains_internal_address(&self, address: &TransparentAddress) -> bool {
-        self.internal_addresses
-            .values()
-            .any(|internal| internal.address == *address)
+        self.internal_address_index(address).is_some()
     }
 
     pub(crate) fn internal_address_index(&self, address: &TransparentAddress) -> Option<u32> {
         self.internal_addresses
             .iter()
             .find_map(|(index, internal)| (internal.address == *address).then_some(*index))
+            .or_else(|| {
+                self.internal_address_discovery
+                    .iter()
+                    .find_map(|(index, candidate)| {
+                        (candidate.address == *address).then_some(*index)
+                    })
+            })
+    }
+
+    /// Maintain a rolling lookahead after the last mined use, without exposing
+    /// or reserving those addresses for transaction construction.
+    pub(crate) fn ensure_internal_gap(&mut self, first_gap_index: u32) -> Result<(), Error> {
+        let Some(pubkey) = self.viewing_key.transparent() else {
+            return Ok(());
+        };
+        let end = first_gap_index
+            .saturating_add(INTERNAL_GAP_LIMIT)
+            .min(1 << 31);
+        let start = self
+            .internal_address_discovery
+            .last_key_value()
+            .map_or(0, |(index, _)| index + 1);
+        if start >= end {
+            return Ok(());
+        }
+        let ivk = pubkey.derive_internal_ivk()?;
+        for index in start..end {
+            let child = NonHardenedChildIndex::from_index(index)
+                .ok_or(AddressGenerationError::DiversifierSpaceExhausted)?;
+            self.internal_address_discovery.insert(
+                index,
+                InternalAddressDiscovery {
+                    address: ivk.derive_address(child)?,
+                    checked_height: None,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mark_internal_address_seen(
+        &mut self,
+        address: &TransparentAddress,
+        height: BlockHeight,
+    ) {
+        if let Some(index) = self.internal_address_index(address) {
+            self.internal_addresses
+                .entry(index)
+                .and_modify(|internal| {
+                    internal.exposed_at_height = internal.exposed_at_height.min(height);
+                })
+                .or_insert(InternalAddress {
+                    address: *address,
+                    exposed_at_height: height,
+                });
+        }
     }
 
     pub(crate) fn next_internal_address_index(&self) -> Result<u32, Error> {
@@ -501,15 +569,29 @@ impl Account {
         &self,
         first_gap_index: u32,
     ) -> Vec<(TransparentAddress, TransparentAddressMetadata)> {
-        self.internal_addresses
+        let mut addresses = self
+            .internal_address_discovery
             .iter()
-            .map(|(index, internal)| {
+            .map(|(index, candidate)| {
                 (
-                    internal.address,
-                    Self::internal_address_metadata(*index, internal, first_gap_index),
+                    candidate.address,
+                    TransparentAddressMetadata::derived(
+                        TransparentKeyScope::INTERNAL,
+                        NonHardenedChildIndex::from_index(*index)
+                            .expect("discovery index is non-hardened"),
+                        Exposure::Unknown,
+                        None,
+                    ),
                 )
             })
-            .collect()
+            .collect::<BTreeMap<_, _>>();
+        addresses.extend(self.internal_addresses.iter().map(|(index, internal)| {
+            (
+                internal.address,
+                Self::internal_address_metadata(*index, internal, first_gap_index),
+            )
+        }));
+        addresses.into_iter().collect()
     }
 
     pub(crate) fn metadata_for_internal_address(
@@ -517,12 +599,9 @@ impl Account {
         address: &TransparentAddress,
         first_gap_index: u32,
     ) -> Option<TransparentAddressMetadata> {
-        self.internal_addresses
-            .iter()
-            .find(|(_, internal)| internal.address == *address)
-            .map(|(index, internal)| {
-                Self::internal_address_metadata(*index, internal, first_gap_index)
-            })
+        self.internal_addresses(first_gap_index)
+            .into_iter()
+            .find_map(|(candidate, metadata)| (candidate == *address).then_some(metadata))
     }
 
     pub(crate) fn reserve_internal_addresses(
@@ -854,6 +933,18 @@ mod serialization {
                 ephemeral_addresses: Default::default(),
                 #[cfg(not(feature = "transparent-inputs"))]
                 internal_addresses: Default::default(),
+                #[cfg(feature = "transparent-inputs")]
+                internal_address_discovery: acc
+                    .internal_address_discovery
+                    .into_iter()
+                    .map(|(index, candidate)| proto::InternalAddressDiscoveryRecord {
+                        index,
+                        address: candidate.address.encode(&EncodingParams),
+                        checked_height: candidate.checked_height.map(Into::into),
+                    })
+                    .collect(),
+                #[cfg(not(feature = "transparent-inputs"))]
+                internal_address_discovery: Default::default(),
             }
         }
     }
@@ -862,7 +953,14 @@ mod serialization {
         type Error = crate::Error;
 
         fn try_from(acc: proto::Account) -> Result<Self, Self::Error> {
-            Ok(Self {
+            let viewing_key = UnifiedFullViewingKey::decode(&EncodingParams, &acc.viewing_key)
+                .map_err(Error::UfvkDecodeError)?;
+            #[cfg(feature = "transparent-inputs")]
+            let internal_ivk = viewing_key
+                .transparent()
+                .map(AccountPubKey::derive_internal_ivk)
+                .transpose()?;
+            let account = Self {
                 account_name: acc.account_name.clone(),
                 account_id: acc.account_id.into(),
                 kind: match acc.kind {
@@ -897,8 +995,7 @@ mod serialization {
                     },
                     _ => unreachable!(),
                 },
-                viewing_key: UnifiedFullViewingKey::decode(&EncodingParams, &acc.viewing_key)
-                    .map_err(Error::UfvkDecodeError)?,
+                viewing_key,
                 birthday: read_optional!(acc, birthday)?.try_into()?,
                 addresses: acc
                     .addresses
@@ -963,8 +1060,58 @@ mod serialization {
                 ephemeral_addresses: Default::default(),
                 #[cfg(not(feature = "transparent-inputs"))]
                 internal_addresses: Default::default(),
+                #[cfg(feature = "transparent-inputs")]
+                internal_address_discovery: acc
+                    .internal_address_discovery
+                    .into_iter()
+                    .enumerate()
+                    .map(|(expected_index, candidate)| {
+                        if usize::try_from(candidate.index)? != expected_index {
+                            return Err(Error::CorruptedData(
+                                "non-contiguous internal discovery indices".to_owned(),
+                            ));
+                        }
+                        let index = NonHardenedChildIndex::from_index(candidate.index).ok_or_else(
+                            || Error::CorruptedData("hardened internal discovery index".to_owned()),
+                        )?;
+                        let address =
+                            TransparentAddress::decode(&EncodingParams, &candidate.address)?;
+                        let expected = internal_ivk
+                            .as_ref()
+                            .ok_or_else(|| {
+                                Error::CorruptedData(
+                                    "internal discovery without transparent viewing key".to_owned(),
+                                )
+                            })?
+                            .derive_address(index)?;
+                        if address != expected {
+                            return Err(Error::CorruptedData(
+                                "internal discovery address does not match its derivation"
+                                    .to_owned(),
+                            ));
+                        }
+                        Ok((
+                            candidate.index,
+                            InternalAddressDiscovery {
+                                address,
+                                checked_height: candidate.checked_height.map(BlockHeight::from),
+                            },
+                        ))
+                    })
+                    .collect::<Result<_, Error>>()?,
+                #[cfg(not(feature = "transparent-inputs"))]
+                internal_address_discovery: Default::default(),
                 _notes: Default::default(),
-            })
+            };
+            // Older snapshots have no discovery records. Restore the initial
+            // window without treating candidates as allocated change addresses.
+            #[cfg(feature = "transparent-inputs")]
+            let account = {
+                let mut account = account;
+                account.ensure_internal_gap(0)?;
+                account
+            };
+            Ok(account)
         }
     }
 

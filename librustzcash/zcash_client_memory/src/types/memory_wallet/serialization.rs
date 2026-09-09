@@ -634,6 +634,8 @@ impl<P: Parameters> MemoryWalletDb<P> {
                 .collect::<Result<_>>()?,
         );
 
+        #[cfg(feature = "transparent-inputs")]
+        wallet.ensure_internal_address_gaps()?;
         Ok(wallet)
     }
 }

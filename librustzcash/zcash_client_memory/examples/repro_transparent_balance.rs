@@ -3,6 +3,8 @@
 //! Pass the JSON produced by the companion chain-query script as the first argument.
 //! A BIP-39 seed, encoded as hex, is read from stdin; it is never printed or persisted.
 //! This replays transaction enhancement, not the entire compact-block scanner.
+//! Balances below refer only to the fixture's address, not the account total:
+//! change addresses require their own history queries to determine that total.
 
 use std::{fs, io};
 
@@ -136,7 +138,7 @@ fn main() {
                 "shieldedEnhancement": discoverable,
                 "hasShieldedBundle": tx.sapling_bundle().is_some() || tx.orchard_bundle().is_some() || tx.ironwood_bundle().is_some(),
                 "inputs": inputs, "outputs": outputs,
-                "walletTransparentBalanceZat": balance(&db),
+                "fixtureAddressBalanceZat": balance(&db),
             })
         );
     }
@@ -158,7 +160,7 @@ fn main() {
         json!({
             "stage": "after_shielded_enhancement", "address": address,
             "birthday": u32::from(birthday_height), "tip": u32::from(tip),
-            "chainBalanceZat": 0, "walletBalanceZat": stale_balance,
+            "chainAddressBalanceZat": 0, "fixtureAddressBalanceZat": stale_balance,
             "addressHistoryRequests": address_requests.len(),
         })
     );
@@ -191,7 +193,7 @@ fn main() {
     println!(
         "{}",
         json!({
-            "stage": "after_requested_address_history", "walletBalanceZat": balance(&db),
+            "stage": "after_requested_address_history", "fixtureAddressBalanceZat": balance(&db),
             "foundReportedSpend": found_reported_spend,
         })
     );
@@ -202,6 +204,6 @@ fn main() {
     assert_eq!(
         balance(&db),
         0,
-        "Requested transaction history must clear the spent balance"
+        "Requested transaction history must clear the fixture address's spent balance, not all account change"
     );
 }
