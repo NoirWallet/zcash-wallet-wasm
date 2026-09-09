@@ -14,7 +14,9 @@ use zcash_client_backend::data_api::{
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
 #[cfg(feature = "transparent-inputs")]
-use zcash_client_backend::data_api::{TransparentBalances, TransparentKeyOrigin};
+use zcash_client_backend::data_api::{
+    OutputStatusFilter, TransactionStatusFilter, TransparentBalances, TransparentKeyOrigin,
+};
 use zcash_client_backend::{
     data_api::{
         Account as _, AccountBalance, AccountSource, Balance, Progress, Ratio, SeedRelevance,
@@ -908,6 +910,53 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 )
             {
                 requests.push(TransactionDataRequest::Enhancement(*txid));
+            }
+        }
+
+        #[cfg(feature = "transparent-inputs")]
+        if let Some(chain_tip_height) = self.chain_height()? {
+            for (outpoint, output) in self.transparent_received_outputs.iter() {
+                if output.key_scope != transparent::keys::TransparentKeyScope::EPHEMERAL
+                    || self
+                        .transparent_received_output_spends
+                        .contains_key(outpoint)
+                {
+                    continue;
+                }
+
+                let Some(tx_entry) = self.tx_table.get(&output.transaction_id) else {
+                    continue;
+                };
+                if tx_entry
+                    .expiry_height()
+                    .is_some_and(|expiry_height| expiry_height > chain_tip_height)
+                {
+                    continue;
+                }
+
+                let Some(mined_height) = tx_entry.mined_height() else {
+                    continue;
+                };
+                let block_range_start = output
+                    .max_observed_unspent_height
+                    .map(|height| height + 1)
+                    .unwrap_or(mined_height)
+                    .max(mined_height);
+                if block_range_start > chain_tip_height {
+                    continue;
+                }
+
+                let request = TransactionDataRequest::transactions_involving_address(
+                    output.address,
+                    block_range_start,
+                    Some(chain_tip_height + 1),
+                    None,
+                    TransactionStatusFilter::Mined,
+                    OutputStatusFilter::All,
+                );
+                if !requests.contains(&request) {
+                    requests.push(request);
+                }
             }
         }
 

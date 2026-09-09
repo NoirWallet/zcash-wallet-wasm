@@ -1603,10 +1603,23 @@ Instead derive the ufvk in the calling code and import it using `import_account_
     #[cfg(feature = "transparent-inputs")]
     fn notify_address_checked(
         &mut self,
-        _request: TransactionsInvolvingAddress,
-        _as_of_height: BlockHeight,
+        request: TransactionsInvolvingAddress,
+        as_of_height: BlockHeight,
     ) -> Result<(), Error> {
-        todo!()
+        for (outpoint, output) in self.transparent_received_outputs.iter_mut() {
+            if output.address == request.address()
+                && !self
+                    .transparent_received_output_spends
+                    .contains_key(outpoint)
+            {
+                output.max_observed_unspent_height = Some(
+                    output
+                        .max_observed_unspent_height
+                        .map_or(as_of_height, |height| height.max(as_of_height)),
+                );
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "transparent-key-import")]

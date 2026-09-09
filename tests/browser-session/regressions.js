@@ -303,6 +303,9 @@ try {
     } finally { window.fetch=original; s.free(); }
   });
   wallet.free();
+  await test('transparent recovery request timing works in the browser', async () => {
+    assert(bindings.walletTestRequestTiming(), 'wrong immediate, past or future request timing');
+  });
   }
 } catch (error) { results.push({name:'harness',passed:false,error:String(error)}); }
 window.sessionResults.done = true;

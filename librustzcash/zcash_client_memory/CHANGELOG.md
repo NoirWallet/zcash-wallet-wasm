@@ -9,5 +9,7 @@
 
 ### Fixed
 
+- Discover spends of expired ephemeral transparent outputs and advance their
+  checked heights after successful address queries.
 - Voting snapshots consult canonical Ironwood nullifier spends even when a local
   conflicting transaction overwrites the received-note spend association.

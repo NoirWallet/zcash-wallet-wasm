@@ -10,7 +10,7 @@ use sapling::ProofGenerationKey;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
@@ -54,7 +54,10 @@ use zcash_primitives::transaction::fees::{FeeRule, zip317 as prim_zip317};
 use zcash_primitives::transaction::{TxId, TxVersion};
 use zcash_proofs::prover::LocalTxProver;
 
-use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+use zcash_keys::{
+    encoding::AddressCodec,
+    keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
+};
 use zcash_protocol::ShieldedPool;
 use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkUpgrade, Parameters};
 use zcash_protocol::memo::MemoBytes;
@@ -64,11 +67,20 @@ use zip32::fingerprint::SeedFingerprint;
 use zcash_client_backend::data_api::chain::BlockCache;
 use zcash_client_memory::{MemBlockCache, MemoryWalletDb};
 
+#[cfg(all(target_arch = "wasm32", debug_assertions))]
+mod browser_fixture;
+
 const BATCH_SIZE: u32 = 10000;
 
 /// constant that signals what's the minimum transparent balance for proposing a
 /// shielding transaction
 const SHIELDING_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(100000);
+
+fn transaction_request_is_due(request_at: Option<std::time::SystemTime>) -> bool {
+    request_at.is_none_or(|request_at| {
+        time::OffsetDateTime::from(request_at) <= time::OffsetDateTime::now_utc()
+    })
+}
 
 fn transaction_status_from_raw_height(
     txid: TxId,
@@ -880,7 +892,7 @@ where
     }
 
     pub(crate) async fn process_pending_transaction_requests(&self) -> Result<(), Error> {
-        let requests = {
+        let transaction_requests = {
             let db = self.db.read().await;
             db.transaction_data_requests()?.into_iter().fold(
                 BTreeMap::new(),
@@ -899,12 +911,8 @@ where
             )
         };
 
-        if requests.is_empty() {
-            return Ok(());
-        }
-
         let mut client = self.client.clone();
-        for (requested_txid, needs_enhancement) in requests {
+        for (requested_txid, needs_enhancement) in transaction_requests {
             let raw = match client
                 .get_transaction(service::TxFilter {
                     block: None,
@@ -964,6 +972,85 @@ where
 
             let mut db = self.db.write().await;
             decrypt_and_store_transaction(&self.network, &mut *db, &tx, mined_height)?;
+        }
+
+        let address_requests = {
+            let db = self.db.read().await;
+            db.transaction_data_requests()?
+                .into_iter()
+                .filter_map(|request| match request {
+                    TransactionDataRequest::TransactionsInvolvingAddress(request) => Some(request),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+
+        for request in address_requests {
+            if !transaction_request_is_due(request.request_at()) {
+                continue;
+            }
+
+            let chain_tip_height = {
+                let db = self.db.read().await;
+                db.chain_height()?.ok_or_else(|| {
+                    Error::Generic(
+                        "Unable to process transparent transaction request without chain height"
+                            .to_string(),
+                    )
+                })?
+            };
+            let block_range_end = request
+                .block_range_end()
+                .unwrap_or(chain_tip_height + 1)
+                .min(chain_tip_height + 1);
+            if block_range_end <= request.block_range_start() {
+                continue;
+            }
+            let as_of_height = block_range_end - 1;
+
+            let mut transactions = client
+                .get_taddress_txids(service::TransparentAddressBlockFilter {
+                    address: request.address().encode(&self.network),
+                    range: Some(service::BlockRange {
+                        start: Some(service::BlockId {
+                            height: u64::from(request.block_range_start()),
+                            hash: vec![],
+                        }),
+                        end: Some(service::BlockId {
+                            height: u64::from(as_of_height),
+                            hash: vec![],
+                        }),
+                        pool_types: vec![],
+                    }),
+                })
+                .await?
+                .into_inner();
+
+            while let Some(raw) = transactions.try_next().await? {
+                let mined_height = match raw.height {
+                    0 | u64::MAX => {
+                        return Err(Error::Generic(format!(
+                            "Transparent transaction query returned unmined transaction at height {}",
+                            raw.height
+                        )));
+                    }
+                    height => BlockHeight::from_u32(u32::try_from(height).map_err(|_| {
+                        Error::Generic(format!(
+                            "Invalid mined height {height} returned for transparent transaction"
+                        ))
+                    })?),
+                };
+                let tx = zcash_primitives::transaction::Transaction::read(
+                    raw.data.as_slice(),
+                    BranchId::for_height(&self.network, mined_height),
+                )?;
+
+                let mut db = self.db.write().await;
+                decrypt_and_store_transaction(&self.network, &mut *db, &tx, Some(mined_height))?;
+            }
+
+            let mut db = self.db.write().await;
+            db.notify_address_checked(request, as_of_height)?;
         }
 
         Ok(())
@@ -3100,8 +3187,8 @@ mod tests {
     use super::{
         TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
         allow_exact_send_max_fallback, dynamic_zip317_fee_rule, submit_transfer_transactions_with,
-        transaction_status_from_raw_height, transfer_expiry_height, transfer_policies,
-        usk_from_seed_str, validate_expiry_delta_blocks,
+        transaction_request_is_due, transaction_status_from_raw_height, transfer_expiry_height,
+        transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
     };
     use crate::Network;
     use nonempty::NonEmpty;
@@ -3119,6 +3206,17 @@ mod tests {
 
     fn txid(value: u8) -> TxId {
         TxId::from_bytes([value; 32])
+    }
+
+    #[test]
+    fn transparent_recovery_request_timing() {
+        let future = std::time::SystemTime::from(time::OffsetDateTime::now_utc())
+            + std::time::Duration::from_secs(60);
+        assert!(transaction_request_is_due(None));
+        assert!(transaction_request_is_due(Some(
+            std::time::SystemTime::UNIX_EPOCH
+        )));
+        assert!(!transaction_request_is_due(Some(future)));
     }
 
     #[test]
