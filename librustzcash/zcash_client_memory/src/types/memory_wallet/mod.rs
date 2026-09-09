@@ -424,6 +424,22 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         ))
     }
 
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) fn ensure_internal_address_gaps(&mut self) -> Result<(), Error> {
+        let gaps = self
+            .accounts
+            .account_ids()
+            .map(|id| self.first_internal_gap_index(*id).map(|gap| (*id, gap)))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (id, gap) in gaps {
+            self.accounts
+                .get_mut(id)
+                .ok_or(Error::AccountUnknown(id))?
+                .ensure_internal_gap(gap)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn get_funding_accounts(
         &self,
         tx: &Transaction,
@@ -1469,6 +1485,16 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .ok_or(Error::AccountUnknown(*receiving_account))?
             .transparent_key_scope_for_address(address)?
             .ok_or(Error::AddressNotRecognized(*address))?;
+        if key_scope == TransparentKeyScope::INTERNAL {
+            let height = output
+                .mined_height()
+                .or(self.chain_height()?)
+                .unwrap_or(self.get_account_birthday(*receiving_account)?);
+            self.accounts
+                .get_mut(*receiving_account)
+                .ok_or(Error::AccountUnknown(*receiving_account))?
+                .mark_internal_address_seen(address, height);
+        }
         // get the block height of the block that mined the output only if we have it in the block table
         // otherwise return None
         let block = output
@@ -1545,6 +1571,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 .remove(&spending_txid, output.outpoint());
         }
 
+        self.ensure_internal_address_gaps()?;
         Ok(output.outpoint().clone())
     }
 

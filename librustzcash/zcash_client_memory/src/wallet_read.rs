@@ -887,6 +887,19 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         #[cfg(feature = "transparent-inputs")]
         if let Some(chain_tip_height) = self.chain_height()? {
             let mut address_starts = std::collections::BTreeMap::<_, BlockHeight>::new();
+            // The UTXO set alone cannot discover already-spent change addresses.
+            // Start every lookahead address at the birthday, and keep querying
+            // new windows until the last mined use is followed by an unused gap.
+            for account in self.accounts.values() {
+                for candidate in account.internal_address_discovery.values() {
+                    let start = candidate
+                        .checked_height
+                        .map_or(account.birthday().height(), |height| height + 1);
+                    if start <= chain_tip_height {
+                        address_starts.insert(candidate.address, start);
+                    }
+                }
+            }
             for (outpoint, output) in self.transparent_received_outputs.iter() {
                 if self
                     .transparent_received_output_spends
