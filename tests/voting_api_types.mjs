@@ -16,8 +16,11 @@ export async function pageContract(wallet, runtimePhrase, decisions) {
   const eligibility=await session.checkEligibility(id);
   /** @type {import('../pkg-voting/zcash_wallet_wasm.js').PreparedVotingRound} */
   const prepared=await session.prepareRound(id);
+  const testKey=mnemonic_to_spending_key('test',runtimePhrase,'',0);
+  const mainKey=mnemonic_to_spending_key('main',runtimePhrase,'',0);
+  void mainKey;
   /** @type {import('../pkg-voting/zcash_wallet_wasm.js').VotingActionResult} */
-  let result=await session.submitDelegation(id,mnemonic_to_spending_key('test',runtimePhrase,'',0),mnemonic_to_seed_fingerprint(runtimePhrase,''));
+  let result=await session.submitDelegation(id,testKey,mnemonic_to_seed_fingerprint(runtimePhrase,''));
   result=await session.submitBallot(id,decisions);result=await session.resumeRound(id);
   /** @type {import('../pkg-voting/zcash_wallet_wasm.js').VotingRoundStatus} */
   const status=await session.roundStatus(id);

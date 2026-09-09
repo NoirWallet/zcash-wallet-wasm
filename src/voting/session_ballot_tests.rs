@@ -13,11 +13,15 @@ const ID: &str = "00000000000000000000000000000000000000000000000000000000000000
 #[path = "session_helper_tests.rs"]
 mod helper_recovery;
 
+#[path = "session_mainnet_tests.rs"]
+mod mainnet_workflow;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stop {
     None,
     Checkpoint { number: usize, saved: bool },
     Post,
+    UnknownPost,
     ConfirmationResponse,
 }
 
@@ -25,8 +29,10 @@ struct RecordingTransport {
     wallet_id: String,
     durable: Arc<Mutex<Vec<u8>>>,
     requests: Mutex<Vec<OwnedHttpRequest>>,
+    helper_requests: Mutex<Vec<OwnedHttpRequest>>,
     canonical: CanonicalVoteSubmission,
     confirmation: Vec<u8>,
+    network: zcash_voting::Network,
     stop: Stop,
     confirm_helpers: bool,
 }
@@ -46,6 +52,7 @@ impl HttpTransport for RecordingTransport {
             } else {
                 "pending"
             };
+            self.helper_requests.lock().unwrap().push(request);
             return Box::pin(std::future::ready(Ok(OwnedHttpResponse {
                 status: 200,
                 body: serde_json::to_vec(&serde_json::json!({ "status": status })).unwrap(),
@@ -57,7 +64,7 @@ impl HttpTransport for RecordingTransport {
         // acknowledged host checkpoint at this boundary, not the live database.
         let db = VotingDb::open_browser(
             &self.wallet_id,
-            zcash_voting::Network::Testnet,
+            self.network,
             Some(&self.durable.lock().unwrap()),
         )
         .unwrap();
@@ -79,6 +86,18 @@ impl HttpTransport for RecordingTransport {
             )));
         }
         self.requests.lock().unwrap().push(request);
+        if post && self.stop == Stop::UnknownPost {
+            return Box::pin(std::future::ready(Err(
+                zcash_voting::platform::TransportError::Ambiguous,
+            )));
+        }
+        if !post && self.stop == Stop::UnknownPost {
+            return Box::pin(std::future::ready(Ok(OwnedHttpResponse {
+                content_type: None,
+                status: 404,
+                body: Vec::new(),
+            })));
+        }
         if (post && self.stop == Stop::Post) || (!post && self.stop == Stop::ConfirmationResponse) {
             return Box::pin(pending());
         }
@@ -106,7 +125,14 @@ struct BallotFixture {
 
 impl BallotFixture {
     async fn new(batch: bool) -> Self {
-        let (session, mut round) = super::tests::session().await;
+        Self::new_for(super::super::network::VotingNetwork::Testnet, batch).await
+    }
+
+    async fn session_and_round(
+        network: super::super::network::VotingNetwork,
+        batch: bool,
+    ) -> (VotingSessionInner, TrustedRound) {
+        let (session, mut round) = super::tests::session_for(network).await;
         round.helpers = (1..=2)
             .map(|index| HelperEndpoint {
                 id: format!("helper-{index}"),
@@ -114,7 +140,14 @@ impl BallotFixture {
                 public_key: vec![index; 32],
             })
             .collect();
-        round.params.snapshot_height = delegation_fixture::height();
+        if network == super::super::network::VotingNetwork::Mainnet {
+            round.vote_server_urls = round
+                .helpers
+                .iter()
+                .map(|helper| helper.url.clone())
+                .collect();
+        }
+        round.params.snapshot_height = delegation_fixture::height_for(network.network());
         round.summary.snapshot_height = round.params.snapshot_height;
         if batch {
             let mut proposal = round.proposals[0].clone();
@@ -125,21 +158,18 @@ impl BallotFixture {
             .trusted_rounds
             .borrow_mut()
             .insert(ID.into(), round.clone());
+        (session, round)
+    }
+
+    async fn new_for(network: super::super::network::VotingNetwork, batch: bool) -> Self {
+        let (session, round) = Self::session_and_round(network, batch).await;
+        let envelope = VotingSessionEnvelope::encode(network, &round.identity()).unwrap();
         session
             .db
-            .init_round(
-                zcash_voting::Network::Testnet,
-                &round.params,
-                Some(
-                    &serde_json::to_string(&VotingSessionEnvelope {
-                        version: 1,
-                        authenticated_round: round.identity(),
-                    })
-                    .unwrap(),
-                ),
-            )
+            .init_round(network.network(), &round.params, Some(&envelope))
             .unwrap();
-        let delegation = delegation_fixture::prepare(&session.db, &round.params, 17);
+        let delegation =
+            delegation_fixture::prepare_for_stored_network(&session.db, &round.params, 17);
         session
             .db
             .prepare_delegation_submission(ID, 0, &delegation)
@@ -154,6 +184,14 @@ impl BallotFixture {
                 &[delegation_fixture::event(ID, "41")],
             )
             .unwrap();
+        Self::from_confirmed_delegation(session, round, batch)
+    }
+
+    fn from_confirmed_delegation(
+        session: VotingSessionInner,
+        round: TrustedRound,
+        batch: bool,
+    ) -> Self {
         let drafts = round
             .proposals
             .iter()
@@ -195,7 +233,7 @@ impl BallotFixture {
         // submitted session starts with confirmed delegation and no vote rows.
         let expected = VotingDb::open_browser(
             &session.wallet_id,
-            zcash_voting::Network::Testnet,
+            round.network.network(),
             Some(&session.db.serialize_bytes().unwrap()),
         )
         .unwrap();
@@ -244,8 +282,10 @@ impl BallotFixture {
             wallet_id: self.session.wallet_id.clone(),
             durable,
             requests: Mutex::new(vec![]),
+            helper_requests: Mutex::new(vec![]),
             canonical: self.canonical.clone(),
             confirmation: self.confirmation.clone(),
+            network: self.round.network.network(),
             stop,
             confirm_helpers: false,
         }

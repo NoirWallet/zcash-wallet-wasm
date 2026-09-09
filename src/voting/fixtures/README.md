@@ -13,8 +13,8 @@ signatures with the same test helper and confirms signature authentication;
 trusted-parameter construction must reject the malformed/identity points.
 
 The root fixture transport derives a SHA-256 pin from the checked-in static
-bytes. Production always uses `STAGE_STATIC_CONFIG_SOURCE`; no caller-facing
-custom-source API exists.
+bytes. Production selects the fixed stage or production pin from the wallet
+network; no caller-facing custom-source API exists.
 
 Valar v2 signs the round ID, authority key, and PIR layout. Service endpoint
 lists come from the resolved dynamic document fetched through the pinned

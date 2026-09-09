@@ -1,5 +1,6 @@
 pub(crate) mod config;
 pub mod constants;
+pub(crate) mod network;
 pub(crate) mod persistence;
 #[cfg(target_arch = "wasm32")]
 mod pir_transport;

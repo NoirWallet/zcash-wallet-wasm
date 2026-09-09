@@ -12,7 +12,7 @@ use std::{
 };
 use tonic_web_wasm_client::Client;
 use zcash_client_backend::data_api::{Account as _, WalletRead};
-use zcash_protocol::consensus::{NetworkType, Parameters};
+use zcash_protocol::consensus::Parameters;
 use zcash_voting::{
     phases::{DelegationPhase, SharePhase, VotePhase},
     session::{NextStep, resume_plan},
@@ -23,6 +23,7 @@ pub(crate) struct VotingSessionInner {
     pub(crate) wallet: MemoryWallet<Client>,
     pub(crate) account_id: AccountId,
     pub(crate) wallet_id: String,
+    pub(crate) network: super::network::VotingNetwork,
     pub(crate) db: VotingDb,
     #[cfg(target_arch = "wasm32")]
     pub(crate) transport: super::transport::BrowserFetchTransport,
@@ -289,7 +290,7 @@ impl VotingSessionInner {
         let input = super::wallet_adapter::gather_eligibility_inputs(
             &self.wallet,
             self.account_id,
-            zcash_voting::Network::Testnet,
+            round.network.network(),
             round.params.snapshot_height,
         )
         .await?;
@@ -336,7 +337,7 @@ impl VotingSessionInner {
                     &notes,
                     &keys,
                     delegate::branch_id_for_height(
-                        zcash_voting::Network::Testnet,
+                        round.network.network(),
                         round.params.snapshot_height,
                     )
                     .map_err(conflict)?,
@@ -394,7 +395,7 @@ impl VotingSessionInner {
             .db
             .get_delegation_resume_signing_request(&round.summary.round_id, bundle, keys, notes)
             .map_err(conflict)?;
-        if request.network != zcash_voting::Network::Testnet
+        if request.network != round.network.network()
             || request.account_index != account.account_index
             || request.seed_fingerprint != account.seed_fingerprint
         {
@@ -653,11 +654,7 @@ impl VotingSessionInner {
                             VotingErrorCode::RecoveryConflict
                         })
                     };
-                    let fleet = round
-                        .helpers
-                        .iter()
-                        .map(|helper| helper.url.clone())
-                        .collect::<Vec<_>>();
+                    let fleet = round.helper_urls();
                     visited_helpers.insert((step.kind(), bundle_index, proposal_id, share_index));
                     if matches!(step, NextStep::SubmitShares { .. }) {
                         let committed = zcash_voting::vote::CommittedVote::recover(
@@ -1115,8 +1112,8 @@ impl VotingSessionInner {
             .key_derivation()
             .ok_or_else(|| conflict(()))?;
         let ufvk = account.ufvk().ok_or_else(|| conflict(()))?;
-        if self.wallet.network.network_type() != NetworkType::Test
-            || db.params().network_type() != NetworkType::Test
+        if super::network::VotingNetwork::for_wallet(self.wallet.network) != self.network
+            || db.params().network_type() != self.network.network().network_type()
             || *derivation.seed_fingerprint() != fingerprint
             || ufvk.encode(&self.wallet.network)
                 != usk
@@ -1127,7 +1124,7 @@ impl VotingSessionInner {
         }
         let mut digest = Sha256::new();
         digest.update(b"zcash-wallet-wasm/voting-wallet-id/v1");
-        digest.update(b"testnet");
+        digest.update(self.network.label().as_bytes());
         let encoding = SecretString::new(ufvk.encode(&self.wallet.network));
         digest.update(encoding.expose_secret().as_bytes());
         if hex::encode(digest.finalize()) != self.wallet_id {
@@ -1145,14 +1142,13 @@ impl VotingSessionInner {
         bytes: Option<&[u8]>,
         persistence: Persistence,
     ) -> Result<Self, VotingApiError> {
+        let network = super::network::VotingNetwork::for_wallet(wallet.network);
         let wallet_id = {
             let db = wallet
                 .db
                 .try_read()
                 .map_err(|_| VotingApiError::new(VotingErrorCode::OperationInProgress))?;
-            if wallet.network.network_type() != NetworkType::Test
-                || db.params().network_type() != NetworkType::Test
-            {
+            if db.params().network_type() != wallet.network.network_type() {
                 return Err(VotingApiError::new(VotingErrorCode::NetworkMismatch));
             }
             let account = db
@@ -1169,17 +1165,17 @@ impl VotingSessionInner {
             let encoding = SecretString::new(ufvk.encode(&wallet.network));
             let mut digest = Sha256::new();
             digest.update(b"zcash-wallet-wasm/voting-wallet-id/v1");
-            digest.update(b"testnet");
+            digest.update(network.label().as_bytes());
             digest.update(encoding.expose_secret().as_bytes());
             hex::encode(digest.finalize())
         };
-        let db = VotingDb::open_browser(&wallet_id, zcash_voting::Network::Testnet, bytes)
-            .map_err(conflict)?;
+        let db = VotingDb::open_browser(&wallet_id, network.network(), bytes).map_err(conflict)?;
         let session = Self {
             helper_health: zcash_voting::helper::health::HelperHealth::default(),
             wallet,
             account_id,
             wallet_id,
+            network,
             db,
             persistence,
             #[cfg(target_arch = "wasm32")]
@@ -1216,7 +1212,7 @@ impl VotingSessionInner {
         Ok(session)
     }
     pub(crate) fn storage_key(&self) -> String {
-        format!("zcash-voting:testnet:{}", self.wallet_id)
+        format!("zcash-voting:{}:{}", self.network.label(), self.wallet_id)
     }
     pub(crate) fn export_state(&self) -> Result<Vec<u8>, VotingApiError> {
         self.db
@@ -1257,6 +1253,9 @@ impl VotingSessionInner {
             .get(&id)
             .cloned()
             .ok_or_else(|| VotingApiError::new(VotingErrorCode::RoundUnauthenticated))?;
+        if round.network != self.network {
+            return Err(conflict(()));
+        }
         if now >= round.summary.ends_at.parse::<u64>().map_err(conflict)? {
             return Err(VotingApiError::new(VotingErrorCode::RoundExpired));
         }
@@ -1269,33 +1268,34 @@ impl VotingSessionInner {
         if !self.db.has_round(id).map_err(conflict)? {
             return Ok(None);
         }
-        self.db
-            .round_session_json(id)
-            .map_err(conflict)?
-            .map(|json| {
-                let envelope: VotingSessionEnvelope =
-                    serde_json::from_str(&json).map_err(conflict)?;
-                if envelope.version != 1
-                    || envelope.authenticated_round.summary.round_id != id
-                    || envelope.authenticated_round.params.vote_round_id != id
-                {
-                    return Err(conflict(()));
-                }
-                Ok(envelope.authenticated_round)
-            })
-            .transpose()
+        let json = self.db.round_session_json(id).map_err(conflict)?;
+        let Some(json) = json else {
+            return if self.network == super::network::VotingNetwork::Mainnet {
+                Err(conflict(()))
+            } else {
+                Ok(None)
+            };
+        };
+        let identity = VotingSessionEnvelope::decode(self.network, &json)?;
+        if identity.summary.round_id != id || identity.params.vote_round_id != id {
+            return Err(conflict(()));
+        }
+        Ok(Some(identity))
     }
     pub(crate) fn validate_saved_identity(
         &self,
         round: &TrustedRound,
     ) -> Result<(), VotingApiError> {
+        if round.network != self.network {
+            return Err(conflict(()));
+        }
         let id = &round.summary.round_id;
         if !self.db.has_round(id).map_err(conflict)? {
             return Ok(());
         }
         let saved = self.saved_identity(id)?.ok_or_else(|| conflict(()))?;
         let (params, network) = self.db.round_params_with_network(id).map_err(conflict)?;
-        if network != zcash_voting::Network::Testnet || params != saved.params {
+        if network != self.network.network() || params != saved.params {
             return Err(conflict(()));
         }
         round.compare_identity(&saved)?;
@@ -1308,8 +1308,12 @@ impl VotingSessionInner {
         &self,
         id: &str,
     ) -> Result<TrustedRound, VotingApiError> {
-        self.ensure_trusted_round_with(id, config::discover_rounds(&self.transport), now_secs)
-            .await
+        self.ensure_trusted_round_with(
+            id,
+            config::discover_rounds(&self.transport, self.network),
+            now_secs,
+        )
+        .await
     }
     pub(crate) async fn ensure_trusted_round_with<F>(
         &self,
@@ -1600,7 +1604,7 @@ impl VotingSessionInner {
         id: &str,
     ) -> Result<PreparedVotingRound, VotingApiError> {
         use prost::Message;
-        use zcash_voting::{Network, proof_executor::ProofExecutor};
+        use zcash_voting::proof_executor::ProofExecutor;
         let mismatch = |_| VotingApiError::new(VotingErrorCode::PirSnapshotMismatch);
         self.prepare_round_with(
             id,
@@ -1620,7 +1624,7 @@ impl VotingSessionInner {
                     .encode_to_vec();
                 zcash_voting::precompute::validate_snapshot_tree_state(
                     &round.params,
-                    Network::Testnet,
+                    round.network.network(),
                     &tree,
                 )
                 .map_err(mismatch)?;
@@ -1628,7 +1632,7 @@ impl VotingSessionInner {
                     round.pir_layout,
                     round.pir_urls.clone(),
                     std::sync::Arc::new(self.transport),
-                    Network::Testnet,
+                    round.network.network(),
                     &round.params.nullifier_imt_root,
                     round.params.snapshot_height,
                 )
@@ -1646,13 +1650,9 @@ impl VotingSessionInner {
                     .has_round(&round.summary.round_id)
                     .map_err(conflict)?
                 {
-                    let envelope = serde_json::to_string(&VotingSessionEnvelope {
-                        version: 1,
-                        authenticated_round: round.identity(),
-                    })
-                    .map_err(conflict)?;
+                    let envelope = VotingSessionEnvelope::encode(self.network, &round.identity())?;
                     self.db
-                        .init_round(Network::Testnet, &round.params, Some(&envelope))
+                        .init_round(self.network.network(), &round.params, Some(&envelope))
                         .map_err(conflict)?;
                 }
                 let hotkey = self
@@ -1663,7 +1663,7 @@ impl VotingSessionInner {
                     &self.wallet,
                     self.account_id,
                     super::wallet_adapter::WalletInputRequest {
-                        network: Network::Testnet,
+                        network: round.network.network(),
                         snapshot_height: round.params.snapshot_height,
                         anchor_tree_state_bytes: tree,
                         resolved_round_name: round.summary.name.clone(),
@@ -1732,7 +1732,7 @@ impl VotingSessionInner {
                             &round.summary.round_id,
                             index as u32,
                             notes,
-                            Network::Testnet,
+                            round.network.network(),
                             |nullifiers| async move { client.fetch_proofs(&nullifiers).await },
                         )
                         .await
@@ -3057,17 +3057,431 @@ mod tests {
     ) -> Result<VotingSessionInner, VotingApiError> {
         VotingSessionInner::open(wallet, account, bytes, Persistence::default())
     }
-    pub(super) async fn session() -> (VotingSessionInner, TrustedRound) {
-        let (wallet, account, _) = wallet(crate::Network::TestNetwork, 17, true);
+
+    async fn authenticated_round(
+        network: super::super::network::VotingNetwork,
+        snapshot_height: u64,
+        with_helper: bool,
+    ) -> TrustedRound {
+        use base64::Engine as _;
+
+        let mut entry = super::super::config::tests::active();
+        entry["snapshot_height"] = serde_json::json!(snapshot_height);
+        if network == super::super::network::VotingNetwork::Mainnet {
+            entry.as_object_mut().unwrap().remove("network");
+        }
+        if with_helper {
+            entry["helpers"] = serde_json::json!([{
+                "id": "round-supplied",
+                "url": "https://round-helper.example",
+                "public_key": base64::engine::general_purpose::STANDARD.encode([7; 32]),
+            }]);
+        }
+        let (discovery, rounds) =
+            super::super::config::tests::discover_for(network, vec![entry], 1500).await;
+        assert_eq!(discovery.accepted.len(), 1);
+        rounds[ID].clone()
+    }
+
+    #[tokio::test]
+    async fn helper_urls_are_selected_by_the_authenticated_round_network() {
+        use super::super::network::VotingNetwork;
+
+        let mut mainnet_without_helpers =
+            authenticated_round(VotingNetwork::Mainnet, 100, false).await;
+        assert!(mainnet_without_helpers.helpers.is_empty());
+        mainnet_without_helpers
+            .vote_server_urls
+            .push("https://vote-2.example.com".to_string());
+        assert_eq!(
+            mainnet_without_helpers.helper_urls(),
+            mainnet_without_helpers.vote_server_urls
+        );
+
+        let mainnet = authenticated_round(VotingNetwork::Mainnet, 100, true).await;
+        assert_eq!(mainnet.helpers.len(), 1);
+        assert_eq!(
+            mainnet.helper_urls(),
+            vec!["https://vote.example.com".to_string()]
+        );
+        assert_eq!(mainnet.helper_urls(), mainnet.vote_server_urls);
+        assert_ne!(mainnet.helper_urls()[0], mainnet.helpers[0].url);
+
+        let testnet = authenticated_round(VotingNetwork::Testnet, 100, true).await;
+        assert_eq!(
+            testnet.helper_urls(),
+            vec!["https://round-helper.example".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn network_specific_delegation_identity_branch_hotkey_and_signature_are_bound() {
+        use orchard::primitives::redpallas::{Signature, SpendAuth, VerificationKey};
+        use zcash_protocol::consensus::{BranchId, NetworkConstants, Parameters};
+
+        for (wallet_network, voting_network, coin_type) in [
+            (
+                crate::Network::MainNetwork,
+                zcash_voting::Network::Mainnet,
+                133,
+            ),
+            (
+                crate::Network::TestNetwork,
+                zcash_voting::Network::Testnet,
+                1,
+            ),
+        ] {
+            let (wallet, account, _) = wallet(wallet_network, 17, true);
+            let session = open(wallet, account, None).unwrap();
+            let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&[17; 32]).unwrap();
+            let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+                &wallet_network,
+                &[17; 32],
+                zip32::AccountId::ZERO,
+            )
+            .unwrap();
+            let account_keys = session.validate_delegation_key(&usk, fingerprint).unwrap();
+            assert_eq!(voting_network.network_type().coin_type(), coin_type);
+            assert_eq!(account_keys.account_index, 0);
+            assert_eq!(
+                account_keys.orchard_fvk_bytes,
+                usk.to_unified_full_viewing_key()
+                    .orchard()
+                    .unwrap()
+                    .to_bytes()
+            );
+        }
+
+        for (network, activation_height) in [
+            (zcash_voting::Network::Mainnet, 3_428_143),
+            (zcash_voting::Network::Testnet, 4_134_000),
+        ] {
+            assert_eq!(
+                zcash_voting::delegate::branch_id_for_height(network, activation_height - 1)
+                    .unwrap(),
+                u32::from(BranchId::Nu6_2)
+            );
+            assert_eq!(
+                zcash_voting::delegate::branch_id_for_height(network, activation_height).unwrap(),
+                u32::from(BranchId::Nu6_3)
+            );
+        }
+
+        let height = delegation_fixture::height_for(zcash_voting::Network::Mainnet);
+        let (wallet, account, _) = wallet(crate::Network::MainNetwork, 17, true);
         let session = open(wallet, account, None).unwrap();
-        let (discovery, rounds) = super::super::config::tests::discover(
-            vec![super::super::config::tests::active()],
-            1500,
+        let round =
+            authenticated_round(super::super::network::VotingNetwork::Mainnet, height, false).await;
+        let envelope = VotingSessionEnvelope::encode(session.network, &round.identity()).unwrap();
+        session
+            .db
+            .init_round(session.network.network(), &round.params, Some(&envelope))
+            .unwrap();
+        delegation_fixture::prepare_for_stored_network(&session.db, &round.params, 17);
+        let hotkey = session.db.load_voting_hotkey(ID).unwrap().unwrap();
+        assert_eq!(hotkey.network(), zcash_voting::Network::Mainnet);
+        let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&[17; 32]).unwrap();
+        let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            &crate::Network::MainNetwork,
+            &[17; 32],
+            zip32::AccountId::ZERO,
         )
-        .await;
+        .unwrap();
+        let account_keys = session.validate_delegation_key(&usk, fingerprint).unwrap();
+        let keys = zcash_voting::delegate::DelegationKeys::with_voting_hotkey(
+            account_keys.orchard_fvk_bytes.to_vec(),
+            &hotkey,
+            account_keys.seed_fingerprint,
+            account_keys.account_index,
+            "fixture".into(),
+        )
+        .unwrap();
+        let notes = delegation_fixture::notes_for(zcash_voting::Network::Mainnet, 17, 1);
+        let (_, rk) = session
+            .db
+            .get_delegation_resume_signing_request(ID, 0, &keys, &notes)
+            .unwrap();
+        let wallet_before = session.wallet.db_to_bytes().await.unwrap();
+        let voting_before = session.export_state().unwrap();
+
+        let testnet_usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            &crate::Network::TestNetwork,
+            &[17; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap();
+        let other_account = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            &crate::Network::MainNetwork,
+            &[17; 32],
+            zip32::AccountId::try_from(1).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            session
+                .sign_stored_delegation(&round, 0, &testnet_usk, fingerprint, &keys, &notes)
+                .is_err()
+        );
+        assert!(
+            session
+                .sign_stored_delegation(&round, 0, &other_account, fingerprint, &keys, &notes)
+                .is_err()
+        );
+        struct NoNetwork;
+        impl zcash_voting::platform::HttpTransport for NoNetwork {
+            fn execute(
+                &self,
+                _: zcash_voting::platform::OwnedHttpRequest,
+            ) -> zcash_voting::platform::TransportFuture {
+                panic!("wrong-network signer reached submission transport")
+            }
+        }
+        let authentications = Cell::new(0);
+        assert_eq!(
+            session
+                .submit_delegation_with(
+                    ID,
+                    testnet_usk,
+                    fingerprint,
+                    &NoNetwork,
+                    || {
+                        authentications.set(authentications.get() + 1);
+                        std::future::ready(Ok(round.clone()))
+                    },
+                    |_, _| async { panic!("wrong-network signer reached delegation build") },
+                    || std::future::ready(Ok(())),
+                    || Ok(1500),
+                )
+                .await
+                .unwrap_err()
+                .code,
+            VotingErrorCode::RecoveryConflict
+        );
+        assert_eq!(authentications.get(), 0);
+
+        let (signature, sighash) = session
+            .sign_stored_delegation(&round, 0, &usk, fingerprint, &keys, &notes)
+            .unwrap();
+        VerificationKey::<SpendAuth>::try_from(rk)
+            .unwrap()
+            .verify(&sighash, &Signature::<SpendAuth>::from(signature))
+            .unwrap();
+        assert_eq!(wallet_before, session.wallet.db_to_bytes().await.unwrap());
+        assert_eq!(voting_before, session.export_state().unwrap());
+    }
+    #[tokio::test]
+    async fn mainnet_session_reopens_without_rebinding_testnet() {
+        let (wallet, account, encoding) = wallet(crate::Network::MainNetwork, 17, true);
+        let session = open(wallet.clone(), account, None).unwrap();
+        assert_eq!(
+            session.wallet_id,
+            hex::encode(Sha256::digest(
+                [
+                    b"zcash-wallet-wasm/voting-wallet-id/v1".as_slice(),
+                    b"mainnet",
+                    encoding.as_bytes()
+                ]
+                .concat()
+            ))
+        );
+        assert!(session.storage_key().starts_with("zcash-voting:mainnet:"));
+        let bytes = session.export_state().unwrap();
+        assert_eq!(
+            open(wallet, account, Some(&bytes)).unwrap().wallet_id,
+            session.wallet_id
+        );
+
+        let (testnet, account, _) = self::wallet(crate::Network::TestNetwork, 17, true);
+        assert_eq!(
+            open(testnet, account, Some(&bytes)).err().unwrap().code,
+            VotingErrorCode::RecoveryConflict
+        );
+    }
+    #[tokio::test]
+    async fn voting_session_envelopes_are_strict_and_network_bound() {
+        use super::super::network::VotingNetwork;
+
+        let (_, round) = session().await;
+        let identity = round.identity();
+        let legacy = serde_json::to_string(&VotingSessionEnvelope {
+            version: 1,
+            authenticated_round: identity.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            VotingSessionEnvelope::encode(VotingNetwork::Testnet, &identity).unwrap(),
+            legacy
+        );
+        assert_eq!(
+            VotingSessionEnvelope::decode(VotingNetwork::Testnet, &legacy).unwrap(),
+            identity
+        );
+        assert!(VotingSessionEnvelope::decode(VotingNetwork::Mainnet, &legacy).is_err());
+
+        let mainnet = VotingSessionEnvelope::encode(VotingNetwork::Mainnet, &identity).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&mainnet).unwrap();
+        assert_eq!(value["version"], 2);
+        assert_eq!(value["network"], "mainnet");
+        assert_eq!(value["environment"], "prod");
+        assert_eq!(
+            value["staticConfigDigest"],
+            "28fc9b631091ae8bc2f8635d8930489238ce144174cbd15a03efb0530b301ebe"
+        );
+        assert_eq!(
+            VotingSessionEnvelope::decode(VotingNetwork::Mainnet, &mainnet).unwrap(),
+            identity
+        );
+        assert!(VotingSessionEnvelope::decode(VotingNetwork::Testnet, &mainnet).is_err());
+
+        for field in ["version", "network", "environment", "staticConfigDigest"] {
+            let mut value: serde_json::Value = serde_json::from_str(&mainnet).unwrap();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(
+                VotingSessionEnvelope::decode(VotingNetwork::Mainnet, &value.to_string()).is_err(),
+                "missing {field}"
+            );
+        }
+        for (field, replacement) in [
+            ("version", serde_json::json!(1)),
+            ("version", serde_json::json!(3)),
+            ("network", serde_json::json!("testnet")),
+            ("environment", serde_json::json!("stage")),
+            ("staticConfigDigest", serde_json::json!("00")),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(&mainnet).unwrap();
+            value[field] = replacement;
+            assert!(
+                VotingSessionEnvelope::decode(VotingNetwork::Mainnet, &value.to_string()).is_err(),
+                "wrong {field}"
+            );
+        }
+        let mut unknown: serde_json::Value = serde_json::from_str(&mainnet).unwrap();
+        unknown["unknown"] = true.into();
+        assert!(
+            VotingSessionEnvelope::decode(VotingNetwork::Mainnet, &unknown.to_string()).is_err()
+        );
+        for (binding, duplicate_binding) in [
+            ("\"version\":2", "\"version\":2,\"version\":2"),
+            (
+                "\"network\":\"mainnet\"",
+                "\"network\":\"mainnet\",\"network\":\"mainnet\"",
+            ),
+            (
+                "\"environment\":\"prod\"",
+                "\"environment\":\"prod\",\"environment\":\"prod\"",
+            ),
+            (
+                "\"staticConfigDigest\":\"28fc9b631091ae8bc2f8635d8930489238ce144174cbd15a03efb0530b301ebe\"",
+                "\"staticConfigDigest\":\"28fc9b631091ae8bc2f8635d8930489238ce144174cbd15a03efb0530b301ebe\",\"staticConfigDigest\":\"28fc9b631091ae8bc2f8635d8930489238ce144174cbd15a03efb0530b301ebe\"",
+            ),
+        ] {
+            let duplicate = mainnet.replacen(binding, duplicate_binding, 1);
+            assert!(VotingSessionEnvelope::decode(VotingNetwork::Mainnet, &duplicate).is_err());
+        }
+    }
+    #[tokio::test]
+    async fn mainnet_round_recovery_requires_a_bound_envelope() {
+        use super::super::network::VotingNetwork;
+
+        let (wallet, account, _) = wallet(crate::Network::MainNetwork, 17, true);
+        let session = open(wallet.clone(), account, None).unwrap();
+        let mut entry = super::super::config::tests::active();
+        entry.as_object_mut().unwrap().remove("network");
+        let (_, rounds) =
+            super::super::config::tests::discover_for(VotingNetwork::Mainnet, vec![entry], 1500)
+                .await;
+        let round = rounds[ID].clone();
+        let envelope = VotingSessionEnvelope::encode(session.network, &round.identity()).unwrap();
+        session
+            .db
+            .init_round(session.network.network(), &round.params, Some(&envelope))
+            .unwrap();
+        let bytes = session.export_state().unwrap();
+        let restored = open(wallet.clone(), account, Some(&bytes)).unwrap();
+        assert_eq!(restored.saved_identity(ID).unwrap(), Some(round.identity()));
+
+        session.db.clear_round(ID).unwrap();
+        let legacy =
+            VotingSessionEnvelope::encode(VotingNetwork::Testnet, &round.identity()).unwrap();
+        session
+            .db
+            .init_round(session.network.network(), &round.params, Some(&legacy))
+            .unwrap();
+        assert_eq!(
+            open(wallet, account, Some(&session.export_state().unwrap()))
+                .err()
+                .unwrap()
+                .code,
+            VotingErrorCode::RecoveryConflict
+        );
+
+        session.db.clear_round(ID).unwrap();
+        session
+            .db
+            .init_round(session.network.network(), &round.params, None)
+            .unwrap();
+        assert_eq!(
+            open(
+                session.wallet.clone(),
+                session.account_id,
+                Some(&session.export_state().unwrap())
+            )
+            .err()
+            .unwrap()
+            .code,
+            VotingErrorCode::RecoveryConflict
+        );
+    }
+    #[tokio::test]
+    async fn cached_rounds_from_the_other_network_are_rejected() {
+        use super::super::network::VotingNetwork;
+
+        let (testnet, testnet_round) = session().await;
+        let (wallet, account, _) = wallet(crate::Network::MainNetwork, 17, true);
+        let mainnet = open(wallet, account, None).unwrap();
+        mainnet
+            .trusted_rounds
+            .borrow_mut()
+            .insert(ID.into(), testnet_round);
+        assert_eq!(
+            mainnet.cached_round_at(ID, 1500).unwrap_err().code,
+            VotingErrorCode::RecoveryConflict
+        );
+
+        let mut entry = super::super::config::tests::active();
+        entry.as_object_mut().unwrap().remove("network");
+        let (_, rounds) =
+            super::super::config::tests::discover_for(VotingNetwork::Mainnet, vec![entry], 1500)
+                .await;
+        testnet
+            .trusted_rounds
+            .borrow_mut()
+            .insert(ID.into(), rounds[ID].clone());
+        assert_eq!(
+            testnet.cached_round_at(ID, 1500).unwrap_err().code,
+            VotingErrorCode::RecoveryConflict
+        );
+    }
+    pub(super) async fn session_for(
+        network: super::super::network::VotingNetwork,
+    ) -> (VotingSessionInner, TrustedRound) {
+        let wallet_network = match network {
+            super::super::network::VotingNetwork::Testnet => crate::Network::TestNetwork,
+            super::super::network::VotingNetwork::Mainnet => crate::Network::MainNetwork,
+        };
+        let (wallet, account, _) = wallet(wallet_network, 17, true);
+        let session = open(wallet, account, None).unwrap();
+        let mut entry = super::super::config::tests::active();
+        if network == super::super::network::VotingNetwork::Mainnet {
+            entry.as_object_mut().unwrap().remove("network");
+        }
+        let (discovery, rounds) =
+            super::super::config::tests::discover_for(network, vec![entry], 1500).await;
         let round = rounds[ID].clone();
         session.replace_discovery(discovery, rounds);
         (session, round)
+    }
+    pub(super) async fn session() -> (VotingSessionInner, TrustedRound) {
+        session_for(super::super::network::VotingNetwork::Testnet).await
     }
     #[tokio::test]
     async fn constructor_validates_identity_and_fails_without_blocking_wallet_writer() {
@@ -3109,7 +3523,7 @@ mod tests {
                 crate::Network::MainNetwork,
                 17,
                 true,
-                VotingErrorCode::NetworkMismatch,
+                VotingErrorCode::RecoveryConflict,
             ),
             (
                 crate::Network::TestNetwork,
@@ -3127,6 +3541,12 @@ mod tests {
             let (other, account, _) = self::wallet(network, seed, derived);
             assert_eq!(open(other, account, Some(&bytes)).err().unwrap().code, code);
         }
+        let (mut mismatched, account, _) = self::wallet(crate::Network::TestNetwork, 17, true);
+        mismatched.network = crate::Network::MainNetwork;
+        assert_eq!(
+            open(mismatched, account, None).err().unwrap().code,
+            VotingErrorCode::NetworkMismatch
+        );
     }
     #[tokio::test]
     async fn restored_selection_requires_exactly_one_nonterminal_round() {
@@ -3735,6 +4155,12 @@ mod tests {
             other.db_to_bytes().await.unwrap(),
         )
         .unwrap();
+        let (mainnet, _) = session_for(super::super::network::VotingNetwork::Mainnet).await;
+        std::fs::write(
+            path.join("mainnet-wallet.bin"),
+            mainnet.wallet.db_to_bytes().await.unwrap(),
+        )
+        .unwrap();
         let envelope = VotingSessionEnvelope {
             version: 1,
             authenticated_round: round.identity(),
@@ -3748,7 +4174,7 @@ mod tests {
             )
             .unwrap();
         std::fs::write(path.join("voting.bin"), session.export_state().unwrap()).unwrap();
-        std::fs::write(path.join("metadata.json"),serde_json::to_vec(&serde_json::json!({"accountId":*session.account_id,"roundId":ID,"storageKey":session.storage_key()})).unwrap()).unwrap();
+        std::fs::write(path.join("metadata.json"),serde_json::to_vec(&serde_json::json!({"accountId":*session.account_id,"mainnetAccountId":*mainnet.account_id,"roundId":ID,"storageKey":session.storage_key()})).unwrap()).unwrap();
         session.db.clear_round(ID).unwrap();
         let mut round = round;
         round.params.snapshot_height = delegation_fixture::height();

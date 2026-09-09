@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::super::network::VotingNetwork;
     use super::*;
     use std::sync::Mutex;
     use zcash_voting::transport::{OwnedHttpResponse, TransportError, TransportFuture};
@@ -61,12 +62,20 @@ pub(crate) mod tests {
         entries: Vec<serde_json::Value>,
         now: u64,
     ) -> (VotingDiscovery, BTreeMap<String, TrustedRound>) {
+        discover_for(VotingNetwork::Testnet, entries, now).await
+    }
+    pub(crate) async fn discover_for(
+        network: VotingNetwork,
+        entries: Vec<serde_json::Value>,
+        now: u64,
+    ) -> (VotingDiscovery, BTreeMap<String, TrustedRound>) {
         discover_with_source(
             &fixture(vec![
                 ok(STATIC.to_vec()),
                 ok(DYNAMIC.to_vec()),
                 ok(envelope(entries)),
             ]),
+            network,
             &source(),
             now,
         )
@@ -75,10 +84,65 @@ pub(crate) mod tests {
     }
     async fn discover_with_source(
         transport: &impl HttpTransport,
+        network: VotingNetwork,
         source: &str,
         now: u64,
     ) -> Result<(VotingDiscovery, BTreeMap<String, TrustedRound>), VotingApiError> {
-        discover_with_clock(transport, source, || Ok(now)).await
+        discover_with_clock(transport, network, source, || Ok(now)).await
+    }
+    async fn discover_stage_with_source(
+        transport: &impl HttpTransport,
+        source: &str,
+        now: u64,
+    ) -> Result<(VotingDiscovery, BTreeMap<String, TrustedRound>), VotingApiError> {
+        discover_with_source(transport, VotingNetwork::Testnet, source, now).await
+    }
+
+    #[tokio::test]
+    async fn discovery_binds_optional_service_network_to_selected_context() {
+        for (context, accepted, rejected) in [
+            (
+                VotingNetwork::Testnet,
+                ["test", "testnet"],
+                ["main", "mainnet"],
+            ),
+            (
+                VotingNetwork::Mainnet,
+                ["main", "mainnet"],
+                ["test", "testnet"],
+            ),
+        ] {
+            let mut absent = active();
+            absent.as_object_mut().unwrap().remove("network");
+            let (discovery, rounds) = discover_for(context, vec![absent], 1500).await;
+            assert_eq!(discovery.accepted.len(), 1);
+            assert_eq!(rounds[ID].network, context);
+
+            for name in accepted {
+                let mut entry = active();
+                entry["network"] = serde_json::json!(name);
+                let (discovery, rounds) = discover_for(context, vec![entry], 1500).await;
+                assert_eq!(discovery.accepted.len(), 1, "{context:?}: {name}");
+                assert_eq!(rounds[ID].network, context);
+            }
+
+            for value in [
+                serde_json::json!(rejected[0]),
+                serde_json::json!(rejected[1]),
+                serde_json::json!("regtest"),
+                serde_json::json!(1),
+            ] {
+                let mut entry = active();
+                entry["network"] = value.clone();
+                let (discovery, rounds) = discover_for(context, vec![entry], 1500).await;
+                assert!(rounds.is_empty(), "{context:?}: {value}");
+                assert_eq!(
+                    discovery.rejected[0].code,
+                    VotingErrorCode::NetworkMismatch,
+                    "{context:?}: {value}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -113,12 +177,13 @@ pub(crate) mod tests {
                 ]),
                 clock: clock.clone(),
             };
-            let (discovery, trusted) = discover_with_clock(&transport, &source(), || {
-                samples.fetch_add(1, Ordering::SeqCst);
-                Ok(clock.load(Ordering::SeqCst))
-            })
-            .await
-            .unwrap();
+            let (discovery, trusted) =
+                discover_with_clock(&transport, VotingNetwork::Testnet, &source(), || {
+                    samples.fetch_add(1, Ordering::SeqCst);
+                    Ok(clock.load(Ordering::SeqCst))
+                })
+                .await
+                .unwrap();
             assert_eq!(clock.load(Ordering::SeqCst), initial + 3);
             assert_eq!(samples.load(Ordering::SeqCst), 1);
             assert_eq!(trusted.is_empty(), expired, "initial clock {initial}");
@@ -171,7 +236,7 @@ pub(crate) mod tests {
     async fn static_hash_and_dynamic_signatures_fail_closed_with_ordered_failover() {
         let f = fixture(vec![ok(b"{}".to_vec())]);
         assert_eq!(
-            discover_with_source(&f, &source(), 1500)
+            discover_stage_with_source(&f, &source(), 1500)
                 .await
                 .unwrap_err()
                 .code,
@@ -187,7 +252,7 @@ pub(crate) mod tests {
             ok(envelope(vec![active()])),
         ]);
         assert_eq!(
-            discover_with_source(&f, &source(), 1500)
+            discover_stage_with_source(&f, &source(), 1500)
                 .await
                 .unwrap()
                 .0
@@ -211,7 +276,9 @@ pub(crate) mod tests {
             ok(bad),
             ok(envelope(vec![active()])),
         ]);
-        let (d, t) = discover_with_source(&f, &source(), 1500).await.unwrap();
+        let (d, t) = discover_stage_with_source(&f, &source(), 1500)
+            .await
+            .unwrap();
         assert!(d.accepted.is_empty());
         assert!(t.is_empty());
         assert!(!d.rejected.is_empty());
@@ -298,7 +365,7 @@ pub(crate) mod tests {
         ] {
             let f = fixture(vec![failure]);
             assert_eq!(
-                discover_with_source(&f, &source(), 1500)
+                discover_stage_with_source(&f, &source(), 1500)
                     .await
                     .unwrap_err()
                     .code,
@@ -315,7 +382,7 @@ pub(crate) mod tests {
                 ok(envelope(vec![active()])),
             ]);
             assert_eq!(
-                discover_with_source(&f, &source(), 1500)
+                discover_stage_with_source(&f, &source(), 1500)
                     .await
                     .unwrap()
                     .0
@@ -328,12 +395,21 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn signed_material_tampering_never_accepts_an_active_round() {
-        for field in ["ea_pk", "layout", "round_id", "auth_version"] {
+        for field in [
+            "ea_pk",
+            "layout",
+            "round_id",
+            "legacy_auth_version",
+            "unsupported_auth_version",
+        ] {
             let mut doc: Value = serde_json::from_slice(DYNAMIC).unwrap();
             match field {
                 "ea_pk" => doc["rounds"][ID]["ea_pk"] = serde_json::json!(BASE64.encode([8; 32])),
                 "layout" => doc["pir_layout"]["poly_len"] = serde_json::json!(2048),
-                "auth_version" => doc["rounds"][ID]["auth_version"] = serde_json::json!(99),
+                "legacy_auth_version" => doc["rounds"][ID]["auth_version"] = serde_json::json!(1),
+                "unsupported_auth_version" => {
+                    doc["rounds"][ID]["auth_version"] = serde_json::json!(99)
+                }
                 _ => {
                     let round = doc["rounds"].as_object_mut().unwrap().remove(ID).unwrap();
                     doc["rounds"]["01".repeat(32)] = round;
@@ -346,7 +422,9 @@ pub(crate) mod tests {
                 ok(bytes),
                 ok(envelope(vec![active()])),
             ]);
-            let (d, t) = discover_with_source(&f, &source(), 1500).await.unwrap();
+            let (d, t) = discover_stage_with_source(&f, &source(), 1500)
+                .await
+                .unwrap();
             assert!(d.accepted.is_empty(), "{field}");
             assert!(t.is_empty());
         }
@@ -375,7 +453,7 @@ pub(crate) mod tests {
                 ok(dynamic.to_vec()),
                 ok(envelope(vec![active()])),
             ]);
-            let (discovery, trusted) = discover_with_source(&transport, &source(), 1500)
+            let (discovery, trusted) = discover_stage_with_source(&transport, &source(), 1500)
                 .await
                 .unwrap();
             assert!(trusted.is_empty());
@@ -414,7 +492,7 @@ pub(crate) mod tests {
                 ok(serde_json::to_vec(&serde_json::json!({"round":active()})).unwrap()),
             ]);
             assert_eq!(
-                discover_with_source(&f, &source(), 1500)
+                discover_stage_with_source(&f, &source(), 1500)
                     .await
                     .unwrap()
                     .0
@@ -436,7 +514,9 @@ pub(crate) mod tests {
             }),
         ] {
             let f = fixture(vec![ok(STATIC.to_vec()), ok(DYNAMIC.to_vec()), response]);
-            let (d, t) = discover_with_source(&f, &source(), 1500).await.unwrap();
+            let (d, t) = discover_stage_with_source(&f, &source(), 1500)
+                .await
+                .unwrap();
             assert!(d.accepted.is_empty());
             assert!(t.is_empty());
         }
@@ -489,6 +569,15 @@ pub(crate) mod tests {
         assert_eq!(result.selected_value_zats, "0");
         assert_eq!(result.voting_power, "0");
         assert_eq!(result.bundle_count, 0);
+    }
+
+    #[test]
+    fn network_mismatch_error_is_network_neutral() {
+        let error = VotingApiError::new(VotingErrorCode::NetworkMismatch);
+        assert_eq!(
+            error.message,
+            "Voting network does not match the selected wallet."
+        );
     }
 
     #[tokio::test]
@@ -624,8 +713,62 @@ pub(crate) mod tests {
         ));
         assert_eq!(error.message, "Voting inputs are unavailable.");
     }
+
+    #[tokio::test]
+    async fn eligibility_rejects_a_wallet_from_the_other_authenticated_round_network() {
+        use zcash_client_backend::data_api::{
+            Account as _, AccountBirthday, AccountPurpose, WalletWrite, Zip32Derivation,
+        };
+        use zcash_protocol::consensus::BlockHeight;
+
+        let network = crate::Network::TestNetwork;
+        let mut db = zcash_client_memory::MemoryWalletDb::new(network, 100);
+        let birthday = AccountBirthday::from_parts(
+            zcash_client_backend::data_api::chain::ChainState::empty(
+                BlockHeight::from_u32(3_000_000),
+                zcash_primitives::block::BlockHash([0; 32]),
+            ),
+            None,
+        );
+        let ufvk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            &network,
+            &[18; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap()
+        .to_unified_full_viewing_key();
+        let id = db
+            .import_account_ufvk(
+                "mainnet fixture",
+                &ufvk,
+                &birthday,
+                AccountPurpose::Spending {
+                    derivation: Some(Zip32Derivation::new(
+                        zip32::fingerprint::SeedFingerprint::from_seed(&[18; 32]).unwrap(),
+                        zip32::AccountId::ZERO,
+                    )),
+                },
+                None,
+            )
+            .unwrap()
+            .id();
+        let wallet =
+            crate::Wallet::new(db, Client::new("https://example.invalid".into()), network).unwrap();
+        let mut entry = active();
+        entry.as_object_mut().unwrap().remove("network");
+        let (_, rounds) = discover_for(VotingNetwork::Mainnet, vec![entry], 1500).await;
+
+        assert_eq!(
+            check_eligibility(&wallet, id, &rounds[ID])
+                .await
+                .unwrap_err()
+                .code,
+            VotingErrorCode::NetworkMismatch
+        );
+    }
 }
 use super::constants::*;
+use super::network::VotingNetwork;
 use super::types::*;
 use super::wallet_adapter::{WalletInputError, gather_eligibility_inputs};
 use crate::bindgen::wallet::{AccountId, MemoryWallet};
@@ -643,8 +786,9 @@ use zcash_voting::transport::{HttpTransport, OwnedHttpRequest, RequestKind};
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn discover_rounds(
     transport: &super::transport::BrowserFetchTransport,
+    network: VotingNetwork,
 ) -> Result<(VotingDiscovery, BTreeMap<String, TrustedRound>), VotingApiError> {
-    discover_with_clock(transport, STAGE_STATIC_CONFIG_SOURCE, || {
+    discover_with_clock(transport, network, network.static_source(), || {
         u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp())
             .map_err(|_| VotingApiError::new(VotingErrorCode::ConfigUntrusted))
     })
@@ -680,9 +824,10 @@ async fn fetch(
     Ok((response.status, response.body))
 }
 
-// The custom source is private: production has only the fixed stage wrapper.
+// Source overrides stay private; production selects only a built-in pin from the wallet context.
 async fn discover_with_clock(
     transport: &impl HttpTransport,
+    network: VotingNetwork,
     source: &str,
     clock: impl Fn() -> Result<u64, VotingApiError>,
 ) -> Result<(VotingDiscovery, BTreeMap<String, TrustedRound>), VotingApiError> {
@@ -801,7 +946,7 @@ async fn discover_with_clock(
             continue;
         }
         // Sample after every awaited fetch, once for this round's validation.
-        match trusted_round(&resolved, &id, &entry, clock()?) {
+        match trusted_round(&resolved, network, &id, &entry, clock()?) {
             Ok(round) => {
                 discovery.accepted.push(round.summary.clone());
                 trusted.insert(id, round);
@@ -872,13 +1017,17 @@ fn root(value: &Value) -> Result<Vec<u8>, VotingApiError> {
 
 fn trusted_round(
     config: &ResolvedVotingConfig,
+    network: VotingNetwork,
     id: &str,
     entry: &Value,
     now: u64,
 ) -> Result<TrustedRound, VotingApiError> {
-    // The fixed stage trust anchor supplies testnet when the v1 service omits it.
-    if let Some(network) = entry.get("network") {
-        if !matches!(network.as_str(), Some("test" | "testnet")) {
+    // The built-in trust context supplies the network when the service omits it.
+    if let Some(service_network) = entry.get("network") {
+        if !service_network
+            .as_str()
+            .is_some_and(|name| network.accepts_service_network(name))
+        {
             return Err(VotingApiError::new(VotingErrorCode::NetworkMismatch));
         }
     }
@@ -999,6 +1148,7 @@ fn trusted_round(
         serde_json::to_vec(&metadata).map_err(|_| unauthed())?,
     ));
     Ok(TrustedRound {
+        network,
         service_metadata_fingerprint,
         config_summary: config.into(),
         config_fingerprint: config.dynamic_config_fingerprint.clone(),
@@ -1027,7 +1177,9 @@ impl VotingApiError {
             VotingErrorCode::ConfigUntrusted => "Voting configuration could not be authenticated.",
             VotingErrorCode::RoundUnauthenticated => "Voting round could not be authenticated.",
             VotingErrorCode::RoundExpired => "Voting round has expired.",
-            VotingErrorCode::NetworkMismatch => "Voting requires the test network.",
+            VotingErrorCode::NetworkMismatch => {
+                "Voting network does not match the selected wallet."
+            }
             VotingErrorCode::WalletNotSynced => "Sync the wallet through the voting snapshot.",
             VotingErrorCode::RecoveryConflict => "Saved voting configuration no longer matches.",
             VotingErrorCode::OperationInProgress => "Another voting operation is in progress.",
@@ -1067,7 +1219,7 @@ pub(crate) async fn check_eligibility(
     let input = gather_eligibility_inputs(
         wallet,
         account_id,
-        zcash_voting::Network::Testnet,
+        round.network.network(),
         round.params.snapshot_height,
     )
     .await?;

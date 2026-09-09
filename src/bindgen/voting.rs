@@ -85,7 +85,10 @@ impl WebVotingSession {
         value(
             &self
                 .inner
-                .discover_with(config::discover_rounds(&self.inner.transport))
+                .discover_with(config::discover_rounds(
+                    &self.inner.transport,
+                    self.inner.network,
+                ))
                 .await?,
         )
     }
@@ -118,11 +121,11 @@ impl WebVotingSession {
     ) -> Result<JsValue, JsValue> {
         let (usk, network, index, key_fingerprint) = usk.into_voting_parts();
         let fingerprint: zip32::fingerprint::SeedFingerprint = seed_fingerprint.into();
+        if crate::voting::network::VotingNetwork::for_wallet(network) != self.inner.network {
+            return Err(VotingApiError::new(VotingErrorCode::RecoveryConflict).into());
+        }
         let account = self.inner.validate_delegation_key(&usk, fingerprint)?;
-        if !matches!(network, crate::Network::TestNetwork)
-            || u32::from(index) != account.account_index
-            || key_fingerprint != Some(fingerprint)
-        {
+        if u32::from(index) != account.account_index || key_fingerprint != Some(fingerprint) {
             return Err(VotingApiError::new(VotingErrorCode::RecoveryConflict).into());
         }
         value(
@@ -159,7 +162,7 @@ impl WebVotingSession {
                 .inner
                 .round_proposals_with(
                     &round_id,
-                    config::discover_rounds(&self.inner.transport),
+                    config::discover_rounds(&self.inner.transport, self.inner.network),
                     now_secs,
                 )
                 .await?,

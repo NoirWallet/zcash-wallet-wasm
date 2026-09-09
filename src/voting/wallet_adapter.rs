@@ -51,7 +51,7 @@ fn validate_locked(
     network: Network,
     snapshot_height: u64,
 ) -> Result<BlockHeight, WalletInputError> {
-    if network != Network::Testnet
+    if !matches!(network, Network::Testnet | Network::Mainnet)
         || db.params().network_type() != network.network_type()
         || wallet_network.network_type() != network.network_type()
     {
@@ -124,8 +124,12 @@ pub(crate) async fn gather_wallet_inputs(
 ) -> Result<BrowserWalletInputs, WalletInputError> {
     let state = TreeState::decode(request.anchor_tree_state_bytes.as_slice())
         .map_err(|_| WalletInputError::Wallet("invalid snapshot TreeState".into()))?;
-    if state.network != "test"
-        || request.network != Network::Testnet
+    let voting_network = match request.network {
+        Network::Testnet => super::network::VotingNetwork::Testnet,
+        Network::Mainnet => super::network::VotingNetwork::Mainnet,
+        Network::Regtest => return Err(WalletInputError::NetworkMismatch),
+    };
+    if state.network != voting_network.tree_state_network()
         || request.hotkey.network() != request.network
     {
         return Err(WalletInputError::NetworkMismatch);
@@ -206,6 +210,139 @@ mod tests {
         AccountBirthday, AccountPurpose, WalletWrite, Zip32Derivation,
     };
     use zcash_primitives::block::BlockHash;
+
+    fn tree_state(network: &str, height: u64) -> TreeState {
+        // Legacy CommitmentTree encoding: present left leaf, absent right leaf, no parents.
+        let mut tree_bytes = vec![1];
+        tree_bytes.extend_from_slice(&[42; 32]);
+        tree_bytes.extend_from_slice(&[0, 0]);
+        TreeState {
+            network: network.into(),
+            height,
+            hash: hex::encode([0; 32]),
+            ironwood_tree: hex::encode(tree_bytes),
+            ..TreeState::default()
+        }
+    }
+
+    fn wallet(
+        network: crate::Network,
+        seed: u8,
+        state: Option<&TreeState>,
+    ) -> (MemoryWallet<Client>, AccountId) {
+        let mut db = MemoryWalletDb::new(network, 100);
+        let birthday = AccountBirthday::from_parts(
+            state.map_or_else(
+                || {
+                    zcash_client_backend::data_api::chain::ChainState::empty(
+                        BlockHeight::from_u32(3_000_000),
+                        BlockHash([0; 32]),
+                    )
+                },
+                |state| state.clone().to_chain_state().unwrap(),
+            ),
+            None,
+        );
+        let ufvk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+            &network,
+            &[seed; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap()
+        .to_unified_full_viewing_key();
+        let derivation = Zip32Derivation::new(
+            zip32::fingerprint::SeedFingerprint::from_seed(&[seed; 32]).unwrap(),
+            zip32::AccountId::ZERO,
+        );
+        let id = db
+            .import_account_ufvk(
+                "fixture",
+                &ufvk,
+                &birthday,
+                AccountPurpose::Spending {
+                    derivation: Some(derivation),
+                },
+                None,
+            )
+            .unwrap()
+            .id();
+        (
+            crate::Wallet::new(db, Client::new("https://example.invalid".into()), network).unwrap(),
+            id,
+        )
+    }
+
+    #[tokio::test]
+    async fn mainnet_wallet_and_tree_state_pass_network_validation_without_mutation() {
+        let height = 3_428_143;
+        let state = tree_state("main", height);
+        let (wallet, account) = wallet(crate::Network::MainNetwork, 17, Some(&state));
+        let hotkey = VotingHotkey::from_stored_secret(&[0x77; 64], Network::Mainnet).unwrap();
+        let before = wallet.db_to_bytes().await.unwrap();
+
+        assert!(matches!(
+            gather_eligibility_inputs(&wallet, account, Network::Mainnet, height).await,
+            Err(WalletInputError::WalletNotSynced {
+                scanned: 0,
+                snapshot: 3_428_143
+            })
+        ));
+        assert!(matches!(
+            gather_wallet_inputs(
+                &wallet,
+                account,
+                WalletInputRequest {
+                    network: Network::Mainnet,
+                    snapshot_height: height,
+                    anchor_tree_state_bytes: state.encode_to_vec(),
+                    resolved_round_name: "mainnet fixture".into(),
+                    hotkey: &hotkey,
+                },
+            )
+            .await,
+            Err(WalletInputError::WalletNotSynced {
+                scanned: 0,
+                snapshot: 3_428_143
+            })
+        ));
+        assert_eq!(before, wallet.db_to_bytes().await.unwrap());
+        assert!(wallet.db.try_write().is_ok());
+    }
+
+    #[tokio::test]
+    async fn wallet_inputs_reject_cross_network_tree_hotkey_and_regtest_without_mutation() {
+        let height = 3_428_143;
+        let state = tree_state("main", height);
+        let (wallet, account) = wallet(crate::Network::MainNetwork, 17, Some(&state));
+        let mainnet = VotingHotkey::from_stored_secret(&[0x77; 64], Network::Mainnet).unwrap();
+        let testnet = VotingHotkey::from_stored_secret(&[0x77; 64], Network::Testnet).unwrap();
+        let before = wallet.db_to_bytes().await.unwrap();
+
+        for (network, state, hotkey) in [
+            (Network::Mainnet, tree_state("test", height), &mainnet),
+            (Network::Mainnet, tree_state("mainnet", height), &mainnet),
+            (Network::Mainnet, tree_state("main", height), &testnet),
+            (Network::Regtest, tree_state("regtest", height), &mainnet),
+        ] {
+            assert!(matches!(
+                gather_wallet_inputs(
+                    &wallet,
+                    account,
+                    WalletInputRequest {
+                        network,
+                        snapshot_height: height,
+                        anchor_tree_state_bytes: state.encode_to_vec(),
+                        resolved_round_name: "wrong network".into(),
+                        hotkey,
+                    },
+                )
+                .await,
+                Err(WalletInputError::NetworkMismatch)
+            ));
+        }
+        assert_eq!(before, wallet.db_to_bytes().await.unwrap());
+        assert!(wallet.db.try_write().is_ok());
+    }
 
     #[tokio::test]
     async fn eligibility_rejects_network_account_and_unscanned_wallet_without_mutation() {

@@ -172,6 +172,7 @@ try {
   const bytes = async name => new Uint8Array(await (await fetch(`fixtures/${name}`)).arrayBuffer());
   const metadata = await (await fetch('fixtures/metadata.json')).json();
   const walletBytes = await bytes('wallet.bin');
+  const mainnetWalletBytes = await bytes('mainnet-wallet.bin');
   const votingBytes = await bytes('voting.bin');
   const corruptDelegationBytes = await Promise.all(['delegation-mixed-corrupt.bin', 'delegation-confirmed-corrupt.bin'].map(bytes));
   console.log('Constructing synthetic wallet');
@@ -225,11 +226,29 @@ try {
   await test('account, network, owner and corrupt snapshot errors are safe', async () => {
     await errorCode(() => new WebVotingSession(wallet, 999, undefined, () => {}), 'NOT_ELIGIBLE');
     const main = new WebWallet('main', 'https://example.invalid');
-    await errorCode(() => new WebVotingSession(main, 0, undefined, () => {}), 'NETWORK_MISMATCH');
+    await errorCode(() => new WebVotingSession(main, 0, undefined, () => {}), 'NOT_ELIGIBLE');
     const other = new WebWallet('test','https://example.invalid',await bytes('other-wallet.bin'));
     await errorCode(() => new WebVotingSession(other,metadata.accountId,votingBytes,()=>{}),'RECOVERY_CONFLICT');
     await errorCode(() => session(()=>{},new Uint8Array([1,2,3])),'RECOVERY_CONFLICT');
     main.free(); other.free();
+  });
+  await test('mainnet session exports, reopens, and rejects foreign-network state', async () => {
+    const main = new WebWallet('main', 'https://example.invalid', mainnetWalletBytes);
+    const fresh = new WebVotingSession(main, metadata.mainnetAccountId, undefined, () => {});
+    assert(/^zcash-voting:mainnet:[a-f0-9]{64}$/.test(fresh.storageKey), 'unsafe mainnet storage key');
+    const exported = fresh.exportState();
+    const reopened = new WebVotingSession(main, metadata.mainnetAccountId, exported, () => {});
+    assert(reopened.storageKey === fresh.storageKey, 'mainnet storage key changed after reopen');
+    assert(reopened.exportState()[0] === 83, 'mainnet state did not reopen as SQLite');
+    await errorCode(
+      () => new WebVotingSession(main, metadata.mainnetAccountId, votingBytes, () => {}),
+      'RECOVERY_CONFLICT',
+    );
+    await errorCode(
+      () => new WebVotingSession(wallet, metadata.accountId, exported, () => {}),
+      'RECOVERY_CONFLICT',
+    );
+    reopened.free(); fresh.free(); main.free();
   });
   await test('exportState owns an independent byte copy', () => {
     const s = session(()=>{});

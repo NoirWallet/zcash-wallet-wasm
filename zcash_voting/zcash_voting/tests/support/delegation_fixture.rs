@@ -10,18 +10,39 @@ use zcash_voting::{
 use zcash_voting::{Network, NoteInfo, VotingRoundParams};
 
 pub fn height() -> u64 {
+    height_for(Network::Testnet)
+}
+
+pub fn height_for(network: Network) -> u64 {
     u64::from(u32::from(
-        Network::Testnet
-            .activation_height(NetworkUpgrade::Nu6_3)
-            .unwrap(),
+        network.activation_height(NetworkUpgrade::Nu6_3).unwrap(),
     ))
 }
 
 pub fn prepare(db: &VotingDb, params: &VotingRoundParams, seed: u8) -> CanonicalDelegation {
-    prepare_bundles(db, params, seed, 1).remove(0)
+    assert_eq!(stored_network(db, params), Network::Testnet);
+    prepare_for_stored_network(db, params, seed)
+}
+
+pub fn prepare_for_stored_network(
+    db: &VotingDb,
+    params: &VotingRoundParams,
+    seed: u8,
+) -> CanonicalDelegation {
+    prepare_bundles_for_stored_network(db, params, seed, 1).remove(0)
 }
 
 pub fn prepare_bundles(
+    db: &VotingDb,
+    params: &VotingRoundParams,
+    seed: u8,
+    count: u8,
+) -> Vec<CanonicalDelegation> {
+    assert_eq!(stored_network(db, params), Network::Testnet);
+    prepare_bundles_for_stored_network(db, params, seed, count)
+}
+
+pub fn prepare_bundles_for_stored_network(
     db: &VotingDb,
     params: &VotingRoundParams,
     seed: u8,
@@ -31,6 +52,18 @@ pub fn prepare_bundles(
 }
 
 pub fn complete_bundle(
+    db: &VotingDb,
+    params: &VotingRoundParams,
+    seed: u8,
+    count: u8,
+    bundle: u32,
+    canonical: &CanonicalDelegation,
+) -> CanonicalDelegation {
+    assert_eq!(stored_network(db, params), Network::Testnet);
+    complete_bundle_for_stored_network(db, params, seed, count, bundle, canonical)
+}
+
+pub fn complete_bundle_for_stored_network(
     db: &VotingDb,
     params: &VotingRoundParams,
     seed: u8,
@@ -70,8 +103,12 @@ pub fn complete_bundle(
 }
 
 pub fn notes(seed: u8, count: u8) -> Vec<NoteInfo> {
+    notes_for(Network::Testnet, seed, count)
+}
+
+pub fn notes_for(network: Network, seed: u8, count: u8) -> Vec<NoteInfo> {
     let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
-        &Network::Testnet,
+        &network,
         &[seed; 32],
         zip32::AccountId::ZERO,
     )
@@ -97,7 +134,7 @@ pub fn notes(seed: u8, count: u8) -> Vec<NoteInfo> {
                 u64::from(index),
                 zip32::Scope::External,
                 &ufvk,
-                &Network::Testnet,
+                &network,
             )
             .unwrap()
         })
@@ -111,8 +148,9 @@ fn prepare_selected_bundles(
     count: u8,
     selected: Option<u32>,
 ) -> Vec<CanonicalDelegation> {
+    let network = stored_network(db, params);
     let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
-        &Network::Testnet,
+        &network,
         &[seed; 32],
         zip32::AccountId::ZERO,
     )
@@ -120,7 +158,7 @@ fn prepare_selected_bundles(
     let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&[seed; 32]).unwrap();
     let ufvk = usk.to_unified_full_viewing_key();
     let fvk = ufvk.orchard().unwrap();
-    let notes = notes(seed, count);
+    let notes = notes_for(network, seed, count);
     let id = &params.vote_round_id;
     db.ensure_bundles_with_policy(id, &notes, zcash_voting::BundlePolicy::new(1).unwrap())
         .unwrap();
@@ -145,8 +183,7 @@ fn prepare_selected_bundles(
                     index,
                     &[note],
                     &keys,
-                    delegate::branch_id_for_height(Network::Testnet, params.snapshot_height)
-                        .unwrap(),
+                    delegate::branch_id_for_height(network, params.snapshot_height).unwrap(),
                 )
                 .unwrap();
             let mut signer =
@@ -190,6 +227,12 @@ fn prepare_selected_bundles(
             CanonicalDelegation::from_submission(&submission).unwrap()
         })
         .collect()
+}
+
+fn stored_network(db: &VotingDb, params: &VotingRoundParams) -> Network {
+    let (stored_params, network) = db.round_params_with_network(&params.vote_round_id).unwrap();
+    assert_eq!(&stored_params, params);
+    network
 }
 
 pub fn event(round: &str, position: &str) -> zcash_voting::confirmation::TxEvent {

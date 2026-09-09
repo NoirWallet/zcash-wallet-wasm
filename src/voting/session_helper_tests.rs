@@ -274,6 +274,7 @@ struct Helpers {
     plan: Arc<Mutex<Option<String>>>,
     payloads: Arc<Mutex<std::collections::BTreeMap<u32, Vec<u8>>>>,
     stop_post: Option<usize>,
+    stopped_post: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pending_until_post: std::sync::atomic::AtomicBool,
     one_confirmation: bool,
 }
@@ -288,6 +289,7 @@ impl Helpers {
             plan: Default::default(),
             payloads: Default::default(),
             stop_post: None,
+            stopped_post: Mutex::new(None),
             pending_until_post: Default::default(),
             one_confirmation: false,
         }
@@ -328,12 +330,8 @@ impl HttpTransport for Helpers {
             *expected_plan = Some(plan);
         }
         drop(expected_plan);
-        let db = VotingDb::open_browser(
-            &self.vote.wallet_id,
-            zcash_voting::Network::Testnet,
-            Some(&bytes),
-        )
-        .unwrap();
+        let db =
+            VotingDb::open_browser(&self.vote.wallet_id, self.vote.network, Some(&bytes)).unwrap();
         let wire: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
         let index = wire["share_index"].as_u64().unwrap() as u32;
         let base = request
@@ -371,6 +369,9 @@ impl HttpTransport for Helpers {
         self.pending_until_post
             .store(false, std::sync::atomic::Ordering::SeqCst);
         if interrupted {
+            if let Some(stopped) = self.stopped_post.lock().unwrap().take() {
+                let _ = stopped.send(());
+            }
             Box::pin(pending())
         } else {
             self.vote.execute(request)
@@ -517,6 +518,8 @@ async fn helper_recovery_interruption_during_each_eager_post_preserves_payloads_
         let durable = Arc::new(Mutex::new(base.clone()));
         let mut transport = Helpers::new(&fixture, durable.clone());
         transport.stop_post = Some(index);
+        let (stopped, reached_stopped_post) = tokio::sync::oneshot::channel();
+        *transport.stopped_post.lock().unwrap() = Some(stopped);
         let mut future = Box::pin(session.submit_ballot_with(
             ID,
             None,
@@ -529,6 +532,10 @@ async fn helper_recovery_interruption_during_each_eager_post_preserves_payloads_
             },
             || Ok(1500),
         ));
+        tokio::select! {
+            result = &mut future => panic!("targeted helper POST did not suspend: {result:?}"),
+            reached = reached_stopped_post => reached.unwrap(),
+        }
         assert!(poll!(&mut future).is_pending());
         drop(future);
         let bytes = durable.lock().unwrap().clone();
