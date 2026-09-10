@@ -67,6 +67,8 @@ use zip32::fingerprint::SeedFingerprint;
 use zcash_client_backend::data_api::chain::BlockCache;
 use zcash_client_memory::{MemBlockCache, MemoryWalletDb};
 
+#[cfg(test)]
+mod confirmations_tests;
 const BATCH_SIZE: u32 = 10000;
 
 /// constant that signals what's the minimum transparent balance for proposing a
@@ -539,6 +541,7 @@ pub struct Wallet<W, T> {
     // gRPC client used to connect to a lightwalletd instance for network data
     pub(crate) client: CompactTxStreamerClient<T>,
     pub(crate) network: Network,
+    confirmations_policy: ConfirmationsPolicy,
     /// Note management: the number of notes to maintain in the wallet
     pub(crate) target_note_count: usize,
     /// Note management: the minimum allowed value for split change amounts
@@ -551,6 +554,7 @@ impl<W, T: Clone> Clone for Wallet<W, T> {
             db: self.db.clone(),
             client: self.client.clone(),
             network: self.network,
+            confirmations_policy: self.confirmations_policy,
             target_note_count: self.target_note_count,
             min_split_output_value: self.min_split_output_value,
         }
@@ -569,7 +573,7 @@ where
             .db
             .read()
             .await
-            .spendability_diagnostics(account_id, ConfirmationsPolicy::default())?)
+            .spendability_diagnostics(account_id, self.confirmations_policy)?)
     }
 
     // Encodes the MemoryWallet into protobuf bytes
@@ -625,20 +629,28 @@ where
     T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
     <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
 {
-    /// Creates the ZIP-315 default confirmations policy.
-    ///
-    /// This preserves ZIP-315's distinction between trusted and untrusted
-    /// outputs while allowing zero-confirmation shielding of transparent UTXOs.
+    /// The base policy selected when this wallet instance was constructed.
     fn confirmations_policy(&self) -> ConfirmationsPolicy {
-        ConfirmationsPolicy::default()
+        self.confirmations_policy
     }
 
     pub fn new(db: W, client: T, network: Network) -> Result<Self, Error> {
+        Self::new_with_confirmations_policy(db, client, network, ConfirmationsPolicy::default())
+    }
+
+    /// Creates a wallet with a runtime confirmations policy, not persisted in the database.
+    pub fn new_with_confirmations_policy(
+        db: W,
+        client: T,
+        network: Network,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<Self, Error> {
         get_prover();
         Ok(Wallet {
             db: Arc::new(RwLock::new(db)),
             client: CompactTxStreamerClient::new(client),
             network,
+            confirmations_policy,
             target_note_count: 4,
             min_split_output_value: 10000000,
         })
