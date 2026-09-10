@@ -540,6 +540,36 @@ fn get_orchard_verifying_key(
     })
 }
 
+/// Database capability required by synchronization that releases locks during RPCs.
+///
+/// Revisions must change before any rewind mutation, including partial rewinds,
+/// and must not be reused while an earlier revision can still be held by a query.
+/// Replacing a database must also invalidate outstanding revisions. Ordinary
+/// forward synchronization and local transaction writes need not invalidate them.
+pub trait WalletChainRevision {
+    /// An owned revision that can be compared after a network await.
+    type Revision: Eq;
+
+    /// Captures the current revision while the caller holds the database lock.
+    fn chain_state_revision(&self) -> Self::Revision;
+}
+
+impl<P: Parameters> WalletChainRevision for MemoryWalletDb<P> {
+    type Revision = zcash_client_memory::ChainStateRevision;
+
+    fn chain_state_revision(&self) -> Self::Revision {
+        MemoryWalletDb::chain_state_revision(self)
+    }
+}
+
+fn ensure_chain_revision<W: WalletChainRevision>(db: &W, expected: &W::Revision) -> Result<(), Error> {
+    if &db.chain_state_revision() == expected {
+        Ok(())
+    } else {
+        Err(Error::HistoryQueryStale)
+    }
+}
+
 pub struct Wallet<W, T> {
     /// Internal database used to maintain wallet data (e.g. accounts, transactions, cached blocks)
     pub(crate) db: Arc<RwLock<W>>,
@@ -828,7 +858,10 @@ where
         Ok(account_id)
     }
 
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error>
+    where
+        W: WalletChainRevision,
+    {
         let mut client = self.client.clone();
         // TODO: This should be held in the Wallet struct so we can download in parallel
         let db_cache = MemBlockCache::new();
@@ -849,7 +882,10 @@ where
 
     /// Runs a single batch of the sync process without looping.
     /// Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
-    pub async fn sync_next_batch(&self, batch_size: Option<u32>) -> Result<bool, Error> {
+    pub async fn sync_next_batch(&self, batch_size: Option<u32>) -> Result<bool, Error>
+    where
+        W: WalletChainRevision,
+    {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();
 
@@ -868,7 +904,10 @@ where
         Ok(did_work)
     }
 
-    pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error> {
+    pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error>
+    where
+        W: WalletChainRevision,
+    {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();
 
@@ -887,14 +926,30 @@ where
         Ok(did_work)
     }
 
-    pub(crate) async fn process_pending_transaction_requests(&self) -> Result<(), Error> {
-        // Keep request generation, network replies, and cursor updates in the
-        // same database write interval as the other sync paths. A concurrent
-        // sync must not rewind the chain between an old-chain query and its
-        // completion, which could otherwise overwrite the rewound cursor.
-        let mut db = self.db.write().await;
-        let transaction_requests = {
-            db.transaction_data_requests()?.into_iter().fold(
+    // The check and mutation must use the same guard: checking before acquiring
+    // the write lock would leave a race with a concurrent chain rewind.
+    async fn checked_history_write(
+        &self,
+        revision: &W::Revision,
+    ) -> Result<tokio::sync::RwLockWriteGuard<'_, W>, Error>
+    where
+        W: WalletChainRevision,
+    {
+        let db = self.db.write().await;
+        ensure_chain_revision(&*db, revision)?;
+        Ok(db)
+    }
+
+    pub(crate) async fn process_pending_transaction_requests(&self) -> Result<(), Error>
+    where
+        W: WalletChainRevision,
+    {
+        // Snapshot requests and their chain revision together. Never keep a
+        // database guard across an RPC or stream await. Each reply is checked
+        // under its write guard so a rewind cannot be undone by an old reply.
+        let (revision, transaction_requests) = {
+            let db = self.db.read().await;
+            let requests = db.transaction_data_requests()?.into_iter().fold(
                 BTreeMap::new(),
                 |mut requests, request| {
                     match request {
@@ -908,19 +963,21 @@ where
                     }
                     requests
                 },
-            )
+            );
+            (db.chain_state_revision(), requests)
         };
 
         let mut client = self.client.clone();
         for (requested_txid, needs_enhancement) in transaction_requests {
-            let raw = match client
+            let response = client
                 .get_transaction(service::TxFilter {
                     block: None,
                     index: 0,
                     hash: requested_txid.as_ref().to_vec(),
                 })
-                .await
-            {
+                .await;
+            let mut db = self.checked_history_write(&revision).await?;
+            let raw = match response {
                 Ok(response) => response.into_inner(),
                 Err(status) if !needs_enhancement && status.code() == tonic::Code::NotFound => {
                     db.set_transaction_status(
@@ -979,6 +1036,8 @@ where
         let mut remaining_address_requests = 4096;
         loop {
             let address_requests = {
+                let db = self.db.read().await;
+                ensure_chain_revision(&*db, &revision)?;
                 db.transaction_data_requests()?
                     .into_iter()
                     .filter_map(|request| match request {
@@ -1001,6 +1060,8 @@ where
                 }
 
                 let chain_tip_height = {
+                    let db = self.db.read().await;
+                    ensure_chain_revision(&*db, &revision)?;
                     db.chain_height()?.ok_or_else(|| {
                         Error::Generic(
                         "Unable to process transparent transaction request without chain height"
@@ -1037,6 +1098,7 @@ where
                     .into_inner();
 
                 while let Some(raw) = transactions.try_next().await? {
+                    let mut db = self.checked_history_write(&revision).await?;
                     let mined_height = match raw.height {
                         0 | u64::MAX => {
                             return Err(Error::Generic(format!(
@@ -1063,8 +1125,9 @@ where
                     )?;
                 }
 
-                completed_address_requests.insert(request.clone());
-                db.notify_address_checked(request, as_of_height)?;
+                let mut db = self.checked_history_write(&revision).await?;
+                db.notify_address_checked(request.clone(), as_of_height)?;
+                completed_address_requests.insert(request);
                 made_progress = true;
             }
             if !made_progress {
@@ -1174,7 +1237,10 @@ where
         &self,
         batch_size: Option<u32>,
         refresh: bool,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    ) -> Result<Option<Vec<u8>>, Error>
+    where
+        W: WalletChainRevision,
+    {
         self.prepare_sync_batch_impl(batch_size, false, refresh, None)
             .await
     }
@@ -1214,7 +1280,10 @@ where
     pub async fn prepare_sync_batch_optimized(
         &self,
         batch_size: Option<u32>,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    ) -> Result<Option<Vec<u8>>, Error>
+    where
+        W: WalletChainRevision,
+    {
         self.prepare_sync_batch_impl(batch_size, true, true, None)
             .await
     }
@@ -1227,7 +1296,10 @@ where
         &self,
         batch_size: Option<u32>,
         refresh: bool,
-    ) -> Result<Option<String>, Error> {
+    ) -> Result<Option<String>, Error>
+    where
+        W: WalletChainRevision,
+    {
         let mut t = [0.0f64; 4];
         let r = self
             .prepare_sync_batch_impl(batch_size, false, refresh, Some(&mut t))
@@ -1246,7 +1318,10 @@ where
         optimized: bool,
         refresh: bool,
         timings: Option<&mut [f64; 4]>,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    ) -> Result<Option<Vec<u8>>, Error>
+    where
+        W: WalletChainRevision,
+    {
         use prost::Message;
         use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
         use zcash_client_backend::proto::compact_formats::CompactBlock;
@@ -1466,7 +1541,10 @@ where
 
     /// Scan a journal entry (for recovery from base snapshot + journal).
     /// This consumes the raw journal entry bytes and applies the scan to the wallet DB.
-    pub async fn scan_journal_entry(&self, journal_data: &[u8]) -> Result<bool, Error> {
+    pub async fn scan_journal_entry(&self, journal_data: &[u8]) -> Result<bool, Error>
+    where
+        W: WalletChainRevision,
+    {
         use prost::Message;
         use zcash_client_backend::proto::compact_formats::CompactBlock;
         use zcash_client_backend::proto::service;
@@ -1543,7 +1621,10 @@ where
     }
 
     /// Replay multiple journal entries in sequence (for recovery from base snapshot + journal).
-    pub async fn replay_journal_entries(&self, entries: Vec<Vec<u8>>) -> Result<(), Error> {
+    pub async fn replay_journal_entries(&self, entries: Vec<Vec<u8>>) -> Result<(), Error>
+    where
+        W: WalletChainRevision,
+    {
         for (i, entry) in entries.iter().enumerate() {
             tracing::info!("Replaying journal entry {}/{}", i + 1, entries.len());
             self.scan_journal_entry(entry).await?;
@@ -3167,6 +3248,10 @@ pub(crate) fn usk_from_seed_str(
 }
 
 #[cfg(test)]
+#[path = "wallet/transparent_history_tests.rs"]
+mod transparent_history_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
@@ -3193,7 +3278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transparent_history_rpc_cannot_race_a_chain_rewind() {
+    async fn transparent_history_rpc_does_not_hold_the_wallet_database_lock() {
         use std::sync::Arc;
         use tonic::codegen::http;
         use zcash_client_backend::data_api::{
@@ -3257,8 +3342,12 @@ mod tests {
             () = request_started.notified() => {},
         }
         assert!(
-            wallet.db.try_write().is_err(),
-            "a concurrent sync must not rewind the chain while an old-chain history reply is pending"
+            wallet.db.try_read().is_ok(),
+            "a stalled history RPC must not block balance reads"
+        );
+        assert!(
+            wallet.db.try_write().is_ok(),
+            "a stalled history RPC must not block transaction creation"
         );
     }
 

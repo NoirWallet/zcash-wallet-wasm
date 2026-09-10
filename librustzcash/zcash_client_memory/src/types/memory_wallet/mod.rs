@@ -6,6 +6,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     num::NonZeroU32,
     ops::{Range, RangeInclusive},
+    sync::Arc,
 };
 
 use ::transparent::bundle::OutPoint;
@@ -55,9 +56,34 @@ use crate::types::transparent::{
 };
 use crate::types::*;
 
+/// An opaque, process-local revision of a wallet's chain state.
+///
+/// Retain a revision before releasing a database lock for a network query, then
+/// compare it under the same lock used to apply the reply. Rewinds and database
+/// replacement invalidate earlier revisions, even if the chain height returns
+/// to its original value. Revisions are deliberately not serialized.
+#[derive(Clone, Debug)]
+pub struct ChainStateRevision(Arc<()>);
+
+impl ChainStateRevision {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(()))
+    }
+}
+
+impl PartialEq for ChainStateRevision {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ChainStateRevision {}
+
 /// The main in-memory wallet database. Implements all the traits needed to be used as a backend.
 #[derive(Debug)]
 pub struct MemoryWalletDb<P: consensus::Parameters> {
+    /// Runtime-only invalidation of outstanding network queries; not wallet data.
+    pub(crate) chain_state_revision: ChainStateRevision,
     /// Zcash network parameters for wallet
     pub(crate) params: P,
     /// The accounts in the wallet
@@ -228,6 +254,7 @@ fn transparent_spent_zatoshis_for_account(
 impl<P: consensus::Parameters> MemoryWalletDb<P> {
     pub fn new(params: P, max_checkpoints: usize) -> Self {
         Self {
+            chain_state_revision: ChainStateRevision::new(),
             accounts: Accounts::new(),
             params,
             blocks: BTreeMap::new(),
@@ -257,6 +284,15 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
 
     pub fn params(&self) -> &P {
         &self.params
+    }
+
+    /// Returns the current process-local chain revision.
+    ///
+    /// A retained revision remains valid across forward synchronization and local
+    /// transaction creation, but not across a rewind or replacement of this database.
+    /// Callers must compare revisions while holding the lock used to apply a reply.
+    pub fn chain_state_revision(&self) -> ChainStateRevision {
+        self.chain_state_revision.clone()
     }
 
     pub(crate) fn add_account(

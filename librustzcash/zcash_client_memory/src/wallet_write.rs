@@ -1193,6 +1193,11 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
                 - 1
         });
 
+        // Invalidate outstanding network replies before the first mutation. This
+        // also covers rewinds of transparent history above the last scanned block,
+        // and partial failure of a subsequent tree truncation.
+        self.chain_state_revision = crate::ChainStateRevision::new();
+
         // Delete from the scanning queue any range with a start height greater than the
         // truncation height, and then truncate any remaining range by setting the end
         // equal to the truncation height + 1. This sets our view of the chain tip back

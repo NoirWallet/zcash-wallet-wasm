@@ -51,6 +51,10 @@ pub enum Error {
     #[error("Syncing Error: {0}")]
     Sync(String),
 
+    /// An outstanding network reply belongs to an earlier wallet chain revision.
+    #[error("Wallet chain state changed during history query; retry synchronization")]
+    HistoryQueryStale,
+
     #[error(
         "Attempted to create a transaction with a memo to an unsupported recipient. Only shielded addresses are supported."
     )]
