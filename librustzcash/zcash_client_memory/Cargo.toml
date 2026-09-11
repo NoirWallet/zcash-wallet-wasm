@@ -76,6 +76,10 @@ serde_json.workspace = true
 postcard.workspace = true
 zcash_client_backend = { workspace = true, features = ["test-dependencies"] }
 
+[[example]]
+name = "repro_transparent_balance"
+required-features = ["orchard", "transparent-inputs"]
+
 
 [features]
 default = ["multicore"]
