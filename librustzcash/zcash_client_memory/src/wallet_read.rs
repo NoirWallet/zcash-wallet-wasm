@@ -915,11 +915,24 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
 
         #[cfg(feature = "transparent-inputs")]
         if let Some(chain_tip_height) = self.chain_height()? {
+            let mut address_starts = std::collections::BTreeMap::<_, BlockHeight>::new();
+            // The UTXO set alone cannot discover already-spent change addresses.
+            // Start every lookahead address at the birthday, and keep querying
+            // new windows until the last mined use is followed by an unused gap.
+            for account in self.accounts.values() {
+                for candidate in account.internal_address_discovery.values() {
+                    let start = candidate
+                        .checked_height
+                        .map_or(account.birthday().height(), |height| height + 1);
+                    if start <= chain_tip_height {
+                        address_starts.insert(candidate.address, start);
+                    }
+                }
+            }
             for (outpoint, output) in self.transparent_received_outputs.iter() {
-                if output.key_scope != transparent::keys::TransparentKeyScope::EPHEMERAL
-                    || self
-                        .transparent_received_output_spends
-                        .contains_key(outpoint)
+                if self
+                    .transparent_received_output_spends
+                    .contains_key(outpoint)
                 {
                     continue;
                 }
@@ -927,9 +940,12 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 let Some(tx_entry) = self.tx_table.get(&output.transaction_id) else {
                     continue;
                 };
-                if tx_entry
-                    .expiry_height()
-                    .is_some_and(|expiry_height| expiry_height > chain_tip_height)
+                // Ephemeral recovery waits for the originating transaction to expire.
+                // Ordinary mined outputs can already have been spent before that point.
+                if output.key_scope == transparent::keys::TransparentKeyScope::EPHEMERAL
+                    && tx_entry
+                        .expiry_height()
+                        .is_some_and(|expiry_height| expiry_height > chain_tip_height)
                 {
                     continue;
                 }
@@ -946,8 +962,17 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                     continue;
                 }
 
+                // UTXO refresh cannot discover spent outputs. Query every address scope,
+                // coalescing overlapping ranges so each address is fetched only once.
+                address_starts
+                    .entry(output.address)
+                    .and_modify(|start| *start = (*start).min(block_range_start))
+                    .or_insert(block_range_start);
+            }
+
+            for (address, block_range_start) in address_starts {
                 let request = TransactionDataRequest::transactions_involving_address(
-                    output.address,
+                    address,
                     block_range_start,
                     Some(chain_tip_height + 1),
                     None,

@@ -89,6 +89,7 @@ message Account {
   string account_name = 10; // human readable name for the account
   optional string key_source = 11; // key source metadata
   repeated InternalAddressRecord internal_addresses = 12; // map from internal child index to transparent change address
+  repeated InternalAddressDiscoveryRecord internal_address_discovery = 13; // recovery lookahead and successful history-query cursors; not address reservations
 }
 
 enum AccountKind {
@@ -134,6 +135,12 @@ message InternalAddressRecord {
   uint32 index = 1;
   string address = 2;
   uint32 exposed_at_height = 3;
+}
+
+message InternalAddressDiscoveryRecord {
+  uint32 index = 1;
+  string address = 2;
+  optional uint32 checked_height = 3;
 }
 
 message ChainState {

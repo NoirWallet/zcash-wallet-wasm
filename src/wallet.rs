@@ -75,6 +75,13 @@ mod confirmations_tests;
 
 const BATCH_SIZE: u32 = 10000;
 
+fn consume_transparent_history_budget(remaining: &mut usize) -> Result<(), Error> {
+    *remaining = remaining.checked_sub(1).ok_or_else(|| Error::Generic(
+        "Transparent history query budget exhausted; retry synchronization to continue from recorded progress".to_owned(),
+    ))?;
+    Ok(())
+}
+
 /// constant that signals what's the minimum transparent balance for proposing a
 /// shielding transaction
 const SHIELDING_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(100000);
@@ -527,6 +534,39 @@ fn get_orchard_verifying_key(
     })
 }
 
+/// Database capability required by synchronization that releases locks during RPCs.
+///
+/// Revisions must change before any rewind mutation, including partial rewinds,
+/// and must not be reused while an earlier revision can still be held by a query.
+/// Replacing a database must also invalidate outstanding revisions. Ordinary
+/// forward synchronization and local transaction writes need not invalidate them.
+pub trait WalletChainRevision {
+    /// An owned revision that can be compared after a network await.
+    type Revision: Eq;
+
+    /// Captures the current revision while the caller holds the database lock.
+    fn chain_state_revision(&self) -> Self::Revision;
+}
+
+impl<P: Parameters> WalletChainRevision for MemoryWalletDb<P> {
+    type Revision = zcash_client_memory::ChainStateRevision;
+
+    fn chain_state_revision(&self) -> Self::Revision {
+        MemoryWalletDb::chain_state_revision(self)
+    }
+}
+
+fn ensure_chain_revision<W: WalletChainRevision>(
+    db: &W,
+    expected: &W::Revision,
+) -> Result<(), Error> {
+    if &db.chain_state_revision() == expected {
+        Ok(())
+    } else {
+        Err(Error::HistoryQueryStale)
+    }
+}
+
 pub struct Wallet<W, T> {
     /// Internal database used to maintain wallet data (e.g. accounts, transactions, cached blocks)
     pub(crate) db: Arc<RwLock<W>>,
@@ -845,7 +885,10 @@ where
         Ok(account_id)
     }
 
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error>
+    where
+        W: WalletChainRevision,
+    {
         let mut client = self.client.clone();
         // TODO: This should be held in the Wallet struct so we can download in parallel
         let db_cache = MemBlockCache::new();
@@ -866,7 +909,10 @@ where
 
     /// Runs a single batch of the sync process without looping.
     /// Returns `true` if a scan range was processed, `false` if no scan ranges were suggested.
-    pub async fn sync_next_batch(&self, batch_size: Option<u32>) -> Result<bool, Error> {
+    pub async fn sync_next_batch(&self, batch_size: Option<u32>) -> Result<bool, Error>
+    where
+        W: WalletChainRevision,
+    {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();
 
@@ -885,7 +931,10 @@ where
         Ok(did_work)
     }
 
-    pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error> {
+    pub async fn sync_next_batch_optimized(&self, batch_size: Option<u32>) -> Result<bool, Error>
+    where
+        W: WalletChainRevision,
+    {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();
 
@@ -904,10 +953,30 @@ where
         Ok(did_work)
     }
 
-    pub(crate) async fn process_pending_transaction_requests(&self) -> Result<(), Error> {
-        let transaction_requests = {
+    // The check and mutation must use the same guard: checking before acquiring
+    // the write lock would leave a race with a concurrent chain rewind.
+    async fn checked_history_write(
+        &self,
+        revision: &W::Revision,
+    ) -> Result<tokio::sync::RwLockWriteGuard<'_, W>, Error>
+    where
+        W: WalletChainRevision,
+    {
+        let db = self.db.write().await;
+        ensure_chain_revision(&*db, revision)?;
+        Ok(db)
+    }
+
+    pub(crate) async fn process_pending_transaction_requests(&self) -> Result<(), Error>
+    where
+        W: WalletChainRevision,
+    {
+        // Snapshot requests and their chain revision together. Never keep a
+        // database guard across an RPC or stream await. Each reply is checked
+        // under its write guard so a rewind cannot be undone by an old reply.
+        let (revision, transaction_requests) = {
             let db = self.db.read().await;
-            db.transaction_data_requests()?.into_iter().fold(
+            let requests = db.transaction_data_requests()?.into_iter().fold(
                 BTreeMap::new(),
                 |mut requests, request| {
                     match request {
@@ -921,22 +990,23 @@ where
                     }
                     requests
                 },
-            )
+            );
+            (db.chain_state_revision(), requests)
         };
 
         let mut client = self.client.clone();
         for (requested_txid, needs_enhancement) in transaction_requests {
-            let raw = match client
+            let response = client
                 .get_transaction(service::TxFilter {
                     block: None,
                     index: 0,
                     hash: requested_txid.as_ref().to_vec(),
                 })
-                .await
-            {
+                .await;
+            let mut db = self.checked_history_write(&revision).await?;
+            let raw = match response {
                 Ok(response) => response.into_inner(),
                 Err(status) if !needs_enhancement && status.code() == tonic::Code::NotFound => {
-                    let mut db = self.db.write().await;
                     db.set_transaction_status(
                         requested_txid,
                         TransactionStatus::TxidNotRecognized,
@@ -948,7 +1018,6 @@ where
 
             let status = transaction_status_from_raw_height(requested_txid, raw.height)?;
             if !needs_enhancement {
-                let mut db = self.db.write().await;
                 db.set_transaction_status(requested_txid, status)?;
                 continue;
             }
@@ -960,17 +1029,15 @@ where
             };
             let parse_height = match mined_height {
                 Some(height) => height,
-                None => {
-                    let db = self.db.read().await;
-                    db.chain_height()?
-                        .map(|height| height + 1)
-                        .or_else(|| self.network.activation_height(NetworkUpgrade::Sapling))
-                        .ok_or_else(|| {
-                            Error::Generic(format!(
-                                "Unable to determine consensus branch for transaction {requested_txid}"
-                            ))
-                        })?
-                }
+                None => db
+                    .chain_height()?
+                    .map(|height| height + 1)
+                    .or_else(|| self.network.activation_height(NetworkUpgrade::Sapling))
+                    .ok_or_else(|| {
+                        Error::Generic(format!(
+                            "Unable to determine consensus branch for transaction {requested_txid}"
+                        ))
+                    })?,
             };
             let tx = zcash_primitives::transaction::Transaction::read(
                 raw.data.as_slice(),
@@ -983,87 +1050,113 @@ where
                 )));
             }
 
-            let mut db = self.db.write().await;
             decrypt_and_store_transaction(&self.network, &mut *db, &tx, mined_height)?;
         }
 
-        let address_requests = {
-            let db = self.db.read().await;
-            db.transaction_data_requests()?
-                .into_iter()
-                .filter_map(|request| match request {
-                    TransactionDataRequest::TransactionsInvolvingAddress(request) => Some(request),
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>()
-        };
-
-        for request in address_requests {
-            if !transaction_request_is_due(request.request_at()) {
-                continue;
-            }
-
-            let chain_tip_height = {
+        // Processing change history may advance the recovery gap and discover
+        // another window. Drain those windows before reporting sync complete.
+        let mut completed_address_requests = BTreeSet::new();
+        // This limits one invocation, not the account's address space. A peer
+        // must not be able to grow the recovery window indefinitely in one call.
+        // On exhaustion, retry with this same wallet instance to retain progress;
+        // reloading an older snapshot also restores its older recovery cursors.
+        let mut remaining_address_requests = 4096;
+        loop {
+            let address_requests = {
                 let db = self.db.read().await;
-                db.chain_height()?.ok_or_else(|| {
-                    Error::Generic(
+                ensure_chain_revision(&*db, &revision)?;
+                db.transaction_data_requests()?
+                    .into_iter()
+                    .filter_map(|request| match request {
+                        TransactionDataRequest::TransactionsInvolvingAddress(request) => {
+                            Some(request)
+                        }
+                        _ => None,
+                    })
+                    .filter(|request| !completed_address_requests.contains(request))
+                    .collect::<BTreeSet<_>>()
+            };
+
+            let mut made_progress = false;
+            for request in address_requests {
+                if !transaction_request_is_due(request.request_at()) {
+                    continue;
+                }
+
+                let chain_tip_height = {
+                    let db = self.db.read().await;
+                    ensure_chain_revision(&*db, &revision)?;
+                    db.chain_height()?.ok_or_else(|| {
+                        Error::Generic(
                         "Unable to process transparent transaction request without chain height"
                             .to_string(),
                     )
-                })?
-            };
-            let block_range_end = request
-                .block_range_end()
-                .unwrap_or(chain_tip_height + 1)
-                .min(chain_tip_height + 1);
-            if block_range_end <= request.block_range_start() {
-                continue;
-            }
-            let as_of_height = block_range_end - 1;
-
-            let mut transactions = client
-                .get_taddress_txids(service::TransparentAddressBlockFilter {
-                    address: request.address().encode(&self.network),
-                    range: Some(service::BlockRange {
-                        start: Some(service::BlockId {
-                            height: u64::from(request.block_range_start()),
-                            hash: vec![],
-                        }),
-                        end: Some(service::BlockId {
-                            height: u64::from(as_of_height),
-                            hash: vec![],
-                        }),
-                        pool_types: vec![],
-                    }),
-                })
-                .await?
-                .into_inner();
-
-            while let Some(raw) = transactions.try_next().await? {
-                let mined_height = match raw.height {
-                    0 | u64::MAX => {
-                        return Err(Error::Generic(format!(
-                            "Transparent transaction query returned unmined transaction at height {}",
-                            raw.height
-                        )));
-                    }
-                    height => BlockHeight::from_u32(u32::try_from(height).map_err(|_| {
-                        Error::Generic(format!(
-                            "Invalid mined height {height} returned for transparent transaction"
-                        ))
-                    })?),
+                    })?
                 };
-                let tx = zcash_primitives::transaction::Transaction::read(
-                    raw.data.as_slice(),
-                    BranchId::for_height(&self.network, mined_height),
-                )?;
+                let block_range_end = request
+                    .block_range_end()
+                    .unwrap_or(chain_tip_height + 1)
+                    .min(chain_tip_height + 1);
+                if block_range_end <= request.block_range_start() {
+                    continue;
+                }
+                let as_of_height = block_range_end - 1;
+                consume_transparent_history_budget(&mut remaining_address_requests)?;
 
-                let mut db = self.db.write().await;
-                decrypt_and_store_transaction(&self.network, &mut *db, &tx, Some(mined_height))?;
+                let mut transactions = client
+                    .get_taddress_txids(service::TransparentAddressBlockFilter {
+                        address: request.address().encode(&self.network),
+                        range: Some(service::BlockRange {
+                            start: Some(service::BlockId {
+                                height: u64::from(request.block_range_start()),
+                                hash: vec![],
+                            }),
+                            end: Some(service::BlockId {
+                                height: u64::from(as_of_height),
+                                hash: vec![],
+                            }),
+                            pool_types: vec![],
+                        }),
+                    })
+                    .await?
+                    .into_inner();
+
+                while let Some(raw) = transactions.try_next().await? {
+                    let mut db = self.checked_history_write(&revision).await?;
+                    let mined_height = match raw.height {
+                        0 | u64::MAX => {
+                            return Err(Error::Generic(format!(
+                                "Transparent transaction query returned unmined transaction at height {}",
+                                raw.height
+                            )));
+                        }
+                        height => BlockHeight::from_u32(u32::try_from(height).map_err(|_| {
+                            Error::Generic(format!(
+                                "Invalid mined height {height} returned for transparent transaction"
+                            ))
+                        })?),
+                    };
+                    let tx = zcash_primitives::transaction::Transaction::read(
+                        raw.data.as_slice(),
+                        BranchId::for_height(&self.network, mined_height),
+                    )?;
+
+                    decrypt_and_store_transaction(
+                        &self.network,
+                        &mut *db,
+                        &tx,
+                        Some(mined_height),
+                    )?;
+                }
+
+                let mut db = self.checked_history_write(&revision).await?;
+                db.notify_address_checked(request.clone(), as_of_height)?;
+                completed_address_requests.insert(request);
+                made_progress = true;
             }
-
-            let mut db = self.db.write().await;
-            db.notify_address_checked(request, as_of_height)?;
+            if !made_progress {
+                break;
+            }
         }
 
         Ok(())
@@ -1168,7 +1261,10 @@ where
         &self,
         batch_size: Option<u32>,
         refresh: bool,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    ) -> Result<Option<Vec<u8>>, Error>
+    where
+        W: WalletChainRevision,
+    {
         self.prepare_sync_batch_impl(batch_size, false, refresh, None)
             .await
     }
@@ -1208,7 +1304,10 @@ where
     pub async fn prepare_sync_batch_optimized(
         &self,
         batch_size: Option<u32>,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    ) -> Result<Option<Vec<u8>>, Error>
+    where
+        W: WalletChainRevision,
+    {
         self.prepare_sync_batch_impl(batch_size, true, true, None)
             .await
     }
@@ -1221,7 +1320,10 @@ where
         &self,
         batch_size: Option<u32>,
         refresh: bool,
-    ) -> Result<Option<String>, Error> {
+    ) -> Result<Option<String>, Error>
+    where
+        W: WalletChainRevision,
+    {
         let mut t = [0.0f64; 4];
         let r = self
             .prepare_sync_batch_impl(batch_size, false, refresh, Some(&mut t))
@@ -1240,7 +1342,10 @@ where
         optimized: bool,
         refresh: bool,
         timings: Option<&mut [f64; 4]>,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    ) -> Result<Option<Vec<u8>>, Error>
+    where
+        W: WalletChainRevision,
+    {
         use prost::Message;
         use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
         use zcash_client_backend::proto::compact_formats::CompactBlock;
@@ -1460,7 +1565,10 @@ where
 
     /// Scan a journal entry (for recovery from base snapshot + journal).
     /// This consumes the raw journal entry bytes and applies the scan to the wallet DB.
-    pub async fn scan_journal_entry(&self, journal_data: &[u8]) -> Result<bool, Error> {
+    pub async fn scan_journal_entry(&self, journal_data: &[u8]) -> Result<bool, Error>
+    where
+        W: WalletChainRevision,
+    {
         use prost::Message;
         use zcash_client_backend::proto::compact_formats::CompactBlock;
         use zcash_client_backend::proto::service;
@@ -1537,7 +1645,10 @@ where
     }
 
     /// Replay multiple journal entries in sequence (for recovery from base snapshot + journal).
-    pub async fn replay_journal_entries(&self, entries: Vec<Vec<u8>>) -> Result<(), Error> {
+    pub async fn replay_journal_entries(&self, entries: Vec<Vec<u8>>) -> Result<(), Error>
+    where
+        W: WalletChainRevision,
+    {
         for (i, entry) in entries.iter().enumerate() {
             tracing::info!("Replaying journal entry {}/{}", i + 1, entries.len());
             self.scan_journal_entry(entry).await?;
@@ -3196,6 +3307,10 @@ pub(crate) fn usk_from_seed_str(
 }
 
 #[cfg(test)]
+#[path = "wallet/transparent_history_tests.rs"]
+mod transparent_history_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
@@ -3219,6 +3334,92 @@ mod tests {
 
     fn txid(value: u8) -> TxId {
         TxId::from_bytes([value; 32])
+    }
+
+    #[tokio::test]
+    async fn transparent_history_rpc_does_not_hold_the_wallet_database_lock() {
+        use std::sync::Arc;
+        use tonic::codegen::http;
+        use zcash_client_backend::data_api::{
+            AccountBirthday, AccountPurpose, WalletWrite, chain::ChainState,
+        };
+
+        #[derive(Clone)]
+        struct PendingHistory(Arc<tokio::sync::Notify>);
+
+        impl tonic::client::GrpcService<tonic::body::Body> for PendingHistory {
+            type ResponseBody = tonic::body::Body;
+            type Error = std::io::Error;
+            type Future =
+                std::future::Pending<Result<http::Response<Self::ResponseBody>, Self::Error>>;
+
+            fn poll_ready(
+                &mut self,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+                assert!(request.uri().path().ends_with("/GetTaddressTxids"));
+                self.0.notify_one();
+                std::future::pending()
+            }
+        }
+
+        let network = Network::MainNetwork;
+        let height = BlockHeight::from_u32(3_000_000);
+        let ufvk =
+            super::UnifiedSpendingKey::from_seed(&network, &[42; 32], zip32::AccountId::ZERO)
+                .unwrap()
+                .to_unified_full_viewing_key();
+        let mut db = super::MemoryWalletDb::new(network, 100);
+        db.import_account_ufvk(
+            "synthetic recovery test",
+            &ufvk,
+            &AccountBirthday::from_parts(
+                ChainState::empty(height - 1, zcash_primitives::block::BlockHash([0; 32])),
+                None,
+            ),
+            AccountPurpose::ViewOnly,
+            None,
+        )
+        .unwrap();
+        db.update_chain_tip(height + 10).unwrap();
+        let request_started = Arc::new(tokio::sync::Notify::new());
+        let wallet = super::Wallet {
+            db: Arc::new(tokio::sync::RwLock::new(db)),
+            client: super::CompactTxStreamerClient::new(PendingHistory(request_started.clone())),
+            network,
+            confirmations_policy: Default::default(),
+            target_note_count: 4,
+            min_split_output_value: 10_000_000,
+        };
+        let processing = wallet.process_pending_transaction_requests();
+        tokio::pin!(processing);
+        tokio::select! {
+            result = &mut processing => panic!("history RPC should remain pending: {result:?}"),
+            () = request_started.notified() => {},
+        }
+        assert!(
+            wallet.db.try_read().is_ok(),
+            "a stalled history RPC must not block balance reads"
+        );
+        assert!(
+            wallet.db.try_write().is_ok(),
+            "a stalled history RPC must not block transaction creation"
+        );
+    }
+
+    #[test]
+    fn transparent_recovery_budget_stops_runaway_queries_and_allows_retry() {
+        let mut remaining = 2;
+        super::consume_transparent_history_budget(&mut remaining).unwrap();
+        super::consume_transparent_history_budget(&mut remaining).unwrap();
+        assert!(super::consume_transparent_history_budget(&mut remaining).is_err());
+        assert_eq!(remaining, 0, "exhaustion must not wrap the counter");
+        let mut retry_budget = 2;
+        super::consume_transparent_history_budget(&mut retry_budget).unwrap();
     }
 
     #[test]
