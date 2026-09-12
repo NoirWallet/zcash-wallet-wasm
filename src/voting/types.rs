@@ -19,6 +19,10 @@ mod tests {
             "\"config_authenticated\""
         );
         assert_eq!(
+            serde_json::to_string(&VotingEligibilityReason::InsufficientSnapshotValue).unwrap(),
+            "\"INSUFFICIENT_SNAPSHOT_VALUE\""
+        );
+        assert_eq!(
             serde_json::from_str::<BallotDecision>(
                 r#"{"kind":"choice","proposalId":7,"option":1}"#
             )
@@ -55,11 +59,21 @@ pub struct VotingDiscovery {
 pub struct VotingEligibility {
     pub round_id: String,
     pub eligible: bool,
+    pub snapshot_voting_value_zats: String,
+    pub minimum_required_zats: String,
+    pub reason_code: Option<VotingEligibilityReason>,
     pub selected_value_zats: String,
     pub voting_power: String,
     pub selected_note_count: u32,
     pub bundle_count: u32,
     pub trimmed_value_zats: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum VotingEligibilityReason {
+    InsufficientSnapshotValue,
+    InsufficientVotingPower,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
