@@ -3,6 +3,7 @@ use wasm_bindgen::prelude::*;
 pub mod bindgen;
 mod error;
 mod init;
+mod ledger_pczt;
 mod network;
 mod wallet;
 
