@@ -3,6 +3,7 @@ use pczt::roles::{
     combiner::Combiner,
     redactor::Redactor,
     signer::{Signer, SpendAuthSignature},
+    updater::Updater,
 };
 use serde::Deserialize;
 
@@ -166,7 +167,13 @@ fn apply_ledger_signatures_inner(
         )));
     }
 
-    let mut signer = Signer::new(pczt.clone())
+    // The PCZT builder populates bip32_derivation (keyed by compressed pubkey)
+    // but does not fill hash160_preimages. The Signer's append_signature needs
+    // hash160_preimages to resolve pubkeyhash → pubkey for P2PKH verification.
+    // Populate it from the bip32_derivation keys before signing.
+    let patched = populate_transparent_hash160_preimages(pczt.clone());
+
+    let mut signer = Signer::new(patched)
         .map_err(|error| Error::PcztSign(format!("Invalid PCZT: {error:?}")))?;
 
     for (index, raw) in signatures.transparent_input_sigs.iter().enumerate() {
@@ -235,6 +242,32 @@ fn apply_action_signature(
                 "Invalid Ledger {pool:?} signature for action {action_index}: {error:?}"
             ))
         })
+}
+
+/// Ensures every transparent input carries its bip32_derivation pubkeys as
+/// hash160 preimages so the Signer role can verify externally-provided
+/// signatures for P2PKH inputs.
+fn populate_transparent_hash160_preimages(pczt: pczt::Pczt) -> pczt::Pczt {
+    Updater::new(pczt)
+        .update_transparent_with(|mut updater| {
+            let pubkeys_per_input: Vec<Vec<[u8; 33]>> = updater
+                .bundle()
+                .inputs()
+                .iter()
+                .map(|input| input.bip32_derivation().keys().copied().collect())
+                .collect();
+            for (index, pubkeys) in pubkeys_per_input.iter().enumerate() {
+                for pubkey in pubkeys {
+                    updater.update_input_with(index, |mut input_updater| {
+                        input_updater.set_hash160_preimage(pubkey.to_vec());
+                        Ok(())
+                    })?;
+                }
+            }
+            Ok(())
+        })
+        .expect("populate_transparent_hash160_preimages: updater failed")
+        .finish()
 }
 
 #[cfg(test)]
