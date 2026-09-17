@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::str::FromStr;
 
 use crate::bindgen::sign::pczt_sign_inner;
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tonic_web_wasm_client::Client;
 use wasm_bindgen::prelude::*;
 use zcash_address::ZcashAddress;
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::proto::service::ChainSpec;
 use zcash_client_backend::{
@@ -22,6 +24,37 @@ use zcash_primitives::transaction::TxId;
 pub type MemoryWallet<T> = Wallet<MemoryWalletDb<Network>, T>;
 pub type AccountId = <MemoryWalletDb<Network> as WalletRead>::AccountId;
 pub type NoteRef = <MemoryWalletDb<Network> as InputSource>::NoteRef;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmationsPolicyOptions {
+    trusted: NonZeroU32,
+    untrusted: NonZeroU32,
+}
+
+impl TryFrom<ConfirmationsPolicyOptions> for ConfirmationsPolicy {
+    type Error = Error;
+
+    fn try_from(options: ConfirmationsPolicyOptions) -> Result<Self, Self::Error> {
+        Self::new(
+            options.trusted,
+            options.untrusted,
+            Self::default().allow_zero_conf_shielding(),
+        )
+        .map_err(|error| Error::Generic(format!("Invalid confirmations policy: {error}")))
+    }
+}
+
+#[wasm_bindgen(typescript_custom_section)]
+const CONFIRMATIONS_POLICY_TYPES: &str = r#"
+/** Override confirmation counts; shielding retains the default policy. */
+export interface ConfirmationsPolicy {
+    /** Positive uint32; must not exceed untrusted. */
+    trusted: number;
+    /** Positive uint32. */
+    untrusted: number;
+}
+"#;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TRANSFER_TYPES: &str = r#"
@@ -85,13 +118,34 @@ impl WebWallet {
 
 #[wasm_bindgen]
 impl WebWallet {
+    /// The policy is runtime configuration. Supply it again when restoring db_bytes.
+    /// Omitting it or passing null uses ConfirmationsPolicy::default().
     #[wasm_bindgen(constructor)]
     pub fn new(
         network: &str,
         lightwalletd_url: &str,
-        db_bytes: Option<Box<[u8]>>,
+        #[wasm_bindgen(unchecked_optional_param_type = "Uint8Array | null")] db_bytes: Option<
+            Box<[u8]>,
+        >,
+        #[wasm_bindgen(unchecked_optional_param_type = "ConfirmationsPolicy | null")]
+        confirmations_policy: JsValue,
     ) -> Result<WebWallet, Error> {
         let network = Network::from_str(network)?;
+        let confirmations_policy = if confirmations_policy.is_null_or_undefined() {
+            ConfirmationsPolicy::default()
+        } else {
+            // serde-wasm-bindgen's struct deserializer does not visit unknown keys.
+            for key in js_sys::Reflect::own_keys(&confirmations_policy).map_err(Error::Js)? {
+                if !matches!(key.as_string().as_deref(), Some("trusted" | "untrusted")) {
+                    return Err(Error::Generic(
+                        "Confirmations policy only accepts trusted and untrusted".into(),
+                    ));
+                }
+            }
+            let options: ConfirmationsPolicyOptions =
+                serde_wasm_bindgen::from_value(confirmations_policy)?;
+            options.try_into()?
+        };
         let client = Client::new(lightwalletd_url.to_string());
 
         let db = match db_bytes {
@@ -105,7 +159,12 @@ impl WebWallet {
         };
 
         Ok(Self {
-            inner: Wallet::new(db, client, network)?,
+            inner: Wallet::new_with_confirmations_policy(
+                db,
+                client,
+                network,
+                confirmations_policy,
+            )?,
         })
     }
 
@@ -1277,5 +1336,38 @@ where
             next_orchard_subtree_index: summary.next_orchard_subtree_index(),
             next_ironwood_subtree_index: summary.next_ironwood_subtree_index(),
         })
+    }
+}
+
+#[cfg(test)]
+mod confirmations_policy_tests {
+    use super::{ConfirmationsPolicy, ConfirmationsPolicyOptions};
+
+    #[test]
+    fn custom_confirmation_counts_retain_the_default_shielding_policy() {
+        for (trusted, untrusted) in [(1, 2), (3, 10), (u32::MAX, u32::MAX)] {
+            let policy = ConfirmationsPolicy::try_from(ConfirmationsPolicyOptions {
+                trusted: trusted.try_into().unwrap(),
+                untrusted: untrusted.try_into().unwrap(),
+            })
+            .unwrap();
+            assert_eq!(u32::from(policy.trusted()), trusted);
+            assert_eq!(u32::from(policy.untrusted()), untrusted);
+            assert_eq!(
+                policy.allow_zero_conf_shielding(),
+                ConfirmationsPolicy::default().allow_zero_conf_shielding()
+            );
+        }
+    }
+
+    #[test]
+    fn confirmation_counts_reject_trusted_greater_than_untrusted() {
+        assert!(
+            ConfirmationsPolicy::try_from(ConfirmationsPolicyOptions {
+                trusted: 3.try_into().unwrap(),
+                untrusted: 2.try_into().unwrap(),
+            })
+            .is_err()
+        );
     }
 }
