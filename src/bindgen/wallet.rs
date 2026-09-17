@@ -114,12 +114,34 @@ impl WebWallet {
             Ok(())
         }
     }
+
+    fn parse_zero_indexer_urls(value: JsValue) -> Result<Vec<String>, Error> {
+        if value.is_null_or_undefined() {
+            return Ok(vec![]);
+        }
+
+        let urls: Vec<String> = serde_wasm_bindgen::from_value(value)?;
+        let mut normalized = Vec::with_capacity(urls.len());
+        for url in urls {
+            let url = url.trim();
+            if url.is_empty() {
+                return Err(Error::Generic(
+                    "zero_indexer_urls must not contain empty URLs".to_string(),
+                ));
+            }
+            if !normalized.iter().any(|existing| existing == url) {
+                normalized.push(url.to_string());
+            }
+        }
+        Ok(normalized)
+    }
 }
 
 #[wasm_bindgen]
 impl WebWallet {
-    /// The policy is runtime configuration. Supply it again when restoring db_bytes.
-    /// Omitting it or passing null uses ConfirmationsPolicy::default().
+    /// Confirmation policy and zero-indexer URLs are runtime configuration. Supply them again
+    /// when restoring db_bytes. Other queries continue to use lightwalletd_url; Orchard
+    /// transaction submission and status lookup use zero-indexer when URLs are provided.
     #[wasm_bindgen(constructor)]
     pub fn new(
         network: &str,
@@ -129,6 +151,8 @@ impl WebWallet {
         >,
         #[wasm_bindgen(unchecked_optional_param_type = "ConfirmationsPolicy | null")]
         confirmations_policy: JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "string[] | null")]
+        zero_indexer_urls: JsValue,
     ) -> Result<WebWallet, Error> {
         let network = Network::from_str(network)?;
         let confirmations_policy = if confirmations_policy.is_null_or_undefined() {
@@ -147,6 +171,10 @@ impl WebWallet {
             options.try_into()?
         };
         let client = Client::new(lightwalletd_url.to_string());
+        let zero_indexer_clients = Self::parse_zero_indexer_urls(zero_indexer_urls)?
+            .into_iter()
+            .map(Client::new)
+            .collect();
 
         let db = match db_bytes {
             Some(bytes) => {
@@ -159,9 +187,10 @@ impl WebWallet {
         };
 
         Ok(Self {
-            inner: Wallet::new_with_confirmations_policy(
+            inner: Wallet::new_with_confirmations_policy_and_zero_indexers(
                 db,
                 client,
+                zero_indexer_clients,
                 network,
                 confirmations_policy,
             )?,

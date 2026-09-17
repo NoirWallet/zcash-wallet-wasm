@@ -18,6 +18,7 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 use subtle::ConditionallySelectable;
 use tokio::sync::RwLock;
 use tonic::{
@@ -51,7 +52,7 @@ use zcash_client_backend::{
     proto::service::{self, compact_tx_streamer_client::CompactTxStreamerClient},
 };
 use zcash_primitives::transaction::fees::{FeeRule, zip317 as prim_zip317};
-use zcash_primitives::transaction::{TxId, TxVersion};
+use zcash_primitives::transaction::{Transaction, TxId, TxVersion};
 use zcash_proofs::prover::LocalTxProver;
 
 use zcash_keys::{
@@ -70,6 +71,7 @@ use zcash_client_memory::{MemBlockCache, MemoryWalletDb};
 #[cfg(test)]
 mod confirmations_tests;
 const BATCH_SIZE: u32 = 10000;
+const ZERO_INDEXER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn consume_transparent_history_budget(remaining: &mut usize) -> Result<(), Error> {
     *remaining = remaining.checked_sub(1).ok_or_else(|| Error::Generic(
@@ -226,19 +228,136 @@ impl TransferResult {
     }
 }
 
+struct TransactionToSubmit {
+    txid: TxId,
+    raw: service::RawTransaction,
+    requires_zero_indexer: bool,
+}
+
+fn requires_zero_indexer(transaction: &Transaction) -> bool {
+    transaction.orchard_bundle().is_some()
+}
+
+async fn submit_to_first_accepting_endpoint<F, Fut>(
+    endpoint_count: usize,
+    raw: service::RawTransaction,
+    request_timeout: Duration,
+    mut submit: F,
+) -> Result<service::SendResponse, tonic::Status>
+where
+    F: FnMut(usize, service::RawTransaction) -> Fut,
+    Fut: Future<Output = Result<service::SendResponse, tonic::Status>>,
+{
+    if endpoint_count == 0 {
+        return Err(tonic::Status::failed_precondition(
+            "No zero-indexer endpoints configured",
+        ));
+    }
+
+    let mut failures = Vec::with_capacity(endpoint_count);
+    let mut last_rejection = None;
+    for index in 0..endpoint_count {
+        match tokio_with_wasm::alias::time::timeout(request_timeout, submit(index, raw.clone()))
+            .await
+        {
+            Ok(Ok(response)) if response.error_code == 0 => return Ok(response),
+            Ok(Ok(response)) => {
+                failures.push(format!(
+                    "endpoint {} rejected with code {}: {}",
+                    index + 1,
+                    response.error_code,
+                    response.error_message
+                ));
+                last_rejection = Some((response.error_code, response.error_message));
+            }
+            Ok(Err(status)) => failures.push(format!("endpoint {}: {status}", index + 1)),
+            Err(_) => failures.push(format!(
+                "endpoint {} timed out after {} seconds",
+                index + 1,
+                request_timeout.as_secs()
+            )),
+        }
+    }
+
+    let details = failures.join("; ");
+    match last_rejection {
+        Some((error_code, _)) => Ok(service::SendResponse {
+            error_code,
+            error_message: format!(
+                "All zero-indexer endpoints failed to accept the transaction: {details}"
+            ),
+        }),
+        None => Err(tonic::Status::unavailable(format!(
+            "All zero-indexer endpoints failed: {details}"
+        ))),
+    }
+}
+
+async fn get_transaction_from_first_available_endpoint<F, Fut>(
+    endpoint_count: usize,
+    filter: service::TxFilter,
+    request_timeout: Duration,
+    mut request: F,
+) -> Result<service::RawTransaction, tonic::Status>
+where
+    F: FnMut(usize, service::TxFilter) -> Fut,
+    Fut: Future<Output = Result<service::RawTransaction, tonic::Status>>,
+{
+    if endpoint_count == 0 {
+        return Err(tonic::Status::failed_precondition(
+            "No zero-indexer endpoints configured",
+        ));
+    }
+
+    let mut failures = Vec::with_capacity(endpoint_count);
+    let mut failure_codes = Vec::with_capacity(endpoint_count);
+    for index in 0..endpoint_count {
+        match tokio_with_wasm::alias::time::timeout(request_timeout, request(index, filter.clone()))
+            .await
+        {
+            Ok(Ok(raw)) => return Ok(raw),
+            Ok(Err(status)) => {
+                failure_codes.push(status.code());
+                failures.push(format!("endpoint {}: {status}", index + 1));
+            }
+            Err(_) => {
+                failure_codes.push(tonic::Code::DeadlineExceeded);
+                failures.push(format!(
+                    "endpoint {} timed out after {} seconds",
+                    index + 1,
+                    request_timeout.as_secs()
+                ));
+            }
+        }
+    }
+
+    let code = failure_codes
+        .first()
+        .copied()
+        .filter(|first| failure_codes.iter().all(|code| code == first))
+        .unwrap_or(tonic::Code::Unavailable);
+    Err(tonic::Status::new(
+        code,
+        format!(
+            "All zero-indexer endpoints failed to return the transaction: {}",
+            failures.join("; ")
+        ),
+    ))
+}
+
 async fn submit_transfer_transactions_with<F, Fut>(
-    transactions: NonEmpty<(TxId, service::RawTransaction)>,
+    transactions: NonEmpty<TransactionToSubmit>,
     mut submit: F,
 ) -> TransferResult
 where
-    F: FnMut(service::RawTransaction) -> Fut,
+    F: FnMut(service::RawTransaction, bool) -> Fut,
     Fut: Future<Output = Result<service::SendResponse, tonic::Status>>,
 {
     let mut stopped = false;
     let mut results = Vec::with_capacity(transactions.len());
 
-    for (txid, raw_tx) in transactions {
-        let tx_id = txid.to_string();
+    for transaction in transactions {
+        let tx_id = transaction.txid.to_string();
         let result = if stopped {
             TransferTransactionResult {
                 tx_id,
@@ -247,7 +366,7 @@ where
                 error_message: None,
             }
         } else {
-            match submit(raw_tx).await {
+            match submit(transaction.raw, transaction.requires_zero_indexer).await {
                 Ok(response) if response.error_code == 0 => TransferTransactionResult {
                     tx_id,
                     status: TransferSubmissionStatus::Submitted,
@@ -564,7 +683,10 @@ impl<P: Parameters> WalletChainRevision for MemoryWalletDb<P> {
     }
 }
 
-fn ensure_chain_revision<W: WalletChainRevision>(db: &W, expected: &W::Revision) -> Result<(), Error> {
+fn ensure_chain_revision<W: WalletChainRevision>(
+    db: &W,
+    expected: &W::Revision,
+) -> Result<(), Error> {
     if &db.chain_state_revision() == expected {
         Ok(())
     } else {
@@ -577,6 +699,8 @@ pub struct Wallet<W, T> {
     pub(crate) db: Arc<RwLock<W>>,
     // gRPC client used to connect to a lightwalletd instance for network data
     pub(crate) client: CompactTxStreamerClient<T>,
+    // Optional zero-indexer endpoints used for Orchard transaction submission and lookup.
+    zero_indexer_clients: Vec<CompactTxStreamerClient<T>>,
     pub(crate) network: Network,
     confirmations_policy: ConfirmationsPolicy,
     /// Note management: the number of notes to maintain in the wallet
@@ -590,6 +714,7 @@ impl<W, T: Clone> Clone for Wallet<W, T> {
         Self {
             db: self.db.clone(),
             client: self.client.clone(),
+            zero_indexer_clients: self.zero_indexer_clients.clone(),
             network: self.network,
             confirmations_policy: self.confirmations_policy,
             target_note_count: self.target_note_count,
@@ -682,10 +807,30 @@ where
         network: Network,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Self, Error> {
+        Self::new_with_confirmations_policy_and_zero_indexers(
+            db,
+            client,
+            vec![],
+            network,
+            confirmations_policy,
+        )
+    }
+
+    pub fn new_with_confirmations_policy_and_zero_indexers(
+        db: W,
+        client: T,
+        zero_indexer_clients: Vec<T>,
+        network: Network,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<Self, Error> {
         get_prover();
         Ok(Wallet {
             db: Arc::new(RwLock::new(db)),
             client: CompactTxStreamerClient::new(client),
+            zero_indexer_clients: zero_indexer_clients
+                .into_iter()
+                .map(CompactTxStreamerClient::new)
+                .collect(),
             network,
             confirmations_policy,
             target_note_count: 4,
@@ -976,21 +1121,57 @@ where
                     requests
                 },
             );
+            let requests = requests
+                .into_iter()
+                .map(|(txid, needs_enhancement)| {
+                    // Enhancement requests exist precisely because the database does not yet
+                    // contain the raw transaction, so they cannot be classified locally.
+                    let use_zero_indexer = if needs_enhancement {
+                        false
+                    } else {
+                        db.get_transaction(txid)?
+                            .as_ref()
+                            .is_some_and(requires_zero_indexer)
+                    };
+                    Ok((txid, needs_enhancement, use_zero_indexer))
+                })
+                .collect::<Result<Vec<_>, <W as WalletRead>::Error>>()?;
             (db.chain_state_revision(), requests)
         };
 
         let mut client = self.client.clone();
-        for (requested_txid, needs_enhancement) in transaction_requests {
-            let response = client
-                .get_transaction(service::TxFilter {
-                    block: None,
-                    index: 0,
-                    hash: requested_txid.as_ref().to_vec(),
-                })
-                .await;
+        for (requested_txid, needs_enhancement, use_zero_indexer) in transaction_requests {
+            let filter = service::TxFilter {
+                block: None,
+                index: 0,
+                hash: requested_txid.as_ref().to_vec(),
+            };
+            let response = if use_zero_indexer && !self.zero_indexer_clients.is_empty() {
+                let zero_indexer_clients = self.zero_indexer_clients.clone();
+                get_transaction_from_first_available_endpoint(
+                    zero_indexer_clients.len(),
+                    filter,
+                    ZERO_INDEXER_REQUEST_TIMEOUT,
+                    move |index, filter| {
+                        let mut zero_indexer = zero_indexer_clients[index].clone();
+                        async move {
+                            zero_indexer
+                                .get_transaction(filter)
+                                .await
+                                .map(tonic::Response::into_inner)
+                        }
+                    },
+                )
+                .await
+            } else {
+                client
+                    .get_transaction(filter)
+                    .await
+                    .map(tonic::Response::into_inner)
+            };
             let mut db = self.checked_history_write(&revision).await?;
             let raw = match response {
-                Ok(response) => response.into_inner(),
+                Ok(raw) => raw,
                 Err(status) if !needs_enhancement && status.code() == tonic::Code::NotFound => {
                     db.set_transaction_status(
                         requested_txid,
@@ -1952,7 +2133,7 @@ where
     async fn load_stored_transfer_transactions(
         &self,
         txids: &NonEmpty<TxId>,
-    ) -> Result<NonEmpty<(TxId, service::RawTransaction)>, Error> {
+    ) -> Result<NonEmpty<TransactionToSubmit>, Error> {
         let db = self.db.read().await;
         let mut transactions = Vec::with_capacity(txids.len());
         for requested_txid in txids {
@@ -1961,9 +2142,44 @@ where
                 .ok_or(Error::TransactionNotFound(*requested_txid))?;
             let mut raw_tx = service::RawTransaction::default();
             tx.write(&mut raw_tx.data)?;
-            transactions.push((tx.txid(), raw_tx));
+            transactions.push(TransactionToSubmit {
+                txid: tx.txid(),
+                raw: raw_tx,
+                requires_zero_indexer: requires_zero_indexer(&tx),
+            });
         }
         Ok(NonEmpty::from_vec(transactions).expect("txids is non-empty"))
+    }
+
+    async fn submit_raw_transaction(
+        &self,
+        raw: service::RawTransaction,
+        requires_zero_indexer: bool,
+    ) -> Result<service::SendResponse, tonic::Status> {
+        if requires_zero_indexer && !self.zero_indexer_clients.is_empty() {
+            let zero_indexer_clients = self.zero_indexer_clients.clone();
+            submit_to_first_accepting_endpoint(
+                zero_indexer_clients.len(),
+                raw,
+                ZERO_INDEXER_REQUEST_TIMEOUT,
+                move |index, raw| {
+                    let mut zero_indexer = zero_indexer_clients[index].clone();
+                    async move {
+                        zero_indexer
+                            .send_transaction(raw)
+                            .await
+                            .map(tonic::Response::into_inner)
+                    }
+                },
+            )
+            .await
+        } else {
+            self.client
+                .clone()
+                .send_transaction(raw)
+                .await
+                .map(tonic::Response::into_inner)
+        }
     }
 
     async fn submit_stored_transfer_transactions(
@@ -1971,26 +2187,18 @@ where
         txids: &NonEmpty<TxId>,
     ) -> Result<TransferResult, Error> {
         let transactions = self.load_stored_transfer_transactions(txids).await?;
-        let client = self.client.clone();
 
         Ok(
-            submit_transfer_transactions_with(transactions, move |raw_tx| {
-                let mut client = client.clone();
-                async move {
-                    client
-                        .send_transaction(raw_tx)
-                        .await
-                        .map(tonic::Response::into_inner)
-                }
+            submit_transfer_transactions_with(transactions, |raw, requires_zero_indexer| {
+                self.submit_raw_transaction(raw, requires_zero_indexer)
             })
             .await,
         )
     }
 
     pub async fn send_authorized_transactions(&self, txids: &NonEmpty<TxId>) -> Result<(), Error> {
-        let mut client = self.client.clone();
         for txid in txids.iter() {
-            let (txid, raw_tx) = self
+            let (txid, raw_tx, route_via_zero_indexer) = self
                 .db
                 .read()
                 .await
@@ -1998,11 +2206,14 @@ where
                 .map(|tx| {
                     let mut raw_tx = service::RawTransaction::default();
                     tx.write(&mut raw_tx.data).unwrap(); // safe to unwrap here as we know the tx is valid
-                    (tx.txid(), raw_tx)
+                    let route_via_zero_indexer = requires_zero_indexer(&tx);
+                    (tx.txid(), raw_tx, route_via_zero_indexer)
                 })
                 .ok_or(Error::TransactionNotFound(*txid))?;
 
-            let response = client.send_transaction(raw_tx).await?.into_inner();
+            let response = self
+                .submit_raw_transaction(raw_tx, route_via_zero_indexer)
+                .await?;
 
             if response.error_code != 0 {
                 return Err(Error::SendFailed {
@@ -3267,13 +3478,15 @@ mod transparent_history_tests;
 mod tests {
     use super::{
         TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
-        allow_exact_send_max_fallback, dynamic_zip317_fee_rule, submit_transfer_transactions_with,
-        transaction_status_from_raw_height, transfer_expiry_height, transfer_policies,
-        usk_from_seed_str, validate_expiry_delta_blocks,
+        allow_exact_send_max_fallback, dynamic_zip317_fee_rule,
+        get_transaction_from_first_available_endpoint, submit_to_first_accepting_endpoint,
+        submit_transfer_transactions_with, transaction_status_from_raw_height,
+        transfer_expiry_height, transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
     };
     use crate::Network;
     use nonempty::NonEmpty;
     use std::collections::VecDeque;
+    use std::time::Duration;
     use zcash_client_backend::data_api::wallet::input_selection::{
         CoinbasePolicy, TransparentSource,
     };
@@ -3343,6 +3556,7 @@ mod tests {
         let wallet = super::Wallet {
             db: Arc::new(tokio::sync::RwLock::new(db)),
             client: super::CompactTxStreamerClient::new(PendingHistory(request_started.clone())),
+            zero_indexer_clients: vec![],
             network,
             confirmations_policy:
                 zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default(),
@@ -3395,31 +3609,36 @@ mod tests {
         assert!(transaction_status_from_raw_height(txid, u64::from(u32::MAX) + 1).is_err());
     }
 
-    fn two_raw_transactions() -> NonEmpty<(TxId, service::RawTransaction)> {
+    fn two_raw_transactions() -> NonEmpty<super::TransactionToSubmit> {
         NonEmpty {
-            head: (
-                txid(1),
-                service::RawTransaction {
+            head: super::TransactionToSubmit {
+                txid: txid(1),
+                raw: service::RawTransaction {
                     data: vec![1],
                     ..Default::default()
                 },
-            ),
-            tail: vec![(
-                txid(2),
-                service::RawTransaction {
+                requires_zero_indexer: false,
+            },
+            tail: vec![super::TransactionToSubmit {
+                txid: txid(2),
+                raw: service::RawTransaction {
                     data: vec![2],
                     ..Default::default()
                 },
-            )],
+                requires_zero_indexer: true,
+            }],
         }
     }
 
     #[tokio::test]
     async fn transfer_submission_reports_all_successes_in_order() {
-        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| async {
-            Ok(service::SendResponse::default())
-        })
-        .await;
+        let mut routes = vec![];
+        let result =
+            submit_transfer_transactions_with(two_raw_transactions(), |_, use_zero_indexer| {
+                routes.push(use_zero_indexer);
+                async { Ok(service::SendResponse::default()) }
+            })
+            .await;
 
         assert_eq!(result.status, TransferOverallStatus::Success);
         assert_eq!(
@@ -3433,6 +3652,149 @@ mod tests {
                 .iter()
                 .all(|tx| tx.status == TransferSubmissionStatus::Submitted)
         );
+        assert_eq!(routes, vec![false, true]);
+    }
+
+    #[tokio::test]
+    async fn zero_indexer_submission_tries_endpoints_until_one_accepts() {
+        let mut attempts = vec![];
+        let response = submit_to_first_accepting_endpoint(
+            3,
+            service::RawTransaction {
+                data: vec![42],
+                ..Default::default()
+            },
+            Duration::from_secs(1),
+            |index, raw| {
+                attempts.push((index, raw.data));
+                async move {
+                    match index {
+                        0 => Err(tonic::Status::unavailable("offline")),
+                        1 => Ok(service::SendResponse {
+                            error_code: -25,
+                            error_message: "rejected".to_string(),
+                        }),
+                        _ => Ok(service::SendResponse::default()),
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.error_code, 0);
+        assert_eq!(attempts, vec![(0, vec![42]), (1, vec![42]), (2, vec![42])]);
+    }
+
+    #[tokio::test]
+    async fn zero_indexer_submission_stops_after_first_acceptance() {
+        let mut attempts = vec![];
+        submit_to_first_accepting_endpoint(
+            3,
+            service::RawTransaction::default(),
+            Duration::from_secs(1),
+            |index, _| {
+                attempts.push(index);
+                async { Ok(service::SendResponse::default()) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(attempts, vec![0]);
+    }
+
+    #[tokio::test]
+    async fn zero_indexer_submission_reports_all_rejections() {
+        let response = submit_to_first_accepting_endpoint(
+            2,
+            service::RawTransaction::default(),
+            Duration::from_secs(1),
+            |index, _| async move {
+                Ok(service::SendResponse {
+                    error_code: -25 - index as i32,
+                    error_message: format!("rejected-{index}"),
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.error_code, -26);
+        assert!(response.error_message.contains("endpoint 1"));
+        assert!(response.error_message.contains("endpoint 2"));
+    }
+
+    #[tokio::test]
+    async fn zero_indexer_submission_advances_after_timeout() {
+        let mut attempts = vec![];
+        let response = submit_to_first_accepting_endpoint(
+            2,
+            service::RawTransaction::default(),
+            Duration::from_millis(1),
+            |index, _| {
+                attempts.push(index);
+                async move {
+                    if index == 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(service::SendResponse::default())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.error_code, 0);
+        assert_eq!(attempts, vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn zero_indexer_transaction_lookup_tries_the_next_endpoint() {
+        let mut attempts = vec![];
+        let raw = get_transaction_from_first_available_endpoint(
+            2,
+            service::TxFilter::default(),
+            Duration::from_secs(1),
+            |index, _| {
+                attempts.push(index);
+                async move {
+                    if index == 0 {
+                        Err(tonic::Status::unavailable("offline"))
+                    } else {
+                        Ok(service::RawTransaction {
+                            data: vec![7],
+                            ..Default::default()
+                        })
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(raw.data, vec![7]);
+        assert_eq!(attempts, vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn zero_indexer_transaction_lookup_preserves_all_not_found() {
+        let status = get_transaction_from_first_available_endpoint(
+            2,
+            service::TxFilter::default(),
+            Duration::from_secs(1),
+            |index, _| async move {
+                Err::<service::RawTransaction, _>(tonic::Status::not_found(format!(
+                    "missing-{index}"
+                )))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(status.message().contains("endpoint 1"));
+        assert!(status.message().contains("endpoint 2"));
     }
 
     #[tokio::test]
@@ -3445,7 +3807,7 @@ mod tests {
             Ok(service::SendResponse::default()),
         ]);
 
-        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| {
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_, _| {
             let response = responses.pop_front().unwrap();
             async move { response }
         })
@@ -3478,7 +3840,7 @@ mod tests {
             }),
         ]);
 
-        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| {
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_, _| {
             let response = responses.pop_front().unwrap();
             async move { response }
         })
@@ -3507,7 +3869,7 @@ mod tests {
             Ok(service::SendResponse::default()),
         ]);
 
-        let result = submit_transfer_transactions_with(two_raw_transactions(), |_| {
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_, _| {
             let response = responses.pop_front().unwrap();
             async move { response }
         })

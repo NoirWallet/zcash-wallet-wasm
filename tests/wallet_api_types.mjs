@@ -11,6 +11,11 @@ function constructorContract(Wallet) {
     new Wallet('main', 'https://example.invalid', undefined, null),
     new Wallet('main', 'https://example.invalid', undefined, policy),
     new Wallet('test', 'https://example.invalid', new Uint8Array(), policy),
+    new Wallet('main', 'https://example.invalid', undefined, policy, []),
+    new Wallet('main', 'https://example.invalid', undefined, policy, [
+      'https://zero-indexer-1.invalid',
+      'https://zero-indexer-2.invalid',
+    ]),
   ];
   for (const wallet of wallets) wallet.free();
   // @ts-expect-error Confirmation counts must be numbers.
@@ -19,6 +24,8 @@ function constructorContract(Wallet) {
   new Wallet('test', 'https://example.invalid', undefined, { trusted: 1 });
   // @ts-expect-error Zero-confirmation shielding is not a frontend setting.
   new Wallet('test', 'https://example.invalid', undefined, { ...policy, allowZeroConfShielding: false });
+  // @ts-expect-error Zero-indexer endpoints must be strings.
+  new Wallet('test', 'https://example.invalid', undefined, policy, [42]);
 }
 
 export function walletConstructorTypes() {
