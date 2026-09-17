@@ -359,7 +359,7 @@ pub fn sign_message_with_transparent(
 
     // Double SHA256
     let hash = sha256d::Hash::hash(&msg_bytes);
-    let message_hash = Secp256k1Message::from_slice(hash.as_ref())
+    let message_hash = Secp256k1Message::from_digest_slice(hash.as_ref())
         .map_err(|e| Error::Generic(format!("Failed to create message: {e}")))?;
 
     // Sign with recovery ID
@@ -387,7 +387,7 @@ pub fn sign_message_with_transparent(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::pczt_sign_inner;
     use crate::{Network, error::Error};
     use pczt::roles::{creator::Creator, io_finalizer::IoFinalizer, updater::Updater};
@@ -404,12 +404,12 @@ mod tests {
     };
 
     #[derive(Clone, Copy)]
-    enum OrchardPool {
+    pub(crate) enum OrchardPool {
         Orchard,
         Ironwood,
     }
 
-    fn orchard_pczt(
+    pub(crate) fn orchard_pczt(
         pool: OrchardPool,
         include_derivation: bool,
     ) -> (
