@@ -45,6 +45,8 @@ pub enum Error {
     InvalidAmount(#[from] zcash_protocol::value::BalanceError),
     #[error("Failed to send transaction")]
     SendFailed { code: i32, reason: String },
+    #[error("Transaction {txid} may have been submitted: {reason}")]
+    TransactionSubmissionUnknown { txid: String, reason: String },
     #[error("Failed to parse key: {0}")]
     KeyParse(String),
 
@@ -111,7 +113,11 @@ pub enum Error {
 
 impl From<Error> for JsValue {
     fn from(e: Error) -> Self {
-        js_sys::Error::new(&e.to_string()).into()
+        let error = js_sys::Error::new(&e.to_string());
+        if matches!(e, Error::TransactionSubmissionUnknown { .. }) {
+            error.set_name("TransactionSubmissionUnknown");
+        }
+        error.into()
     }
 }
 

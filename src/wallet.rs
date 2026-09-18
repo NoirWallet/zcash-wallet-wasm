@@ -71,7 +71,7 @@ use zcash_client_memory::{MemBlockCache, MemoryWalletDb};
 #[cfg(test)]
 mod confirmations_tests;
 const BATCH_SIZE: u32 = 10000;
-const ZERO_INDEXER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DEFAULT_ZERO_INDEXER_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn consume_transparent_history_budget(remaining: &mut usize) -> Result<(), Error> {
     *remaining = remaining.checked_sub(1).ok_or_else(|| Error::Generic(
@@ -164,15 +164,16 @@ impl FromStr for TransferFundingSource {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TransferOverallStatus {
+pub enum TransferOverallStatus {
     Success,
     Partial,
+    Unknown,
     Failed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TransferSubmissionStatus {
+pub enum TransferSubmissionStatus {
     Submitted,
     Rejected,
     Unknown,
@@ -181,22 +182,22 @@ pub(crate) enum TransferSubmissionStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TransferTransactionResult {
-    tx_id: String,
-    status: TransferSubmissionStatus,
+pub struct TransferTransactionResult {
+    pub tx_id: String,
+    pub status: TransferSubmissionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error_code: Option<i32>,
+    pub error_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error_message: Option<String>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TransferResult {
-    status: TransferOverallStatus,
-    tx_ids: Vec<String>,
-    final_tx_id: String,
-    transactions: Vec<TransferTransactionResult>,
+pub struct TransferResult {
+    pub status: TransferOverallStatus,
+    pub tx_ids: Vec<String>,
+    pub final_tx_id: String,
+    pub transactions: Vec<TransferTransactionResult>,
 }
 
 impl TransferResult {
@@ -211,8 +212,13 @@ impl TransferResult {
             .iter()
             .filter(|tx| tx.status == TransferSubmissionStatus::Submitted)
             .count();
+        let has_unknown = transactions
+            .iter()
+            .any(|tx| tx.status == TransferSubmissionStatus::Unknown);
         let status = if submitted == transactions.len() {
             TransferOverallStatus::Success
+        } else if has_unknown {
+            TransferOverallStatus::Unknown
         } else if submitted > 0 {
             TransferOverallStatus::Partial
         } else {
@@ -256,6 +262,7 @@ where
 
     let mut failures = Vec::with_capacity(endpoint_count);
     let mut last_rejection = None;
+    let mut has_ambiguous_failure = false;
     for index in 0..endpoint_count {
         match tokio_with_wasm::alias::time::timeout(request_timeout, submit(index, raw.clone()))
             .await
@@ -270,79 +277,91 @@ where
                 ));
                 last_rejection = Some((response.error_code, response.error_message));
             }
-            Ok(Err(status)) => failures.push(format!("endpoint {}: {status}", index + 1)),
-            Err(_) => failures.push(format!(
-                "endpoint {} timed out after {} seconds",
-                index + 1,
-                request_timeout.as_secs()
-            )),
-        }
-    }
-
-    let details = failures.join("; ");
-    match last_rejection {
-        Some((error_code, _)) => Ok(service::SendResponse {
-            error_code,
-            error_message: format!(
-                "All zero-indexer endpoints failed to accept the transaction: {details}"
-            ),
-        }),
-        None => Err(tonic::Status::unavailable(format!(
-            "All zero-indexer endpoints failed: {details}"
-        ))),
-    }
-}
-
-async fn get_transaction_from_first_available_endpoint<F, Fut>(
-    endpoint_count: usize,
-    filter: service::TxFilter,
-    request_timeout: Duration,
-    mut request: F,
-) -> Result<service::RawTransaction, tonic::Status>
-where
-    F: FnMut(usize, service::TxFilter) -> Fut,
-    Fut: Future<Output = Result<service::RawTransaction, tonic::Status>>,
-{
-    if endpoint_count == 0 {
-        return Err(tonic::Status::failed_precondition(
-            "No zero-indexer endpoints configured",
-        ));
-    }
-
-    let mut failures = Vec::with_capacity(endpoint_count);
-    let mut failure_codes = Vec::with_capacity(endpoint_count);
-    for index in 0..endpoint_count {
-        match tokio_with_wasm::alias::time::timeout(request_timeout, request(index, filter.clone()))
-            .await
-        {
-            Ok(Ok(raw)) => return Ok(raw),
             Ok(Err(status)) => {
-                failure_codes.push(status.code());
+                has_ambiguous_failure = true;
                 failures.push(format!("endpoint {}: {status}", index + 1));
             }
             Err(_) => {
-                failure_codes.push(tonic::Code::DeadlineExceeded);
+                has_ambiguous_failure = true;
                 failures.push(format!(
-                    "endpoint {} timed out after {} seconds",
+                    "endpoint {} timed out after {} ms",
                     index + 1,
-                    request_timeout.as_secs()
+                    request_timeout.as_millis()
                 ));
             }
         }
     }
 
-    let code = failure_codes
-        .first()
-        .copied()
-        .filter(|first| failure_codes.iter().all(|code| code == first))
-        .unwrap_or(tonic::Code::Unavailable);
-    Err(tonic::Status::new(
-        code,
-        format!(
-            "All zero-indexer endpoints failed to return the transaction: {}",
-            failures.join("; ")
+    let details = failures.join("; ");
+    match (has_ambiguous_failure, last_rejection) {
+        (true, _) => Err(tonic::Status::unavailable(format!(
+            "All zero-indexer endpoints failed: {details}"
+        ))),
+        (false, Some((error_code, _))) => Ok(service::SendResponse {
+            error_code,
+            error_message: format!(
+                "All zero-indexer endpoints failed to accept the transaction: {details}"
+            ),
+        }),
+        (false, None) => Err(tonic::Status::unavailable(format!(
+            "All zero-indexer endpoints failed: {details}"
+        ))),
+    }
+}
+
+async fn submit_to_zero_indexers_with_fallback<ZF, ZFut, LF, LFut>(
+    endpoint_count: usize,
+    raw: service::RawTransaction,
+    request_timeout: Duration,
+    submit_to_zero_indexer: ZF,
+    submit_to_lightwalletd: LF,
+) -> Result<service::SendResponse, tonic::Status>
+where
+    ZF: FnMut(usize, service::RawTransaction) -> ZFut,
+    ZFut: Future<Output = Result<service::SendResponse, tonic::Status>>,
+    LF: FnOnce(service::RawTransaction) -> LFut,
+    LFut: Future<Output = Result<service::SendResponse, tonic::Status>>,
+{
+    let zero_indexer_result = submit_to_first_accepting_endpoint(
+        endpoint_count,
+        raw.clone(),
+        request_timeout,
+        submit_to_zero_indexer,
+    )
+    .await;
+
+    if matches!(&zero_indexer_result, Ok(response) if response.error_code == 0) {
+        return zero_indexer_result;
+    }
+
+    match &zero_indexer_result {
+        Ok(response) => tracing::warn!(
+            error_code = response.error_code,
+            error_message = response.error_message,
+            "All zero-indexer endpoints rejected the transaction; falling back to lightwalletd"
         ),
-    ))
+        Err(status) => tracing::warn!(
+            error = %status,
+            "All zero-indexer transaction submissions failed; falling back to lightwalletd"
+        ),
+    }
+
+    let lightwalletd_result = submit_to_lightwalletd(raw).await;
+    match (zero_indexer_result, lightwalletd_result) {
+        (_, Ok(response)) if response.error_code == 0 => Ok(response),
+        (Ok(_), Ok(response)) => Ok(response),
+        (Err(zero_status), Ok(response)) => Err(tonic::Status::unavailable(format!(
+            "Transaction submission is uncertain: zero-indexer failed ambiguously ({zero_status}); lightwalletd rejected with code {}: {}",
+            response.error_code, response.error_message
+        ))),
+        (Ok(zero_response), Err(lightwalletd_status)) => Err(tonic::Status::unavailable(format!(
+            "Transaction submission is uncertain: all zero-indexer endpoints rejected with code {}; lightwalletd failed: {lightwalletd_status}",
+            zero_response.error_code
+        ))),
+        (Err(zero_status), Err(lightwalletd_status)) => Err(tonic::Status::unavailable(format!(
+            "Transaction submission is uncertain: zero-indexer failed ambiguously ({zero_status}); lightwalletd failed: {lightwalletd_status}"
+        ))),
+    }
 }
 
 async fn submit_transfer_transactions_with<F, Fut>(
@@ -699,8 +718,9 @@ pub struct Wallet<W, T> {
     pub(crate) db: Arc<RwLock<W>>,
     // gRPC client used to connect to a lightwalletd instance for network data
     pub(crate) client: CompactTxStreamerClient<T>,
-    // Optional zero-indexer endpoints used for Orchard transaction submission and lookup.
+    // Optional zero-indexer endpoints used for Orchard transaction submission.
     zero_indexer_clients: Vec<CompactTxStreamerClient<T>>,
+    zero_indexer_send_timeout: Duration,
     pub(crate) network: Network,
     confirmations_policy: ConfirmationsPolicy,
     /// Note management: the number of notes to maintain in the wallet
@@ -715,6 +735,7 @@ impl<W, T: Clone> Clone for Wallet<W, T> {
             db: self.db.clone(),
             client: self.client.clone(),
             zero_indexer_clients: self.zero_indexer_clients.clone(),
+            zero_indexer_send_timeout: self.zero_indexer_send_timeout,
             network: self.network,
             confirmations_policy: self.confirmations_policy,
             target_note_count: self.target_note_count,
@@ -823,6 +844,24 @@ where
         network: Network,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Self, Error> {
+        Self::new_with_zero_indexer_options(
+            db,
+            client,
+            zero_indexer_clients,
+            network,
+            confirmations_policy,
+            DEFAULT_ZERO_INDEXER_SEND_TIMEOUT,
+        )
+    }
+
+    pub(crate) fn new_with_zero_indexer_options(
+        db: W,
+        client: T,
+        zero_indexer_clients: Vec<T>,
+        network: Network,
+        confirmations_policy: ConfirmationsPolicy,
+        zero_indexer_send_timeout: Duration,
+    ) -> Result<Self, Error> {
         get_prover();
         Ok(Wallet {
             db: Arc::new(RwLock::new(db)),
@@ -831,6 +870,7 @@ where
                 .into_iter()
                 .map(CompactTxStreamerClient::new)
                 .collect(),
+            zero_indexer_send_timeout,
             network,
             confirmations_policy,
             target_note_count: 4,
@@ -1121,54 +1161,20 @@ where
                     requests
                 },
             );
-            let requests = requests
-                .into_iter()
-                .map(|(txid, needs_enhancement)| {
-                    // Enhancement requests exist precisely because the database does not yet
-                    // contain the raw transaction, so they cannot be classified locally.
-                    let use_zero_indexer = if needs_enhancement {
-                        false
-                    } else {
-                        db.get_transaction(txid)?
-                            .as_ref()
-                            .is_some_and(requires_zero_indexer)
-                    };
-                    Ok((txid, needs_enhancement, use_zero_indexer))
-                })
-                .collect::<Result<Vec<_>, <W as WalletRead>::Error>>()?;
             (db.chain_state_revision(), requests)
         };
 
         let mut client = self.client.clone();
-        for (requested_txid, needs_enhancement, use_zero_indexer) in transaction_requests {
+        for (requested_txid, needs_enhancement) in transaction_requests {
             let filter = service::TxFilter {
                 block: None,
                 index: 0,
                 hash: requested_txid.as_ref().to_vec(),
             };
-            let response = if use_zero_indexer && !self.zero_indexer_clients.is_empty() {
-                let zero_indexer_clients = self.zero_indexer_clients.clone();
-                get_transaction_from_first_available_endpoint(
-                    zero_indexer_clients.len(),
-                    filter,
-                    ZERO_INDEXER_REQUEST_TIMEOUT,
-                    move |index, filter| {
-                        let mut zero_indexer = zero_indexer_clients[index].clone();
-                        async move {
-                            zero_indexer
-                                .get_transaction(filter)
-                                .await
-                                .map(tonic::Response::into_inner)
-                        }
-                    },
-                )
+            let response = client
+                .get_transaction(filter)
                 .await
-            } else {
-                client
-                    .get_transaction(filter)
-                    .await
-                    .map(tonic::Response::into_inner)
-            };
+                .map(tonic::Response::into_inner);
             let mut db = self.checked_history_write(&revision).await?;
             let raw = match response {
                 Ok(raw) => raw,
@@ -2158,10 +2164,10 @@ where
     ) -> Result<service::SendResponse, tonic::Status> {
         if requires_zero_indexer && !self.zero_indexer_clients.is_empty() {
             let zero_indexer_clients = self.zero_indexer_clients.clone();
-            submit_to_first_accepting_endpoint(
+            submit_to_zero_indexers_with_fallback(
                 zero_indexer_clients.len(),
                 raw,
-                ZERO_INDEXER_REQUEST_TIMEOUT,
+                self.zero_indexer_send_timeout,
                 move |index, raw| {
                     let mut zero_indexer = zero_indexer_clients[index].clone();
                     async move {
@@ -2171,15 +2177,23 @@ where
                             .map(tonic::Response::into_inner)
                     }
                 },
+                |raw| self.submit_to_lightwalletd(raw),
             )
             .await
         } else {
-            self.client
-                .clone()
-                .send_transaction(raw)
-                .await
-                .map(tonic::Response::into_inner)
+            self.submit_to_lightwalletd(raw).await
         }
+    }
+
+    async fn submit_to_lightwalletd(
+        &self,
+        raw: service::RawTransaction,
+    ) -> Result<service::SendResponse, tonic::Status> {
+        let mut client = self.client.clone();
+        client
+            .send_transaction(raw)
+            .await
+            .map(tonic::Response::into_inner)
     }
 
     async fn submit_stored_transfer_transactions(
@@ -2196,35 +2210,13 @@ where
         )
     }
 
-    pub async fn send_authorized_transactions(&self, txids: &NonEmpty<TxId>) -> Result<(), Error> {
-        for txid in txids.iter() {
-            let (txid, raw_tx, route_via_zero_indexer) = self
-                .db
-                .read()
-                .await
-                .get_transaction(*txid)?
-                .map(|tx| {
-                    let mut raw_tx = service::RawTransaction::default();
-                    tx.write(&mut raw_tx.data).unwrap(); // safe to unwrap here as we know the tx is valid
-                    let route_via_zero_indexer = requires_zero_indexer(&tx);
-                    (tx.txid(), raw_tx, route_via_zero_indexer)
-                })
-                .ok_or(Error::TransactionNotFound(*txid))?;
-
-            let response = self
-                .submit_raw_transaction(raw_tx, route_via_zero_indexer)
-                .await?;
-
-            if response.error_code != 0 {
-                return Err(Error::SendFailed {
-                    code: response.error_code,
-                    reason: response.error_message,
-                });
-            } else {
-                tracing::info!("Transaction {} send successfully :)", txid);
-            }
-        }
-        Ok(())
+    /// Submits stored transactions and reports explicit rejection separately from an uncertain
+    /// network outcome. Callers should synchronize before retrying an `Unknown` transaction.
+    pub async fn send_authorized_transactions(
+        &self,
+        txids: &NonEmpty<TxId>,
+    ) -> Result<TransferResult, Error> {
+        self.submit_stored_transfer_transactions(txids).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3443,8 +3435,34 @@ where
         drop(db);
 
         tracing::info!("📡 Broadcasting transaction to network...");
-        self.send_authorized_transactions(&NonEmpty::new(txid))
+        let submission = self
+            .send_authorized_transactions(&NonEmpty::new(txid))
             .await?;
+        let transaction = submission
+            .transactions
+            .into_iter()
+            .next()
+            .expect("a single PCZT transaction produces one submission result");
+        match transaction.status {
+            TransferSubmissionStatus::Submitted => {}
+            TransferSubmissionStatus::Rejected => {
+                return Err(Error::SendFailed {
+                    code: transaction.error_code.unwrap_or_default(),
+                    reason: transaction.error_message.unwrap_or_default(),
+                });
+            }
+            TransferSubmissionStatus::Unknown => {
+                return Err(Error::TransactionSubmissionUnknown {
+                    txid: transaction.tx_id,
+                    reason: transaction.error_message.unwrap_or_default(),
+                });
+            }
+            TransferSubmissionStatus::NotAttempted => {
+                return Err(Error::Generic(
+                    "PCZT transaction submission was not attempted".to_string(),
+                ));
+            }
+        }
 
         tracing::info!("🎉 Transaction broadcast successfully!");
         Ok(txid.to_string())
@@ -3478,13 +3496,14 @@ mod transparent_history_tests;
 mod tests {
     use super::{
         TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
-        allow_exact_send_max_fallback, dynamic_zip317_fee_rule,
-        get_transaction_from_first_available_endpoint, submit_to_first_accepting_endpoint,
-        submit_transfer_transactions_with, transaction_status_from_raw_height,
-        transfer_expiry_height, transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
+        allow_exact_send_max_fallback, dynamic_zip317_fee_rule, submit_to_first_accepting_endpoint,
+        submit_to_zero_indexers_with_fallback, submit_transfer_transactions_with,
+        transaction_status_from_raw_height, transfer_expiry_height, transfer_policies,
+        usk_from_seed_str, validate_expiry_delta_blocks,
     };
     use crate::Network;
     use nonempty::NonEmpty;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::time::Duration;
     use zcash_client_backend::data_api::wallet::input_selection::{
@@ -3500,6 +3519,14 @@ mod tests {
 
     fn txid(value: u8) -> TxId {
         TxId::from_bytes([value; 32])
+    }
+
+    #[test]
+    fn zero_indexer_send_timeout_defaults_to_thirty_seconds() {
+        assert_eq!(
+            super::DEFAULT_ZERO_INDEXER_SEND_TIMEOUT,
+            Duration::from_secs(30)
+        );
     }
 
     #[tokio::test]
@@ -3557,6 +3584,7 @@ mod tests {
             db: Arc::new(tokio::sync::RwLock::new(db)),
             client: super::CompactTxStreamerClient::new(PendingHistory(request_started.clone())),
             zero_indexer_clients: vec![],
+            zero_indexer_send_timeout: super::DEFAULT_ZERO_INDEXER_SEND_TIMEOUT,
             network,
             confirmations_policy:
                 zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default(),
@@ -3750,51 +3778,111 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_indexer_transaction_lookup_tries_the_next_endpoint() {
-        let mut attempts = vec![];
-        let raw = get_transaction_from_first_available_endpoint(
+    async fn zero_indexer_submission_does_not_fallback_after_acceptance() {
+        let fallback_called = Cell::new(false);
+        let response = submit_to_zero_indexers_with_fallback(
             2,
-            service::TxFilter::default(),
+            service::RawTransaction::default(),
             Duration::from_secs(1),
-            |index, _| {
-                attempts.push(index);
+            |_, _| async { Ok(service::SendResponse::default()) },
+            |_| {
+                fallback_called.set(true);
+                async { Ok(service::SendResponse::default()) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.error_code, 0);
+        assert!(!fallback_called.get());
+    }
+
+    #[tokio::test]
+    async fn zero_indexer_submission_falls_back_to_lightwalletd_after_all_failures() {
+        let attempts = RefCell::new(vec![]);
+        let response = submit_to_zero_indexers_with_fallback(
+            2,
+            service::RawTransaction {
+                data: vec![42],
+                ..Default::default()
+            },
+            Duration::from_secs(1),
+            |index, raw| {
+                attempts
+                    .borrow_mut()
+                    .push(format!("zero-{index}-{:?}", raw.data));
                 async move {
-                    if index == 0 {
-                        Err(tonic::Status::unavailable("offline"))
-                    } else {
-                        Ok(service::RawTransaction {
-                            data: vec![7],
-                            ..Default::default()
-                        })
-                    }
+                    Ok(service::SendResponse {
+                        error_code: -25 - index as i32,
+                        error_message: format!("rejected-{index}"),
+                    })
+                }
+            },
+            |raw| {
+                attempts
+                    .borrow_mut()
+                    .push(format!("lightwalletd-{:?}", raw.data));
+                async {
+                    Ok(service::SendResponse {
+                        error_code: -26,
+                        error_message: "lightwalletd rejected".to_string(),
+                    })
                 }
             },
         )
         .await
         .unwrap();
 
-        assert_eq!(raw.data, vec![7]);
-        assert_eq!(attempts, vec![0, 1]);
+        assert_eq!(response.error_code, -26);
+        assert_eq!(response.error_message, "lightwalletd rejected");
+        assert_eq!(
+            attempts.into_inner(),
+            vec!["zero-0-[42]", "zero-1-[42]", "lightwalletd-[42]"]
+        );
     }
 
     #[tokio::test]
-    async fn zero_indexer_transaction_lookup_preserves_all_not_found() {
-        let status = get_transaction_from_first_available_endpoint(
-            2,
-            service::TxFilter::default(),
+    async fn ambiguous_zero_indexer_failure_overrides_lightwalletd_rejection() {
+        let status = submit_to_zero_indexers_with_fallback(
+            1,
+            service::RawTransaction::default(),
             Duration::from_secs(1),
-            |index, _| async move {
-                Err::<service::RawTransaction, _>(tonic::Status::not_found(format!(
-                    "missing-{index}"
-                )))
+            |_, _| async { Err(tonic::Status::unavailable("offline")) },
+            |_| async {
+                Ok(service::SendResponse {
+                    error_code: -26,
+                    error_message: "lightwalletd rejected".to_string(),
+                })
             },
         )
         .await
         .unwrap_err();
 
-        assert_eq!(status.code(), tonic::Code::NotFound);
-        assert!(status.message().contains("endpoint 1"));
-        assert!(status.message().contains("endpoint 2"));
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(status.message().contains("lightwalletd rejected"));
+    }
+
+    #[tokio::test]
+    async fn mixed_zero_indexer_rejection_and_transport_failure_is_ambiguous() {
+        let status = submit_to_first_accepting_endpoint(
+            2,
+            service::RawTransaction::default(),
+            Duration::from_secs(1),
+            |index, _| async move {
+                if index == 0 {
+                    Ok(service::SendResponse {
+                        error_code: -25,
+                        error_message: "rejected".to_string(),
+                    })
+                } else {
+                    Err(tonic::Status::unavailable("offline"))
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 
     #[tokio::test]
@@ -3863,6 +3951,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transfer_submission_reports_unknown_after_an_earlier_success() {
+        let mut responses = VecDeque::from([
+            Ok(service::SendResponse::default()),
+            Err(tonic::Status::unavailable("offline")),
+        ]);
+
+        let result = submit_transfer_transactions_with(two_raw_transactions(), |_, _| {
+            let response = responses.pop_front().unwrap();
+            async move { response }
+        })
+        .await;
+
+        assert_eq!(result.status, TransferOverallStatus::Unknown);
+        assert_eq!(
+            result.transactions[0].status,
+            TransferSubmissionStatus::Submitted
+        );
+        assert_eq!(
+            result.transactions[1].status,
+            TransferSubmissionStatus::Unknown
+        );
+    }
+
+    #[tokio::test]
     async fn transfer_submission_stops_after_transport_uncertainty() {
         let mut responses = VecDeque::from([
             Err(tonic::Status::unavailable("offline")),
@@ -3875,7 +3987,7 @@ mod tests {
         })
         .await;
 
-        assert_eq!(result.status, TransferOverallStatus::Failed);
+        assert_eq!(result.status, TransferOverallStatus::Unknown);
         assert_eq!(
             result.transactions[0].status,
             TransferSubmissionStatus::Unknown

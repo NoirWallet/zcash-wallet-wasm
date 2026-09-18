@@ -1,9 +1,10 @@
 use std::num::NonZeroU32;
 use std::str::FromStr;
+use std::time::Duration;
 
 use crate::bindgen::sign::pczt_sign_inner;
 use crate::bindgen::{Pczt as WasmPczt, ProofGenerationKey, SeedFingerprint};
-use crate::wallet::TransferFundingSource;
+use crate::wallet::{DEFAULT_ZERO_INDEXER_SEND_TIMEOUT, TransferFundingSource};
 use crate::{Error, Network, PRUNING_DEPTH, Wallet};
 
 use nonempty::NonEmpty;
@@ -45,6 +46,14 @@ impl TryFrom<ConfirmationsPolicyOptions> for ConfirmationsPolicy {
     }
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ZeroIndexerOptions {
+    #[serde(default)]
+    urls: Vec<String>,
+    send_transaction_timeout_ms: Option<NonZeroU32>,
+}
+
 #[wasm_bindgen(typescript_custom_section)]
 const CONFIRMATIONS_POLICY_TYPES: &str = r#"
 /** Override confirmation counts; shielding retains the default policy. */
@@ -54,11 +63,19 @@ export interface ConfirmationsPolicy {
     /** Positive uint32. */
     untrusted: number;
 }
+
+/** Runtime zero-indexer configuration; not persisted in wallet bytes. */
+export interface ZeroIndexerOptions {
+    /** Ordered zero-indexer endpoints used for Orchard transaction submission. */
+    urls?: string[];
+    /** Positive uint32 milliseconds. Applies to each zero-indexer SendTransaction attempt. */
+    sendTransactionTimeoutMs?: number;
+}
 "#;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TRANSFER_TYPES: &str = r#"
-export type TransferOverallStatus = "success" | "partial" | "failed";
+export type TransferOverallStatus = "success" | "partial" | "unknown" | "failed";
 export type TransferSubmissionStatus =
     | "submitted"
     | "rejected"
@@ -73,6 +90,7 @@ export interface TransferTransactionResult {
 }
 
 export interface TransferResult {
+    /** "unknown" means at least one submission may have reached the network. */
     status: TransferOverallStatus;
     txIds: string[];
     finalTxId: string;
@@ -115,33 +133,63 @@ impl WebWallet {
         }
     }
 
-    fn parse_zero_indexer_urls(value: JsValue) -> Result<Vec<String>, Error> {
+    fn validate_object_keys(
+        value: &JsValue,
+        allowed: &[&str],
+        option_name: &str,
+    ) -> Result<(), Error> {
+        for key in js_sys::Reflect::own_keys(value).map_err(Error::Js)? {
+            if !key
+                .as_string()
+                .is_some_and(|key| allowed.contains(&key.as_str()))
+            {
+                return Err(Error::Generic(format!(
+                    "{option_name} contains an unsupported option"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_zero_indexer_options(value: JsValue) -> Result<(Vec<String>, Duration), Error> {
         if value.is_null_or_undefined() {
-            return Ok(vec![]);
+            return Ok((vec![], DEFAULT_ZERO_INDEXER_SEND_TIMEOUT));
         }
 
-        let urls: Vec<String> = serde_wasm_bindgen::from_value(value)?;
-        let mut normalized = Vec::with_capacity(urls.len());
-        for url in urls {
+        Self::validate_object_keys(
+            &value,
+            &["urls", "sendTransactionTimeoutMs"],
+            "Zero-indexer options",
+        )?;
+
+        let options: ZeroIndexerOptions = serde_wasm_bindgen::from_value(value)?;
+        let mut normalized = Vec::with_capacity(options.urls.len());
+        for url in options.urls {
             let url = url.trim();
             if url.is_empty() {
                 return Err(Error::Generic(
-                    "zero_indexer_urls must not contain empty URLs".to_string(),
+                    "urls must not contain empty URLs".to_string(),
                 ));
             }
             if !normalized.iter().any(|existing| existing == url) {
                 normalized.push(url.to_string());
             }
         }
-        Ok(normalized)
+
+        let send_timeout = options
+            .send_transaction_timeout_ms
+            .map(|value| Duration::from_millis(u64::from(value.get())))
+            .unwrap_or(DEFAULT_ZERO_INDEXER_SEND_TIMEOUT);
+
+        Ok((normalized, send_timeout))
     }
 }
 
 #[wasm_bindgen]
 impl WebWallet {
-    /// Confirmation policy and zero-indexer URLs are runtime configuration. Supply them again
-    /// when restoring db_bytes. Other queries continue to use lightwalletd_url; Orchard
-    /// transaction submission and status lookup use zero-indexer when URLs are provided.
+    /// Confirmation policy and zero-indexer options are runtime configuration. Supply them again
+    /// when restoring db_bytes. Orchard transaction submission uses zero-indexer when configured,
+    /// and falls back to lightwalletd if every zero-indexer attempt fails.
     #[wasm_bindgen(constructor)]
     pub fn new(
         network: &str,
@@ -151,8 +199,8 @@ impl WebWallet {
         >,
         #[wasm_bindgen(unchecked_optional_param_type = "ConfirmationsPolicy | null")]
         confirmations_policy: JsValue,
-        #[wasm_bindgen(unchecked_optional_param_type = "string[] | null")]
-        zero_indexer_urls: JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "ZeroIndexerOptions | null")]
+        zero_indexer_options: JsValue,
     ) -> Result<WebWallet, Error> {
         let network = Network::from_str(network)?;
         let confirmations_policy = if confirmations_policy.is_null_or_undefined() {
@@ -171,10 +219,9 @@ impl WebWallet {
             options.try_into()?
         };
         let client = Client::new(lightwalletd_url.to_string());
-        let zero_indexer_clients = Self::parse_zero_indexer_urls(zero_indexer_urls)?
-            .into_iter()
-            .map(Client::new)
-            .collect();
+        let (zero_indexer_urls, zero_indexer_send_timeout) =
+            Self::parse_zero_indexer_options(zero_indexer_options)?;
+        let zero_indexer_clients = zero_indexer_urls.into_iter().map(Client::new).collect();
 
         let db = match db_bytes {
             Some(bytes) => {
@@ -187,12 +234,13 @@ impl WebWallet {
         };
 
         Ok(Self {
-            inner: Wallet::new_with_confirmations_policy_and_zero_indexers(
+            inner: Wallet::new_with_zero_indexer_options(
                 db,
                 client,
                 zero_indexer_clients,
                 network,
                 confirmations_policy,
+                zero_indexer_send_timeout,
             )?,
         })
     }
@@ -522,7 +570,9 @@ impl WebWallet {
         Ok(())
     }
 
-    pub async fn send_authorized_transactions(&self, txids: Vec<u8>) -> Result<(), Error> {
+    /// Returns per-transaction submission results. Synchronize before retrying an unknown result.
+    #[wasm_bindgen(unchecked_return_type = "TransferResult")]
+    pub async fn send_authorized_transactions(&self, txids: Vec<u8>) -> Result<JsValue, Error> {
         let txids = txids
             .chunks(32)
             .map(|txid| {
@@ -531,7 +581,8 @@ impl WebWallet {
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let txids = NonEmpty::from_vec(txids).ok_or(Error::TxIdParse)?;
-        self.inner.send_authorized_transactions(&txids).await
+        let result = self.inner.send_authorized_transactions(&txids).await?;
+        Ok(serde_wasm_bindgen::to_value(&result)?)
     }
 
     /// Get account ID by account name

@@ -189,6 +189,7 @@ fn fixture() -> (
         db: Arc::new(tokio::sync::RwLock::new(db)),
         client: super::CompactTxStreamerClient::new(HistoryRpc::default()),
         zero_indexer_clients: vec![],
+        zero_indexer_send_timeout: super::DEFAULT_ZERO_INDEXER_SEND_TIMEOUT,
         network,
         confirmations_policy: zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default(
         ),

@@ -1033,7 +1033,19 @@
                     throw new Error('Please create transaction first (step 2)');
                 }
 
-                await wallet.send_authorized_transactions(currentTxIds);
+                const submission = await wallet.send_authorized_transactions(currentTxIds);
+
+                if (submission.status !== 'success') {
+                    const uncertain = submission.status === 'unknown';
+                    showResult('sendResult',
+                        (uncertain
+                            ? 'Step 3: Transaction submission result is unknown. Sync the wallet before retrying.\n'
+                            : 'Step 3: Transaction submission failed.\n') +
+                        JSON.stringify(submission, null, 2),
+                        uncertain ? 'info' : 'error'
+                    );
+                    return;
+                }
 
                 showResult('sendResult',
                     'Step 3: Transaction sent successfully!\n' +
