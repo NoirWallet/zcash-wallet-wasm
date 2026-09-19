@@ -830,7 +830,7 @@ impl WebWallet {
     ) -> Result<WasmPczt, Error> {
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
         self.inner
-            .pczt_create_transparent_dynamic_fee(
+            .pczt_create_transparent_hardware_dynamic_fee(
                 AccountId::from(account_id),
                 to_address,
                 value,
