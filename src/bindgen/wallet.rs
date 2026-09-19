@@ -818,6 +818,29 @@ impl WebWallet {
             .map(Into::into)
     }
 
+    /// Create an unsigned, unproven PCZT funded only by transparent inputs.
+    /// `marginal_fee_zats` selects the ZIP-317 fee tier, matching software sends.
+    pub async fn pczt_create_transparent(
+        &self,
+        account_id: u32,
+        to_address: String,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<WasmPczt, Error> {
+        let to_address = ZcashAddress::try_from_encoded(&to_address)?;
+        self.inner
+            .pczt_create_transparent_hardware_dynamic_fee(
+                AccountId::from(account_id),
+                to_address,
+                value,
+                memo,
+                marginal_fee_zats,
+            )
+            .await
+            .map(Into::into)
+    }
+
     /// Create an unsigned, unproven shielding PCZT (transparent -> Orchard) for
     /// external signing (hardware wallet flow). `marginal_fee_zats` selects the
     /// ZIP-317 fee tier so hardware shields honor the dynamic-fee tiers too.
