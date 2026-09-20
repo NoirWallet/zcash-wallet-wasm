@@ -2710,13 +2710,17 @@ where
             )
         })
         .update_orchard_with(|mut updater| {
+            let cross_address_restricted = !updater.bundle().flags().cross_address_enabled();
             for index in 0..updater.bundle().actions().len() {
                 updater.update_action_with(index, |mut action_updater| {
                     // If the account has a known derivation, add the Orchard key path to the PCZT.
                     if let Some(derivation) = account_derivation {
-                        // orchard_spends will only contain action indices for the real spends, and
-                        // not the dummy inputs
-                        if orchard_spends.contains(&index) {
+                        // A cross-address-restricted output is paired with a wallet-controlled,
+                        // zero-valued spend that requires the same authorization as a real spend.
+                        // Padding dummy spends are absent from both metadata collections.
+                        if orchard_spends.contains(&index)
+                            || (cross_address_restricted && orchard_outputs.contains_key(&index))
+                        {
                             // All spent notes are from the same account.
                             action_updater.set_spend_zip32_derivation(
                                 orchard::pczt::Zip32Derivation::parse(
