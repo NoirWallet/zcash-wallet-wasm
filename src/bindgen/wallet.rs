@@ -25,6 +25,14 @@ pub type MemoryWallet<T> = Wallet<MemoryWalletDb<Network>, T>;
 pub type AccountId = <MemoryWalletDb<Network> as WalletRead>::AccountId;
 pub type NoteRef = <MemoryWalletDb<Network> as InputSource>::NoteRef;
 
+fn is_user_facing_shielded_address(
+    address: &zcash_keys::address::UnifiedAddress,
+    default_address: &zcash_keys::address::UnifiedAddress,
+) -> bool {
+    let has_shielded_receiver = address.has_orchard() || address.has_sapling();
+    has_shielded_receiver && (address == default_address || address.transparent().is_none())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfirmationsPolicyOptions {
@@ -661,6 +669,48 @@ impl WebWallet {
         );
 
         Ok(serde_wasm_bindgen::to_value(&result)?)
+    }
+
+    /// List the user-facing shielded receiving addresses generated for an account.
+    ///
+    /// The wallet database also stores Unified Addresses used to discover transparent
+    /// receivers. Those internal records are excluded unless they are the account's default
+    /// address. Results are ordered by diversifier index from oldest to newest.
+    pub async fn list_shielded_addresses(&self, account_id: u32) -> Result<JsValue, Error> {
+        use std::collections::HashSet;
+        use zcash_client_backend::data_api::Account;
+        use zcash_keys::address::Address;
+        use zcash_keys::keys::UnifiedAddressRequest;
+
+        let account_ref = AccountId::from(account_id);
+        let db = self.inner.db.read().await;
+        let account = db
+            .get_account(account_ref)?
+            .ok_or(Error::AccountNotFound(account_id))?;
+        let (default_address, _) = account
+            .uivk()
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)?;
+
+        let mut seen = HashSet::new();
+        let addresses = db
+            .list_addresses(account_ref)?
+            .into_iter()
+            .filter_map(|info| match info.address() {
+                Address::Unified(address)
+                    if is_user_facing_shielded_address(address, &default_address) =>
+                {
+                    let result = crate::bindgen::mnemonic::unified_addresses_from_full(
+                        address,
+                        &self.inner.network,
+                        None,
+                    );
+                    seen.insert(result.unified.clone()).then_some(result)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        Ok(serde_wasm_bindgen::to_value(&addresses)?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1364,7 +1414,10 @@ where
 
 #[cfg(test)]
 mod confirmations_policy_tests {
-    use super::{ConfirmationsPolicy, ConfirmationsPolicyOptions};
+    use super::{ConfirmationsPolicy, ConfirmationsPolicyOptions, is_user_facing_shielded_address};
+    use crate::bindgen::UnifiedSpendingKey;
+    use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest};
+    use zip32::DiversifierIndex;
 
     #[test]
     fn custom_confirmation_counts_retain_the_default_shielding_policy() {
@@ -1392,5 +1445,53 @@ mod confirmations_policy_tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn shielded_address_history_excludes_transparent_discovery_records() {
+        let spending_key = UnifiedSpendingKey::new("main", vec![0; 32].into_boxed_slice(), 0)
+            .expect("test spending key should be valid");
+        let viewing_key = spending_key.to_unified_full_viewing_key();
+        let incoming_viewing_key = viewing_key.as_inner().to_unified_incoming_viewing_key();
+        let (default_address, _) = incoming_viewing_key
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .expect("default address should be available");
+
+        let shielded_request = UnifiedAddressRequest::custom(
+            ReceiverRequirement::Require,
+            ReceiverRequirement::Require,
+            ReceiverRequirement::Omit,
+        )
+        .expect("shielded-only request should be valid");
+        let (rotated_address, _) = incoming_viewing_key
+            .find_address(DiversifierIndex::new(), shielded_request)
+            .expect("shielded-only address should be available");
+
+        let mut index = DiversifierIndex::new();
+        let transparent_discovery_address = loop {
+            if let Ok(address) =
+                incoming_viewing_key.address(index, UnifiedAddressRequest::ALLOW_ALL)
+                && address != default_address
+                && address.transparent().is_some()
+            {
+                break address;
+            }
+            index
+                .increment()
+                .expect("test should find a transparent discovery address");
+        };
+
+        assert!(is_user_facing_shielded_address(
+            &default_address,
+            &default_address
+        ));
+        assert!(is_user_facing_shielded_address(
+            &rotated_address,
+            &default_address
+        ));
+        assert!(!is_user_facing_shielded_address(
+            &transparent_discovery_address,
+            &default_address
+        ));
     }
 }
