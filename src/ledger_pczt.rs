@@ -348,6 +348,19 @@ fn convert_ironwood_bundle(
     coin_type: u32,
     fallback_account_index: Option<u32>,
 ) -> Result<Option<IronwoodBundle>, String> {
+    // Ledger's V6 PCZT protocol requires the Ironwood section to be present even
+    // when the transaction has no Ironwood actions. The signer SDK uses `null`
+    // to mean an invalid V6 payload, while a zero-action bundle is serialized as
+    // the canonical empty section.
+    if bundle.actions().is_empty() {
+        return Ok(Some(IronwoodBundle {
+            actions: vec![],
+            flags: 0,
+            value_balance: 0,
+            anchor: vec![0; 32],
+        }));
+    }
+
     let Some(converted) = convert_orchard_bundle(
         bundle,
         branch,
@@ -526,7 +539,9 @@ fn map_orchard_error(pool: &str, error: OrchardError<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{dummy_signing_derivation, format_path};
+    use super::{dummy_signing_derivation, format_path, signing_payload};
+    use pczt::roles::creator::Creator;
+    use zcash_protocol::consensus::BranchId;
 
     #[test]
     fn formats_hardened_paths_for_ledger() {
@@ -542,5 +557,19 @@ mod tests {
         assert_eq!(path, "32'/133'/7'");
         assert_eq!(fingerprint, vec![0; 32]);
         assert!(dummy_signing_derivation(133, 1 << 31).is_err());
+    }
+
+    #[test]
+    fn includes_an_empty_ironwood_bundle_for_v6_transactions() {
+        let pczt = Creator::new(BranchId::Nu6_3.into(), 1, 133, None, None)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let payload = signing_payload(&pczt, Some(0)).unwrap();
+        let ironwood = payload.transaction.ironwood_bundle.unwrap();
+
+        assert!(ironwood.actions.is_empty());
+        assert!(payload.ironwood_signature_indices.is_empty());
     }
 }
