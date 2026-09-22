@@ -589,11 +589,31 @@ pub struct Wallet<W, T> {
     // gRPC client used to connect to a lightwalletd instance for network data
     pub(crate) client: CompactTxStreamerClient<T>,
     pub(crate) network: Network,
+    /// The policy used for balance and status queries. Input selection derives a symmetrical
+    /// policy from its minimum confirmation count.
     confirmations_policy: ConfirmationsPolicy,
     /// Note management: the number of notes to maintain in the wallet
     pub(crate) target_note_count: usize,
     /// Note management: the minimum allowed value for split change amounts
     pub(crate) min_split_output_value: u64,
+}
+
+impl<W, T> Wallet<W, T> {
+    fn query_confirmations_policy(&self) -> ConfirmationsPolicy {
+        self.confirmations_policy
+    }
+
+    fn selection_confirmations_policy(&self) -> ConfirmationsPolicy {
+        let min_confirmations = self
+            .confirmations_policy
+            .trusted()
+            .min(self.confirmations_policy.untrusted());
+
+        ConfirmationsPolicy::new_symmetrical(
+            min_confirmations,
+            self.confirmations_policy.allow_zero_conf_shielding(),
+        )
+    }
 }
 
 impl<W, T: Clone> Clone for Wallet<W, T> {
@@ -621,7 +641,7 @@ where
             .db
             .read()
             .await
-            .spendability_diagnostics(account_id, self.confirmations_policy)?)
+            .spendability_diagnostics(account_id, self.selection_confirmations_policy())?)
     }
 
     // Encodes the MemoryWallet into protobuf bytes
@@ -677,16 +697,13 @@ where
     T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
     <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
 {
-    /// The base policy selected when this wallet instance was constructed.
-    fn confirmations_policy(&self) -> ConfirmationsPolicy {
-        self.confirmations_policy
-    }
-
     pub fn new(db: W, client: T, network: Network) -> Result<Self, Error> {
         Self::new_with_confirmations_policy(db, client, network, ConfirmationsPolicy::default())
     }
 
     /// Creates a wallet with a runtime confirmations policy, not persisted in the database.
+    /// Balance and status queries use this policy as-is; input selection uses a symmetrical policy
+    /// whose trusted and untrusted values are both the minimum of this policy's values.
     pub fn new_with_confirmations_policy(
         db: W,
         client: T,
@@ -1828,7 +1845,7 @@ where
             .db
             .read()
             .await
-            .get_wallet_summary(self.confirmations_policy())?)
+            .get_wallet_summary(self.query_confirmations_policy())?)
     }
 
     /// Get account ID by account name
@@ -2081,7 +2098,7 @@ where
             &input_selector,
             &change_strategy,
             request,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             &spend_policy,
             None,
         ) {
@@ -2102,7 +2119,7 @@ where
                             to_address,
                             memo,
                             MaxSpendMode::MaxSpendable,
-                            self.confirmations_policy(),
+                            self.selection_confirmations_policy(),
                         )
                         .ok();
 
@@ -2260,7 +2277,7 @@ where
         let transparent_balances = db.get_transparent_balances(
             account_id,
             (max_height + 1).into(),
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
         )?;
         let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
 
@@ -2280,7 +2297,7 @@ where
             SHIELDING_THRESHOLD,
             &from_addrs,
             account_id,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
@@ -2385,7 +2402,7 @@ where
             &input_selector,
             &change_strategy,
             request,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             &spend_policy,
             None,
         )
@@ -2469,7 +2486,7 @@ where
         let transparent_balances = db.get_transparent_balances(
             account_id,
             (max_height + 1).into(),
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
         )?;
         let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
 
@@ -2493,7 +2510,7 @@ where
             SHIELDING_THRESHOLD,
             &from_addrs,
             account_id,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
@@ -2711,7 +2728,7 @@ where
             &input_selector,
             &change_strategy,
             request,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             &spend_policy,
             None,
         ) {
@@ -2731,7 +2748,7 @@ where
                         to_address,
                         memo,
                         MaxSpendMode::MaxSpendable,
-                        self.confirmations_policy(),
+                        self.selection_confirmations_policy(),
                     )
                     .ok()
                 } else {
@@ -2854,7 +2871,7 @@ where
             to_address,
             memo,
             MaxSpendMode::MaxSpendable,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
         )
         .map_err(|e| Error::Generic(format!("Failed to propose Orchard migration: {e:?}")))?
         .with_proposed_version(Some(TxVersion::V6));
@@ -2928,7 +2945,7 @@ where
             to_address,
             memo,
             MaxSpendMode::MaxSpendable,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
         )
         .map_err(|e| Error::Generic(format!("Failed to estimate Orchard migration: {e:?}")))?
         .with_proposed_version(Some(TxVersion::V6));
@@ -2970,7 +2987,7 @@ where
         let transparent_balances = db.get_transparent_balances(
             account_id,
             (max_height + 1).into(),
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
         )?;
         let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
 
@@ -2988,7 +3005,7 @@ where
             SHIELDING_THRESHOLD,
             &from_addrs,
             account_id,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
         )
         .map_err(|e| Error::Generic(format!("Error when estimating shielding fee: {e:?}")))?;
@@ -3082,7 +3099,7 @@ where
             &input_selector,
             &change_strategy,
             request,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             &spend_policy,
             None,
         )
@@ -3114,7 +3131,7 @@ where
             to_address,
             memo,
             MaxSpendMode::MaxSpendable,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
         )
         .map_err(|e| Error::Generic(format!("Error when estimating max transfer: {e:?}")))?;
 
@@ -3142,7 +3159,7 @@ where
                 &fee_rule,
                 to_address,
                 memo,
-                self.confirmations_policy(),
+                self.selection_confirmations_policy(),
             )
             .map_err(|e| {
                 Error::Generic(format!(
