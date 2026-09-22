@@ -250,6 +250,43 @@ async fn query_keeps_three_confirmation_external_funds_pending_while_selection_s
         .await
         .unwrap();
     assert_eq!(pczt.transparent().inputs().len(), 1);
+
+    let max = wallet
+        .estimate_pczt_max_transparent_transfer(
+            account_id,
+            zcash_client_backend::address::Address::Transparent(
+                transparent::address::TransparentAddress::PublicKeyHash([43; 20]),
+            )
+            .to_zcash_address(&Network::TestNetwork),
+            None,
+            5_000,
+        )
+        .await;
+    assert!(
+        max.is_err(),
+        "Max must exclude funds still pending under the query policy"
+    );
+}
+
+#[tokio::test]
+async fn max_includes_external_funds_after_query_confirmations_are_reached() {
+    let (db, account_id) = funded_db_at_confirmations(10);
+    let wallet = TestWallet::new(db, client(), Network::TestNetwork).unwrap();
+    let recipient = zcash_client_backend::address::Address::Transparent(
+        transparent::address::TransparentAddress::PublicKeyHash([44; 20]),
+    )
+    .to_zcash_address(&Network::TestNetwork);
+
+    let summary = wallet.get_wallet_summary().await.unwrap().unwrap();
+    let balance = summary.account_balances()[&account_id].unshielded_balance();
+    assert_eq!(balance.spendable_value(), Zatoshis::const_from_u64(200_000));
+    assert_eq!(balance.value_pending_spendability(), Zatoshis::ZERO);
+
+    let (amount, fee) = wallet
+        .estimate_pczt_max_transparent_transfer(account_id, recipient, None, 5_000)
+        .await
+        .unwrap();
+    assert_eq!(amount + fee, 200_000);
 }
 
 #[tokio::test]

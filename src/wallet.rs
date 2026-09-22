@@ -3131,7 +3131,7 @@ where
             to_address,
             memo,
             MaxSpendMode::MaxSpendable,
-            self.selection_confirmations_policy(),
+            self.query_confirmations_policy(),
         )
         .map_err(|e| Error::Generic(format!("Error when estimating max transfer: {e:?}")))?;
 
@@ -3159,7 +3159,7 @@ where
                 &fee_rule,
                 to_address,
                 memo,
-                self.selection_confirmations_policy(),
+                self.query_confirmations_policy(),
             )
             .map_err(|e| {
                 Error::Generic(format!(
