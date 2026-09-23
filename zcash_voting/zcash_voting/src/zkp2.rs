@@ -103,7 +103,7 @@ fn parse_base(name: &str, bytes: &[u8]) -> Result<pallas::Base, VotingError> {
 /// * `gov_comm_rand` - 32-byte VAN blinding factor (from DB).
 /// * `voting_round_id` - 32-byte voting round identifier (from DB, hex-decoded).
 /// * `ea_pk` - 32-byte compressed election authority public key.
-/// * `proposal_id` - Which proposal to vote on (1-15, 1-indexed to match on-chain
+/// * `proposal_id` - Which proposal to vote on (1-50, 1-indexed to match on-chain
 ///   proposal IDs; bit 0 is the circuit's sentinel value and is always rejected).
 /// * `choice` - Vote decision index (0-indexed into the proposal's options).
 /// * `num_options` - Number of options declared for this proposal (2-8).
@@ -134,8 +134,8 @@ pub(crate) fn build_vote_commitment(
     if !(MIN_PROPOSAL_ID..=MAX_PROPOSAL_ID).contains(&proposal_id) {
         return Err(VotingError::InvalidInput {
             message: format!(
-                "proposal_id must be 1..15 (1-indexed, matching on-chain IDs; 0 is the circuit sentinel), got {}",
-                proposal_id
+                "proposal_id must be {}..={} (1-indexed, matching on-chain IDs; 0 is the circuit sentinel), got {}",
+                MIN_PROPOSAL_ID, MAX_PROPOSAL_ID, proposal_id
             ),
         });
     }
@@ -331,7 +331,7 @@ mod tests {
             &[[0u8; 32]; 24],
             0,
             1,
-            65535,
+            voting_circuits::MAX_PROPOSAL_AUTHORITY,
             false,
             &TestReporter,
         )
@@ -361,7 +361,7 @@ mod tests {
                 &[[0; 32]; VOTE_COMM_TREE_DEPTH],
                 0,
                 1,
-                65535,
+                voting_circuits::MAX_PROPOSAL_AUTHORITY,
                 false,
                 &TestReporter,
             )
@@ -386,7 +386,7 @@ mod tests {
             &[[0u8; 32]; 24],
             0,
             1,
-            65535,
+            voting_circuits::MAX_PROPOSAL_AUTHORITY,
             false,
             &TestReporter,
         )
@@ -406,7 +406,7 @@ mod tests {
             &[[0u8; 32]; 24],
             0,
             1,
-            65535,
+            voting_circuits::MAX_PROPOSAL_AUTHORITY,
             false,
             &TestReporter,
         )
@@ -429,7 +429,7 @@ mod tests {
             &[[0u8; 32]; 24],
             0,
             1,
-            65535,
+            voting_circuits::MAX_PROPOSAL_AUTHORITY,
             false,
             &TestReporter,
         )
@@ -446,13 +446,13 @@ mod tests {
             &[0u8; 32],
             &[0u8; 32],
             &[0u8; 32],
-            16, // exceeds MAX_PROPOSAL_ID-1
+            MAX_PROPOSAL_ID + 1,
             0,
             2,
             &[[0u8; 32]; 24],
             0,
             1,
-            65535,
+            voting_circuits::MAX_PROPOSAL_AUTHORITY,
             false,
             &TestReporter,
         )
@@ -475,7 +475,7 @@ mod tests {
             &[[0u8; 32]; 10], // wrong length
             0,
             1,
-            65535,
+            voting_circuits::MAX_PROPOSAL_AUTHORITY,
             false,
             &TestReporter,
         )

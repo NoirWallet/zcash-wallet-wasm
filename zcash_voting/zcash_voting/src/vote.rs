@@ -1996,7 +1996,7 @@ pub fn synthetic_recovery_fixtures(
     drafts: &[DraftVote],
 ) -> Result<Vec<VoteRecoveryBundle>, VotingError> {
     validate_draft_votes(drafts)?;
-    let mut authority = 65_535;
+    let mut authority = voting_circuits::MAX_PROPOSAL_AUTHORITY;
     let mut recoveries = Vec::new();
     for draft in drafts {
         let mut recovery = synthetic_recovery_fixture(
@@ -6174,7 +6174,7 @@ mod tests {
         let hotkey = db.ensure_voting_hotkey(ROUND_ID).unwrap();
         let zkp2 = queries::load_zkp2_inputs(&db.conn(), ROUND_ID, WALLET_ID, 0).unwrap();
         let round_bytes = hex::decode(ROUND_ID).unwrap();
-        let mut authority = 65_535u64;
+        let mut authority = voting_circuits::MAX_PROPOSAL_AUTHORITY;
         let mut recoveries = Vec::new();
         for proposal_id in 1..=3 {
             let transition = crate::zkp2::plan_vote_authority_transition(

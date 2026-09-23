@@ -525,7 +525,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn service_layout_versions_proposals_and_helpers_are_strictly_checked() {
         let mut out_of_range = active();
-        out_of_range["proposals"][0]["id"] = serde_json::json!(16);
+        out_of_range["proposals"][0]["id"] =
+            serde_json::json!(zcash_voting::types::MAX_PROPOSAL_ID + 1);
         assert!(discover(vec![out_of_range], 1500).await.1.is_empty());
         for (key, value) in [
             (
