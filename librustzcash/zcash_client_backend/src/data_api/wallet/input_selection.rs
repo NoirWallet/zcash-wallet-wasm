@@ -1819,6 +1819,7 @@ where
     let recipient_address: Address = recipient
         .clone()
         .convert_if_network(params.network_type())?;
+    let pays_tex = matches!(&recipient_address, Address::Tex(_));
     let (
         payment_pool,
         transparent_output_sizes,
@@ -1906,14 +1907,16 @@ where
                 ));
             }
         }
-        Address::Tex(_) => {
-            return Err(InputSelectorError::Selection(
-                GreedyInputSelectorError::UnsupportedTexAddress,
-            ));
-        }
+        Address::Tex(_) => (
+            PoolType::TRANSPARENT,
+            vec![P2PKH_STANDARD_OUTPUT_SIZE],
+            0usize,
+            0usize,
+            0usize,
+        ),
     };
 
-    let fee = fee_rule
+    let tr0_fee = fee_rule
         .fee_required(
             params,
             BlockHeight::from(target_height),
@@ -1928,34 +1931,75 @@ where
         )
         .map_err(|e| InputSelectorError::Change(ChangeError::StrategyError(e)))?;
 
-    let payment_amount = (input_total - fee)
+    let tr1_fee = if pays_tex {
+        Some(
+            fee_rule
+                .fee_required(
+                    params,
+                    BlockHeight::from(target_height),
+                    [InputSize::Known(P2PKH_STANDARD_INPUT_SIZE)],
+                    [P2PKH_STANDARD_OUTPUT_SIZE],
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+                .map_err(|e| InputSelectorError::Change(ChangeError::StrategyError(e)))?,
+        )
+    } else {
+        None
+    };
+    let total_fee = (tr0_fee + tr1_fee.unwrap_or(Zatoshis::ZERO)).ok_or(
+        InputSelectorError::Selection(GreedyInputSelectorError::Balance(BalanceError::Overflow)),
+    )?;
+
+    let payment_amount = (input_total - total_fee)
         .filter(|amount| *amount > Zatoshis::ZERO)
         .ok_or_else(|| InputSelectorError::InsufficientFunds {
             available: input_total,
-            required: (fee + Zatoshis::const_from_u64(1))
+            required: (total_fee + Zatoshis::const_from_u64(1))
                 .unwrap_or(Zatoshis::const_from_u64(MAX_MONEY)),
         })?;
+    let ephemeral_output_value =
+        tr1_fee.map(|fee| (payment_amount + fee).expect("overflow was checked in the total fee"));
     let payment = Payment::new(recipient, Some(payment_amount), memo, None, None, vec![])
         .map_err(|e| InputSelectorError::Proposal(ProposalError::Zip321(e.with_index(0))))?;
-    let request = TransactionRequest::new(vec![payment])
+    let request = TransactionRequest::new(vec![payment.clone()])
         .map_err(|e| InputSelectorError::Proposal(ProposalError::Zip321(e)))?;
-    let balance = TransactionBalance::new(vec![], fee).map_err(|_| {
+    let tr0_change = ephemeral_output_value
+        .into_iter()
+        .map(ChangeValue::ephemeral_transparent)
+        .collect();
+    let tr0_balance = TransactionBalance::new(tr0_change, tr0_fee).map_err(|_| {
         InputSelectorError::Selection(GreedyInputSelectorError::Balance(BalanceError::Overflow))
     })?;
+    let payment_pools = if pays_tex {
+        BTreeMap::new()
+    } else {
+        BTreeMap::from_iter([(0, payment_pool)])
+    };
 
-    Proposal::single_step(
-        request,
-        BTreeMap::from_iter([(0, payment_pool)]),
-        transparent_inputs,
-        None,
-        anchor_height,
-        balance,
-        fee_rule.clone(),
+    build_proposal(
+        fee_rule,
+        tr0_balance,
         target_height,
+        anchor_height,
         confirmations_policy,
-        false,
+        None,
+        transparent_inputs,
+        request,
+        payment_pools,
         #[cfg(feature = "orchard")]
         ironwood_active_at(params, target_height),
+        ephemeral_output_value
+            .zip(tr1_fee)
+            .map(|(ephemeral_output_value, tr1_fee)| EphemeralStepConfig {
+                ephemeral_output_value,
+                tr1_balance: TransactionBalance::new(vec![], tr1_fee)
+                    .expect("the sum of an empty vector of fee values cannot overflow"),
+                tr1_payments: vec![payment],
+                tr1_payment_pools: BTreeMap::from_iter([(0, PoolType::TRANSPARENT)]),
+            }),
     )
     .map_err(InputSelectorError::Proposal)
 }

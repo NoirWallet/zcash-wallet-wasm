@@ -1066,3 +1066,11 @@ fn transparent_send_max_uses_only_transparent_inputs() {
         MemBlockCache::new(),
     );
 }
+
+#[test]
+fn transparent_send_max_to_tex_builds_zip320_pair() {
+    zcash_client_backend::data_api::testing::transparent::transparent_send_max_to_tex_builds_zip320_pair(
+        TestMemDbFactory::new(),
+        MemBlockCache::new(),
+    );
+}
