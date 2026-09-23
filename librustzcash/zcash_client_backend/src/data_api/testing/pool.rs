@@ -123,7 +123,7 @@ use {
 #[cfg(feature = "pczt")]
 use {
     crate::data_api::wallet::{SignerView, redact_pczt_for_batch_signer, redact_pczt_for_signer},
-    pczt::roles::{combiner::Combiner, prover::Prover, signer::Signer},
+    pczt::roles::{combiner::Combiner, prover::Prover, signer::Signer, verifier::Verifier},
     rand_core::OsRng,
     transparent::builder::TransparentSigningSet,
     zcash_primitives::transaction::builder::{BuildConfig, Builder},
@@ -8285,6 +8285,42 @@ where
         !pczt.ironwood().actions().is_empty(),
         "the PCZT carries an Ironwood bundle for the Ironwood-routed payment",
     );
+
+    // Orchard V3 pairs the real spend and the change output with separate spend halves.
+    // Hardware signers need the account derivation on both of them.
+    Verifier::new(pczt.clone())
+        .with_orchard::<Infallible, _>(|bundle| {
+            let spends_requiring_signatures = bundle
+                .actions()
+                .iter()
+                .filter(|action| action.spend().spend_auth_sig().is_none())
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                spends_requiring_signatures.len(),
+                2,
+                "the real spend and fabricated change spend both require signatures",
+            );
+            assert!(
+                spends_requiring_signatures.iter().any(|action| {
+                    action
+                        .spend()
+                        .value()
+                        .as_ref()
+                        .is_some_and(|value| value.inner() == 0)
+                }),
+                "the PCZT contains the fabricated zero-valued change spend",
+            );
+            assert!(
+                spends_requiring_signatures
+                    .iter()
+                    .all(|action| action.spend().zip32_derivation().is_some()),
+                "every Orchard spend requiring a hardware signature carries its derivation",
+            );
+
+            Ok(())
+        })
+        .expect("the Orchard bundle is valid");
 
     // The Ironwood output carries the wallet's recipient metadata (the only proprietary field set
     // on Ironwood outputs), confirming the bundle is populated during construction rather than left

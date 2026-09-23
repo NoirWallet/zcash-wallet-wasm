@@ -72,7 +72,6 @@ mod browser_fixture;
 
 #[cfg(test)]
 mod confirmations_tests;
-
 const BATCH_SIZE: u32 = 10000;
 
 fn consume_transparent_history_budget(remaining: &mut usize) -> Result<(), Error> {
@@ -150,6 +149,17 @@ fn transparent_transfer_policies() -> (SpendPolicy, TransparentChangePolicy) {
             .with_transparent(TransparentSpendPolicy::any_account_addr()),
         TransparentChangePolicy::TransparentChangeAllowed,
     )
+}
+
+fn hardware_orchard_ovk_policy(ufvk: &UnifiedFullViewingKey) -> Result<OvkPolicy, Error> {
+    let orchard_fvk = ufvk.orchard().ok_or_else(|| {
+        Error::Generic("Hardware transaction review requires an Orchard viewing key".to_owned())
+    })?;
+
+    Ok(OvkPolicy::Custom {
+        external_ovk: orchard_fvk.to_ovk(orchard::keys::Scope::External).into(),
+        internal_ovk: Some(orchard_fvk.to_ovk(orchard::keys::Scope::Internal).into()),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -573,11 +583,31 @@ pub struct Wallet<W, T> {
     // gRPC client used to connect to a lightwalletd instance for network data
     pub(crate) client: CompactTxStreamerClient<T>,
     pub(crate) network: Network,
+    /// The policy used for balance and status queries. Input selection derives a symmetrical
+    /// policy from its minimum confirmation count.
     confirmations_policy: ConfirmationsPolicy,
     /// Note management: the number of notes to maintain in the wallet
     pub(crate) target_note_count: usize,
     /// Note management: the minimum allowed value for split change amounts
     pub(crate) min_split_output_value: u64,
+}
+
+impl<W, T> Wallet<W, T> {
+    fn query_confirmations_policy(&self) -> ConfirmationsPolicy {
+        self.confirmations_policy
+    }
+
+    fn selection_confirmations_policy(&self) -> ConfirmationsPolicy {
+        let min_confirmations = self
+            .confirmations_policy
+            .trusted()
+            .min(self.confirmations_policy.untrusted());
+
+        ConfirmationsPolicy::new_symmetrical(
+            min_confirmations,
+            self.confirmations_policy.allow_zero_conf_shielding(),
+        )
+    }
 }
 
 impl<W, T: Clone> Clone for Wallet<W, T> {
@@ -605,7 +635,7 @@ where
             .db
             .read()
             .await
-            .spendability_diagnostics(account_id, self.confirmations_policy)?)
+            .spendability_diagnostics(account_id, self.selection_confirmations_policy())?)
     }
 
     // Encodes the MemoryWallet into protobuf bytes
@@ -661,11 +691,6 @@ where
     T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
     <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
 {
-    /// The base policy selected when this wallet instance was constructed.
-    fn confirmations_policy(&self) -> ConfirmationsPolicy {
-        self.confirmations_policy
-    }
-
     fn transfer_confirmations_policy(
         &self,
         db: &W,
@@ -675,14 +700,18 @@ where
             .map(validate_expiry_delta_blocks)
             .transpose()?;
         if expiry_delta_blocks.is_some() {
-            ordinary::confirmations_policy(db, &self.network, self.confirmations_policy())?
-                .ok_or_else(|| {
-                    Error::Generic(
-                        "Wallet must be synced to an ordinary anchor for custom expiry".into(),
-                    )
-                })
+            ordinary::confirmations_policy(
+                db,
+                &self.network,
+                self.selection_confirmations_policy(),
+            )?
+            .ok_or_else(|| {
+                Error::Generic(
+                    "Wallet must be synced to an ordinary anchor for custom expiry".into(),
+                )
+            })
         } else {
-            Ok(self.confirmations_policy())
+            Ok(self.selection_confirmations_policy())
         }
     }
 
@@ -691,6 +720,8 @@ where
     }
 
     /// Creates a wallet with a runtime confirmations policy, not persisted in the database.
+    /// Balance and status queries use this policy as-is; input selection uses a symmetrical policy
+    /// whose trusted and untrusted values are both the minimum of this policy's values.
     pub fn new_with_confirmations_policy(
         db: W,
         client: T,
@@ -1829,7 +1860,7 @@ where
             .db
             .read()
             .await
-            .get_wallet_summary(self.confirmations_policy())?)
+            .get_wallet_summary(self.query_confirmations_policy())?)
     }
 
     /// Get account ID by account name
@@ -2275,7 +2306,7 @@ where
         let transparent_balances = db.get_transparent_balances(
             account_id,
             (max_height + 1).into(),
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
         )?;
         let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
 
@@ -2295,7 +2326,7 @@ where
             SHIELDING_THRESHOLD,
             &from_addrs,
             account_id,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
             None,
         )
@@ -2401,7 +2432,7 @@ where
             &input_selector,
             &change_strategy,
             request,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             &spend_policy,
             None,
             None,
@@ -2486,7 +2517,7 @@ where
         let transparent_balances = db.get_transparent_balances(
             account_id,
             (max_height + 1).into(),
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
         )?;
         let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
 
@@ -2510,7 +2541,7 @@ where
             SHIELDING_THRESHOLD,
             &from_addrs,
             account_id,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
             None,
         )
@@ -2573,6 +2604,7 @@ where
             SpendPolicy::default(),
             TransparentChangePolicy::ShieldChange,
             true,
+            false,
         )
         .await
     }
@@ -2597,6 +2629,7 @@ where
             SpendPolicy::default(),
             TransparentChangePolicy::ShieldChange,
             true,
+            false,
         )
         .await
     }
@@ -2620,6 +2653,35 @@ where
             spend_policy,
             transparent_change_policy,
             false,
+            false,
+        )
+        .await
+    }
+
+    /// Creates a transparent-funded PCZT whose shielded outputs can be reviewed by an
+    /// external hardware signer. Ledger derives Orchard review keys from the ZIP-32
+    /// account path, so external Ironwood outputs must use that account's Orchard OVK
+    /// even though ZIP-316 would ordinarily select the transparent OVK for this input set.
+    pub async fn pczt_create_transparent_hardware_dynamic_fee(
+        &self,
+        account_id: AccountId,
+        to_address: ZcashAddress,
+        value: u64,
+        memo: Option<Vec<u8>>,
+        marginal_fee_zats: u64,
+    ) -> Result<Pczt, Error> {
+        let (spend_policy, transparent_change_policy) = transparent_transfer_policies();
+        self.pczt_create_dynamic_fee_impl(
+            account_id,
+            to_address,
+            value,
+            memo,
+            marginal_fee_zats,
+            None,
+            spend_policy,
+            transparent_change_policy,
+            false,
+            true,
         )
         .await
     }
@@ -2645,6 +2707,7 @@ where
             spend_policy,
             transparent_change_policy,
             false,
+            false,
         )
         .await
     }
@@ -2661,6 +2724,7 @@ where
         spend_policy: SpendPolicy,
         transparent_change_policy: TransparentChangePolicy,
         allow_send_max_fallback: bool,
+        hardware_orchard_ovk: bool,
     ) -> Result<Pczt, Error> {
         let change_strategy =
             zcash_client_backend::fees::zip317::MultiOutputChangeStrategy::<_, W>::new(
@@ -2742,6 +2806,16 @@ where
                 }
             }
         };
+        let ovk_policy = if hardware_orchard_ovk {
+            let account = db.get_account(account_id)?.ok_or_else(|| {
+                Error::Generic("Hardware transaction account not found".to_owned())
+            })?;
+            hardware_orchard_ovk_policy(account.ufvk().ok_or_else(|| {
+                Error::Generic("Hardware transaction account has no viewing key".to_owned())
+            })?)?
+        } else {
+            OvkPolicy::Sender
+        };
         let pczt = match expiry_delta_blocks {
             Some(expiry_delta_blocks) => create_pczt_from_proposal::<
                 _,
@@ -2754,7 +2828,7 @@ where
                 &mut *db,
                 &self.network,
                 account_id,
-                OvkPolicy::Sender,
+                ovk_policy.clone(),
                 &proposal,
                 Some(BlockHeight::from(proposal.min_target_height()) + expiry_delta_blocks),
                 zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
@@ -2770,7 +2844,7 @@ where
                 &mut *db,
                 &self.network,
                 account_id,
-                OvkPolicy::Sender,
+                ovk_policy,
                 &proposal,
                 None,
                 zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
@@ -2915,7 +2989,7 @@ where
             to_address,
             memo,
             MaxSpendMode::MaxSpendable,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             &Default::default(),
             None,
         )
@@ -2959,7 +3033,7 @@ where
         let transparent_balances = db.get_transparent_balances(
             account_id,
             (max_height + 1).into(),
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
         )?;
         let from_addrs = transparent_balances.into_keys().collect::<Vec<_>>();
 
@@ -2977,7 +3051,7 @@ where
             SHIELDING_THRESHOLD,
             &from_addrs,
             account_id,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
             None,
         )
@@ -3072,7 +3146,7 @@ where
             &input_selector,
             &change_strategy,
             request,
-            self.confirmations_policy(),
+            self.selection_confirmations_policy(),
             &spend_policy,
             None,
             None,
@@ -3105,7 +3179,7 @@ where
             to_address,
             memo,
             MaxSpendMode::MaxSpendable,
-            self.confirmations_policy(),
+            self.query_confirmations_policy(),
             &Default::default(),
             None,
         )
@@ -3135,7 +3209,7 @@ where
                 &fee_rule,
                 to_address,
                 memo,
-                self.confirmations_policy(),
+                self.query_confirmations_policy(),
             )
             .map_err(|e| {
                 Error::Generic(format!(
@@ -3313,8 +3387,9 @@ mod transparent_history_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        TransferEstimate, TransferFundingSource, TransferOverallStatus, TransferSubmissionStatus,
-        allow_exact_send_max_fallback, dynamic_zip317_fee_rule, submit_transfer_transactions_with,
+        OvkPolicy, TransferEstimate, TransferFundingSource, TransferOverallStatus,
+        TransferSubmissionStatus, UnifiedSpendingKey, allow_exact_send_max_fallback,
+        dynamic_zip317_fee_rule, hardware_orchard_ovk_policy, submit_transfer_transactions_with,
         transaction_request_is_due, transaction_status_from_raw_height, transfer_expiry_height,
         transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
     };
@@ -3391,7 +3466,8 @@ mod tests {
             db: Arc::new(tokio::sync::RwLock::new(db)),
             client: super::CompactTxStreamerClient::new(PendingHistory(request_started.clone())),
             network,
-            confirmations_policy: Default::default(),
+            confirmations_policy:
+                zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default(),
             target_note_count: 4,
             min_split_output_value: 10_000_000,
         };
@@ -3432,7 +3508,6 @@ mod tests {
         )));
         assert!(!transaction_request_is_due(Some(future)));
     }
-
     #[test]
     fn raw_transaction_height_maps_to_wallet_status() {
         let txid = txid(9);
@@ -3655,6 +3730,32 @@ mod tests {
         );
         assert!("mixed".parse::<TransferFundingSource>().is_err());
         assert!("Shielded".parse::<TransferFundingSource>().is_err());
+    }
+
+    #[test]
+    fn hardware_review_policy_uses_orchard_ovks() {
+        let ufvk =
+            UnifiedSpendingKey::from_seed(&Network::MainNetwork, &[17; 32], zip32::AccountId::ZERO)
+                .unwrap()
+                .to_unified_full_viewing_key();
+        let orchard_fvk = ufvk.orchard().unwrap();
+
+        match hardware_orchard_ovk_policy(&ufvk).unwrap() {
+            OvkPolicy::Custom {
+                external_ovk,
+                internal_ovk,
+            } => {
+                assert_eq!(
+                    external_ovk.as_ref(),
+                    orchard_fvk.to_ovk(orchard::keys::Scope::External).as_ref()
+                );
+                assert_eq!(
+                    internal_ovk.unwrap().as_ref(),
+                    orchard_fvk.to_ovk(orchard::keys::Scope::Internal).as_ref()
+                );
+            }
+            policy => panic!("unexpected hardware review policy: {policy:?}"),
+        }
     }
 
     #[test]

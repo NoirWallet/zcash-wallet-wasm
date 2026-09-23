@@ -81,7 +81,7 @@ pub fn complete_bundle_for_stored_network(
     {
         return canonical.clone();
     }
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
     let wire: zcash_voting::wire::DelegationSubmissionWire =
         serde_json::from_slice(canonical.json_bytes()).unwrap();
     let decode = |value: &str| STANDARD.decode(value).unwrap();

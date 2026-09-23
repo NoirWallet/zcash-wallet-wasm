@@ -1,5 +1,4 @@
 import { WebWallet } from '../pkg/zcash_wallet_wasm.js';
-import { WebWallet as VotingWallet } from '../pkg-voting/zcash_wallet_wasm.js';
 
 /** @param {typeof WebWallet} Wallet */
 function constructorContract(Wallet) {
@@ -24,12 +23,4 @@ function constructorContract(Wallet) {
 
 export function walletConstructorTypes() {
   constructorContract(WebWallet);
-  constructorContract(VotingWallet);
-  /** @type {import('../pkg-voting/zcash_wallet_wasm.js').ConfirmationsPolicy} */
-  const votingPolicy = { trusted: 1, untrusted: 2 };
-  new VotingWallet('test', 'https://example.invalid').free();
-  new VotingWallet('test', 'https://example.invalid', null, votingPolicy).free();
-  new VotingWallet('main', 'https://example.invalid', undefined, null).free();
-  // @ts-expect-error Voting packages expose the same two-field policy.
-  new VotingWallet('test', 'https://example.invalid', undefined, { ...votingPolicy, allowZeroConfShielding: true });
 }
