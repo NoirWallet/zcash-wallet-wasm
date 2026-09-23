@@ -2549,6 +2549,64 @@ where
     assert!(shielded_step.balance().proposed_change().is_empty());
 }
 
+pub fn transparent_send_max_to_tex_builds_zip320_pair<DSF>(dsf: DSF, cache: impl TestCache)
+where
+    DSF: DataStoreFactory,
+{
+    use std::convert::Infallible;
+
+    let input_value = Zatoshis::const_from_u64(100_000);
+    let (mut st, account, outpoint) = setup_transparent_only_account(dsf, cache, input_value);
+    let network = *st.network();
+    let tex_recipient = Address::Tex([7u8; 20]).to_zcash_address(&network);
+
+    let proposal = propose_send_max_transparent_transfer::<_, _, _, Infallible>(
+        st.wallet_mut(),
+        &network,
+        account.id(),
+        &StandardFeeRule::Zip317,
+        tex_recipient.clone(),
+        None,
+        ConfirmationsPolicy::MIN,
+    )
+    .expect("transparent send-max proposal to a TEX recipient should succeed");
+
+    let steps = proposal.steps().iter().collect::<Vec<_>>();
+    assert_eq!(steps.len(), 2);
+
+    let tr0 = steps[0];
+    assert_eq!(tr0.transparent_inputs().len(), 1);
+    assert_eq!(tr0.transparent_inputs()[0].outpoint(), &outpoint);
+    assert!(tr0.shielded_inputs().is_none());
+    assert!(tr0.transaction_request().payments().is_empty());
+    assert_eq!(
+        tr0.balance().fee_required(),
+        Zatoshis::const_from_u64(10_000),
+    );
+    assert_eq!(tr0.balance().proposed_change().len(), 1);
+    assert!(tr0.balance().proposed_change()[0].is_ephemeral());
+    assert_eq!(
+        tr0.balance().proposed_change()[0].value(),
+        Zatoshis::const_from_u64(90_000),
+    );
+
+    let tr1 = steps[1];
+    assert!(tr1.transparent_inputs().is_empty());
+    assert!(tr1.shielded_inputs().is_none());
+    assert_eq!(tr1.prior_step_inputs().len(), 1);
+    assert_eq!(
+        tr1.balance().fee_required(),
+        Zatoshis::const_from_u64(10_000),
+    );
+    let tex_payment = tr1
+        .transaction_request()
+        .payments()
+        .get(&0)
+        .expect("the second step should contain the TEX payment");
+    assert_eq!(tex_payment.recipient_address(), &tex_recipient);
+    assert_eq!(tex_payment.amount(), Some(Zatoshis::const_from_u64(80_000)),);
+}
+
 /// Tests that [`WalletWrite::reserve_next_n_internal_addresses`] reserves sequential
 /// internal-scope (change) addresses, that reservation observes the internal-scope gap
 /// limit, and that internal-scope reservations are accounted independently of
