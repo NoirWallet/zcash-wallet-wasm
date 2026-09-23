@@ -1,0 +1,10 @@
+[package]
+name = "tonic-web-wasm-client-compat"
+version = "0.8.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+http-body = "1"
+tonic = { version = "0.14", default-features = false, features = ["codegen"] }
+tonic-web-wasm-client-upstream = { package = "tonic-web-wasm-client", version = "=0.8.0" }
