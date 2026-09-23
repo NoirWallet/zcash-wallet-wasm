@@ -55,7 +55,11 @@ impl TryFrom<ConfirmationsPolicyOptions> for ConfirmationsPolicy {
 
 #[wasm_bindgen(typescript_custom_section)]
 const CONFIRMATIONS_POLICY_TYPES: &str = r#"
-/** Override confirmation counts; shielding retains the default policy. */
+/**
+ * Configure confirmation counts for balance and status queries.
+ * Input selection uses the smaller count for both trusted and untrusted funds.
+ * Shielding retains the default zero-confirmation setting.
+ */
 export interface ConfirmationsPolicy {
     /** Positive uint32; must not exceed untrusted. */
     trusted: number;
