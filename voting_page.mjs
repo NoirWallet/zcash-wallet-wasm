@@ -270,7 +270,7 @@ bind('clear', async () => {
 $('reload').onclick = () => location.reload();
 addEventListener('pagehide', () => { storage?.close(); $('mnemonic').value = ''; $('passphrase').value = ''; });
 try {
-    api = await import('./pkg-voting/zcash_wallet_wasm.js');
+    api = await import('./pkg/zcash_wallet_wasm.js');
     await api.default();
     if (api.initThreadPool)
         await api.initThreadPool(Math.max(1, Math.min(navigator.hardwareConcurrency || 2, 4)));

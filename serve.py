@@ -70,7 +70,7 @@ class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
         # Special case: when Worker requests /pkg/, serve the main module
         # This is needed because wasm-bindgen-rayon uses import('../../..')
         # which resolves to /pkg/ instead of /pkg/zcash_wallet_wasm.js
-        if self.path.rstrip('/') in ('/pkg', '/pkg-voting', '/pkg-voting-sequential', '/pkg-voting-proof', '/pkg-voting-proof-sequential'):
+        if self.path.rstrip('/') in ('/pkg', '/pkg-sequential', '/pkg-proof', '/pkg-proof-sequential'):
             self.path = self.path.rstrip('/') + '/zcash_wallet_wasm.js'
             print(f"    ↪ Redirecting to {self.path}")
 

@@ -9,7 +9,7 @@ try {
   for(const file of ['wallet.bin','voting.bin']) await page.route(`**/synthetic-fixture/${file}`,route=>route.fulfill({path:`${fixtureDir}/${file}`,contentType:'application/octet-stream'}));
   await page.goto(origin);
   const result=await page.evaluate(async metadata=>{
-    const api=await import('/pkg-voting/zcash_wallet_wasm.js');await api.default();await api.initThreadPool(2);
+    const api=await import('/pkg/zcash_wallet_wasm.js');await api.default();await api.initThreadPool(2);
     const {VotingStorage}=await import('/voting_storage.mjs');
     const bytes=async name=>new Uint8Array(await (await fetch(`/synthetic-fixture/${name}`)).arrayBuffer());
     const walletBytes=await bytes('wallet.bin'),votingBytes=await bytes('voting.bin');

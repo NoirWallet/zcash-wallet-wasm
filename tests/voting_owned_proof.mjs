@@ -1,7 +1,7 @@
 import { chromium } from '@playwright/test';
 const origin=process.argv[2]??'http://127.0.0.1:8000';
 const packages=process.argv.slice(3);
-if(!packages.length) packages.push('pkg-voting-proof-sequential','pkg-voting-proof');
+if(!packages.length) packages.push('pkg-proof-sequential','pkg-proof');
 const browser=await chromium.launch({...(process.env.CHROME?{executablePath:process.env.CHROME}:{}),args:['--no-sandbox']});
 try {
   for(const name of packages) {
