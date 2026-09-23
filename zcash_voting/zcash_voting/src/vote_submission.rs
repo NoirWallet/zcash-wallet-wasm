@@ -625,13 +625,7 @@ impl VotingDb {
             return Err(invalid());
         }
         if !replay {
-            validate_confirmation_positions(
-                &tx,
-                &wallet_id,
-                round_id,
-                bundle_index,
-                &parsed,
-            )?;
+            validate_confirmation_positions(&tx, &wallet_id, round_id, bundle_index, &parsed)?;
         }
         for (proposal_id, vc_position) in attempt
             .canonical
@@ -847,12 +841,10 @@ impl VotingDb {
                         || vc_positions.len() != attempt.canonical.proposal_ids.len()
                         || u64::from(van) <= tree_frontier
                         || u64::from(van) >= (1u64 << vote_commitment_tree::TREE_DEPTH)
-                        || vc_positions
-                            .iter()
-                            .any(|position| {
-                                *position <= u64::from(van)
-                                    || *position >= (1u64 << vote_commitment_tree::TREE_DEPTH)
-                            })
+                        || vc_positions.iter().any(|position| {
+                            *position <= u64::from(van)
+                                || *position >= (1u64 << vote_commitment_tree::TREE_DEPTH)
+                        })
                         || vc_positions
                             .windows(2)
                             .any(|positions| positions[0] >= positions[1])
@@ -1168,14 +1160,11 @@ fn validate_confirmation_positions(
     let tree_limit = 1u64 << vote_commitment_tree::TREE_DEPTH;
     if u64::from(parsed.van_position) >= tree_limit
         || parsed.vc_positions.is_empty()
-        || parsed
-            .vc_positions
-            .iter()
-            .any(|position| {
-                *position <= u64::from(parsed.van_position)
-                    || *position >= tree_limit
-                    || *position > i64::MAX as u64
-            })
+        || parsed.vc_positions.iter().any(|position| {
+            *position <= u64::from(parsed.van_position)
+                || *position >= tree_limit
+                || *position > i64::MAX as u64
+        })
         || parsed
             .vc_positions
             .windows(2)

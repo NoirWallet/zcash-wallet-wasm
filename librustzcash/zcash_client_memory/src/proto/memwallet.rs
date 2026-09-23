@@ -530,6 +530,11 @@ pub struct Account {
     /// map from internal child index to transparent change address
     #[prost(message, repeated, tag = "12")]
     pub internal_addresses: ::prost::alloc::vec::Vec<InternalAddressRecord>,
+    /// recovery lookahead and successful history-query cursors; not address reservations
+    #[prost(message, repeated, tag = "13")]
+    pub internal_address_discovery: ::prost::alloc::vec::Vec<
+        InternalAddressDiscoveryRecord,
+    >,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AccountBirthday {
@@ -582,6 +587,15 @@ pub struct InternalAddressRecord {
     pub address: ::prost::alloc::string::String,
     #[prost(uint32, tag = "3")]
     pub exposed_at_height: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InternalAddressDiscoveryRecord {
+    #[prost(uint32, tag = "1")]
+    pub index: u32,
+    #[prost(string, tag = "2")]
+    pub address: ::prost::alloc::string::String,
+    #[prost(uint32, optional, tag = "3")]
+    pub checked_height: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ChainState {

@@ -8,7 +8,10 @@ use zcash_primitives::block::BlockHash;
 
 type TestWallet = Wallet<MemoryWalletDb<Network>, tonic_web_wasm_client::Client>;
 
-fn funded_db() -> (MemoryWalletDb<Network>, crate::bindgen::wallet::AccountId) {
+fn funded_db_at_confirmations(
+    confirmations: u32,
+) -> (MemoryWalletDb<Network>, crate::bindgen::wallet::AccountId) {
+    assert!(confirmations > 0);
     let network = Network::TestNetwork;
     let mut db = MemoryWalletDb::new(network, PRUNING_DEPTH);
     let height = BlockHeight::from_u32(3_000_000);
@@ -38,7 +41,7 @@ fn funded_db() -> (MemoryWalletDb<Network>, crate::bindgen::wallet::AccountId) {
         .transparent()
         .unwrap();
     let mined = height + 100;
-    db.update_chain_tip(mined + 1).unwrap();
+    db.update_chain_tip(mined + confirmations - 1).unwrap();
     let output = WalletTransparentOutput::from_parts(
         OutPoint::new([41; 32], 0),
         TxOut::new(Zatoshis::const_from_u64(200_000), address.script().into()),
@@ -57,6 +60,10 @@ fn funded_db() -> (MemoryWalletDb<Network>, crate::bindgen::wallet::AccountId) {
             .unwrap();
     }
     (db, account_id)
+}
+
+fn funded_db() -> (MemoryWalletDb<Network>, crate::bindgen::wallet::AccountId) {
+    funded_db_at_confirmations(2)
 }
 
 fn client() -> tonic_web_wasm_client::Client {
@@ -143,11 +150,15 @@ async fn custom_policy_makes_two_confirmation_external_funds_spendable_in_clones
         let balance = summary.account_balances()[&account_id].unshielded_balance();
         assert_eq!(balance.spendable_value(), Zatoshis::const_from_u64(200_000));
         assert_eq!(balance.value_pending_spendability(), Zatoshis::ZERO);
-        let db = wallet.db.read().await;
-        let policy = wallet.transfer_confirmations_policy(&*db, None).unwrap();
-        assert_eq!(u32::from(policy.trusted()), 1);
-        assert_eq!(u32::from(policy.untrusted()), 2);
-        assert!(!policy.allow_zero_conf_shielding());
+        let query_policy = wallet.query_confirmations_policy();
+        assert_eq!(u32::from(query_policy.trusted()), 1);
+        assert_eq!(u32::from(query_policy.untrusted()), 2);
+        assert!(!query_policy.allow_zero_conf_shielding());
+
+        let selection_policy = wallet.selection_confirmations_policy();
+        assert_eq!(u32::from(selection_policy.trusted()), 1);
+        assert_eq!(u32::from(selection_policy.untrusted()), 1);
+        assert!(!selection_policy.allow_zero_conf_shielding());
     }
 }
 
@@ -195,6 +206,87 @@ async fn default_policy_keeps_two_confirmation_external_funds_pending() {
         balance.value_pending_spendability(),
         Zatoshis::const_from_u64(200_000)
     );
+}
+
+#[tokio::test]
+async fn query_keeps_three_confirmation_external_funds_pending_while_selection_spends_them() {
+    let (db, account_id) = funded_db_at_confirmations(3);
+    let wallet = TestWallet::new(db, client(), Network::TestNetwork).unwrap();
+
+    let query_policy = wallet.query_confirmations_policy();
+    assert_eq!(u32::from(query_policy.trusted()), 3);
+    assert_eq!(u32::from(query_policy.untrusted()), 10);
+    let selection_policy = wallet.selection_confirmations_policy();
+    assert_eq!(u32::from(selection_policy.trusted()), 3);
+    assert_eq!(u32::from(selection_policy.untrusted()), 3);
+
+    let summary = wallet.get_wallet_summary().await.unwrap().unwrap();
+    let balance = summary.account_balances()[&account_id].unshielded_balance();
+    assert_eq!(balance.spendable_value(), Zatoshis::ZERO);
+    assert_eq!(
+        balance.value_pending_spendability(),
+        Zatoshis::const_from_u64(200_000)
+    );
+
+    let recipient = zcash_client_backend::address::Address::Transparent(
+        transparent::address::TransparentAddress::PublicKeyHash([42; 20]),
+    )
+    .to_zcash_address(&Network::TestNetwork);
+    assert_eq!(
+        wallet
+            .estimate_pczt_transparent_transfer_fee(
+                account_id,
+                recipient.clone(),
+                100_000,
+                None,
+                5_000,
+            )
+            .await
+            .unwrap(),
+        10_000
+    );
+    let pczt = wallet
+        .pczt_create_transparent_dynamic_fee(account_id, recipient, 100_000, None, 5_000)
+        .await
+        .unwrap();
+    assert_eq!(pczt.transparent().inputs().len(), 1);
+
+    let max = wallet
+        .estimate_pczt_max_transparent_transfer(
+            account_id,
+            zcash_client_backend::address::Address::Transparent(
+                transparent::address::TransparentAddress::PublicKeyHash([43; 20]),
+            )
+            .to_zcash_address(&Network::TestNetwork),
+            None,
+            5_000,
+        )
+        .await;
+    assert!(
+        max.is_err(),
+        "Max must exclude funds still pending under the query policy"
+    );
+}
+
+#[tokio::test]
+async fn max_includes_external_funds_after_query_confirmations_are_reached() {
+    let (db, account_id) = funded_db_at_confirmations(10);
+    let wallet = TestWallet::new(db, client(), Network::TestNetwork).unwrap();
+    let recipient = zcash_client_backend::address::Address::Transparent(
+        transparent::address::TransparentAddress::PublicKeyHash([44; 20]),
+    )
+    .to_zcash_address(&Network::TestNetwork);
+
+    let summary = wallet.get_wallet_summary().await.unwrap().unwrap();
+    let balance = summary.account_balances()[&account_id].unshielded_balance();
+    assert_eq!(balance.spendable_value(), Zatoshis::const_from_u64(200_000));
+    assert_eq!(balance.value_pending_spendability(), Zatoshis::ZERO);
+
+    let (amount, fee) = wallet
+        .estimate_pczt_max_transparent_transfer(account_id, recipient, None, 5_000)
+        .await
+        .unwrap();
+    assert_eq!(amount + fee, 200_000);
 }
 
 #[tokio::test]
