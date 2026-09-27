@@ -189,8 +189,9 @@ fn fixture() -> (
         db: Arc::new(tokio::sync::RwLock::new(db)),
         client: super::CompactTxStreamerClient::new(HistoryRpc::default()),
         network,
-        confirmations_policy:
-            zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default(),
+        confirmations_policy: zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default(
+        ),
+        compact_block_cdn: None,
         target_note_count: 4,
         min_split_output_value: 10_000_000,
     };

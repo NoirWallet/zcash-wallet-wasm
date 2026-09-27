@@ -20,7 +20,10 @@ use {
             },
             scanning::{ScanPriority, ScanRange},
         },
-        proto::service::{self, BlockId, compact_tx_streamer_client::CompactTxStreamerClient},
+        proto::{
+            compact_formats::CompactBlock,
+            service::{self, BlockId, compact_tx_streamer_client::CompactTxStreamerClient},
+        },
         scanning::ScanError,
     },
     futures_util::TryStreamExt,
@@ -33,7 +36,7 @@ use {
         codegen::{Body, Bytes, StdError},
     },
     tracing::{debug, info},
-    zcash_primitives::merkle_tree::HashSer,
+    zcash_primitives::{block::BlockHash, merkle_tree::HashSer},
     zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters},
 };
 
@@ -54,6 +57,49 @@ use {
 
 #[cfg(feature = "sync-decryptor")]
 pub mod decryptor;
+
+/// Retrieves compact blocks for synchronization.
+///
+/// The lightwalletd client is passed to the source so alternative sources can
+/// fall back without duplicating the remaining synchronization transport.
+#[cfg(feature = "sync")]
+#[async_trait::async_trait(?Send)]
+pub trait CompactBlockSource<ChT> {
+    async fn get_block_range(
+        &mut self,
+        client: &mut CompactTxStreamerClient<ChT>,
+        range: service::BlockRange,
+        expected_prev_hash: Option<BlockHash>,
+    ) -> Result<Vec<CompactBlock>, tonic::Status>;
+}
+
+/// A compact block source that always uses lightwalletd.
+#[cfg(feature = "sync")]
+pub struct LightwalletdBlockSource;
+
+#[cfg(feature = "sync")]
+#[async_trait::async_trait(?Send)]
+impl<ChT> CompactBlockSource<ChT> for LightwalletdBlockSource
+where
+    ChT: GrpcService<TonicBody>,
+    ChT::Error: Into<StdError>,
+    ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
+    async fn get_block_range(
+        &mut self,
+        client: &mut CompactTxStreamerClient<ChT>,
+        range: service::BlockRange,
+        _expected_prev_hash: Option<BlockHash>,
+    ) -> Result<Vec<CompactBlock>, tonic::Status> {
+        client
+            .get_block_range(range)
+            .await?
+            .into_inner()
+            .try_collect()
+            .await
+    }
+}
 
 /// Scans the chain until the wallet is up-to-date.
 #[cfg(feature = "sync")]
@@ -77,6 +123,41 @@ where
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
+    run_with_block_source(
+        client,
+        &mut LightwalletdBlockSource,
+        params,
+        db_cache,
+        db_data,
+        batch_size,
+    )
+    .await
+}
+
+/// Scans the chain using an injectable compact block source.
+#[cfg(feature = "sync")]
+pub async fn run_with_block_source<P, ChT, CaT, DbT, BlT>(
+    client: &mut CompactTxStreamerClient<ChT>,
+    block_source: &mut BlT,
+    params: &P,
+    db_cache: &CaT,
+    db_data: &mut DbT,
+    batch_size: u32,
+) -> Result<(), Error<CaT::Error, <DbT as WalletRead>::Error, <DbT as WalletCommitmentTrees>::Error>>
+where
+    P: Parameters + Send + 'static,
+    ChT: GrpcService<TonicBody>,
+    ChT::Error: Into<StdError>,
+    ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
+    CaT: BlockCache,
+    CaT::Error: std::error::Error + Send + Sync + 'static,
+    DbT: WalletWrite + WalletCommitmentTrees,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+    <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
+    <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
+    BlT: CompactBlockSource<ChT>,
+{
     let mut tip_height = update_chain_tip(client, db_data).await?;
     let mut ironwood_active = params.is_nu_active(NetworkUpgrade::Nu6_3, tip_height);
 
@@ -84,7 +165,7 @@ where
     // 2) Pass the commitment tree data to the database.
     update_subtree_roots(client, params, tip_height, db_data).await?;
 
-    while running(client, params, db_cache, db_data, batch_size).await? {
+    while running(client, block_source, params, db_cache, db_data, batch_size).await? {
         tip_height = update_chain_tip(client, db_data).await?;
         let next_ironwood_active = params.is_nu_active(NetworkUpgrade::Nu6_3, tip_height);
         if next_ironwood_active && !ironwood_active {
@@ -125,9 +206,47 @@ where
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
+    run_next_batch_with_block_source(
+        client,
+        &mut LightwalletdBlockSource,
+        params,
+        db_cache,
+        db_data,
+        batch_size,
+    )
+    .await
+}
+
+/// Syncs a single batch using an injectable compact block source.
+#[cfg(feature = "sync")]
+pub async fn run_next_batch_with_block_source<P, ChT, CaT, DbT, BlT>(
+    client: &mut CompactTxStreamerClient<ChT>,
+    block_source: &mut BlT,
+    params: &P,
+    db_cache: &CaT,
+    db_data: &mut DbT,
+    batch_size: u32,
+) -> Result<
+    bool,
+    Error<CaT::Error, <DbT as WalletRead>::Error, <DbT as WalletCommitmentTrees>::Error>,
+>
+where
+    P: Parameters + Send + 'static,
+    ChT: GrpcService<TonicBody>,
+    ChT::Error: Into<StdError>,
+    ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
+    CaT: BlockCache,
+    CaT::Error: std::error::Error + Send + Sync + 'static,
+    DbT: WalletWrite + WalletCommitmentTrees,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+    <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
+    <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
+    BlT: CompactBlockSource<ChT>,
+{
     let tip_height = update_chain_tip(client, db_data).await?;
     update_subtree_roots(client, params, tip_height, db_data).await?;
-    running_single_batch(client, params, db_cache, db_data, batch_size).await
+    running_single_batch(client, block_source, params, db_cache, db_data, batch_size).await
 }
 
 #[cfg(feature = "sync")]
@@ -159,13 +278,53 @@ where
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
-    let tip_height = update_chain_tip(client, db_data).await?;
-    update_subtree_roots(client, params, tip_height, db_data).await?;
-    running_single_batch_optimized(client, params, db_cache, db_data, batch_size).await
+    run_next_batch_optimized_with_block_source(
+        client,
+        &mut LightwalletdBlockSource,
+        params,
+        db_cache,
+        db_data,
+        batch_size,
+    )
+    .await
 }
 
-async fn running_single_batch<P, ChT, CaT, DbT, TrErr>(
+/// Syncs a single optimized batch using an injectable compact block source.
+#[cfg(feature = "sync")]
+pub async fn run_next_batch_optimized_with_block_source<P, ChT, CaT, DbT, BlT>(
     client: &mut CompactTxStreamerClient<ChT>,
+    block_source: &mut BlT,
+    params: &P,
+    db_cache: &CaT,
+    db_data: &mut DbT,
+    batch_size: u32,
+) -> Result<
+    bool,
+    Error<CaT::Error, <DbT as WalletRead>::Error, <DbT as WalletCommitmentTrees>::Error>,
+>
+where
+    P: Parameters + Send + 'static,
+    ChT: GrpcService<TonicBody>,
+    ChT::Error: Into<StdError>,
+    ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
+    CaT: BlockCache,
+    CaT::Error: std::error::Error + Send + Sync + 'static,
+    DbT: WalletWrite + WalletCommitmentTrees,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+    <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
+    <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
+    BlT: CompactBlockSource<ChT>,
+{
+    let tip_height = update_chain_tip(client, db_data).await?;
+    update_subtree_roots(client, params, tip_height, db_data).await?;
+    running_single_batch_optimized(client, block_source, params, db_cache, db_data, batch_size)
+        .await
+}
+
+async fn running_single_batch<P, ChT, CaT, DbT, TrErr, BlT>(
+    client: &mut CompactTxStreamerClient<ChT>,
+    block_source: &mut BlT,
     params: &P,
     db_cache: &CaT,
     db_data: &mut DbT,
@@ -182,6 +341,7 @@ where
     DbT: WalletWrite,
     DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
+    BlT: CompactBlockSource<ChT>,
 {
     #[cfg(feature = "transparent-inputs")]
     for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
@@ -202,9 +362,16 @@ where
         match scan_ranges.first() {
             Some(scan_range) if scan_range.priority() == ScanPriority::Verify => {
                 did_work = true;
-                download_blocks(client, db_cache, scan_range).await?;
                 let chain_state =
                     download_chain_state(client, scan_range.block_range().start - 1).await?;
+                download_blocks(
+                    client,
+                    block_source,
+                    db_cache,
+                    scan_range,
+                    Some(chain_state.block_hash()),
+                )
+                .await?;
                 let scan_ranges_updated =
                     scan_blocks(params, db_cache, db_data, &chain_state, scan_range).await?;
                 db_cache
@@ -247,9 +414,16 @@ where
 
     match first_batch {
         Some(scan_range) => {
-            download_blocks(client, db_cache, &scan_range).await?;
             let chain_state =
                 download_chain_state(client, scan_range.block_range().start - 1).await?;
+            download_blocks(
+                client,
+                block_source,
+                db_cache,
+                &scan_range,
+                Some(chain_state.block_hash()),
+            )
+            .await?;
             scan_blocks(params, db_cache, db_data, &chain_state, &scan_range).await?;
             db_cache.delete(scan_range).await.map_err(Error::Cache)?;
             Ok(true)
@@ -259,8 +433,9 @@ where
 }
 
 #[cfg(feature = "sync")]
-async fn running_single_batch_optimized<P, ChT, CaT, DbT, TrErr>(
+async fn running_single_batch_optimized<P, ChT, CaT, DbT, TrErr, BlT>(
     client: &mut CompactTxStreamerClient<ChT>,
+    block_source: &mut BlT,
     params: &P,
     db_cache: &CaT,
     db_data: &mut DbT,
@@ -277,6 +452,7 @@ where
     DbT: WalletWrite,
     DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
+    BlT: CompactBlockSource<ChT>,
 {
     #[cfg(feature = "transparent-inputs")]
     for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
@@ -297,9 +473,16 @@ where
         match scan_ranges.first() {
             Some(scan_range) if scan_range.priority() == ScanPriority::Verify => {
                 did_work = true;
-                download_blocks(client, db_cache, scan_range).await?;
                 let chain_state =
                     download_chain_state(client, scan_range.block_range().start - 1).await?;
+                download_blocks(
+                    client,
+                    block_source,
+                    db_cache,
+                    scan_range,
+                    Some(chain_state.block_hash()),
+                )
+                .await?;
                 let scan_ranges_updated =
                     scan_blocks_optimized(params, db_cache, db_data, &chain_state, scan_range)
                         .await?;
@@ -343,9 +526,16 @@ where
 
     match first_batch {
         Some(scan_range) => {
-            download_blocks(client, db_cache, &scan_range).await?;
             let chain_state =
                 download_chain_state(client, scan_range.block_range().start - 1).await?;
+            download_blocks(
+                client,
+                block_source,
+                db_cache,
+                &scan_range,
+                Some(chain_state.block_hash()),
+            )
+            .await?;
             scan_blocks_optimized(params, db_cache, db_data, &chain_state, &scan_range).await?;
             db_cache.delete(scan_range).await.map_err(Error::Cache)?;
             Ok(true)
@@ -354,8 +544,9 @@ where
     }
 }
 
-async fn running<P, ChT, CaT, DbT, TrErr>(
+async fn running<P, ChT, CaT, DbT, TrErr, BlT>(
     client: &mut CompactTxStreamerClient<ChT>,
+    block_source: &mut BlT,
     params: &P,
     db_cache: &CaT,
     db_data: &mut DbT,
@@ -372,6 +563,7 @@ where
     DbT: WalletWrite,
     DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
+    BlT: CompactBlockSource<ChT>,
 {
     // 3) Download chain tip metadata from lightwalletd
     // 4) Notify the wallet of the updated chain tip.
@@ -406,10 +598,16 @@ where
             Some(scan_range) if scan_range.priority() == ScanPriority::Verify => {
                 // Download the blocks in `scan_range` into the block source,
                 // overwriting any existing blocks in this range.
-                download_blocks(client, db_cache, scan_range).await?;
-
                 let chain_state =
                     download_chain_state(client, scan_range.block_range().start - 1).await?;
+                download_blocks(
+                    client,
+                    block_source,
+                    db_cache,
+                    scan_range,
+                    Some(chain_state.block_hash()),
+                )
+                .await?;
 
                 // Scan the downloaded blocks and check for scanning errors that
                 // indicate the wallet's chain tip is out of sync with blockchain
@@ -461,9 +659,15 @@ where
         })
     }) {
         // Download the blocks in `scan_range` into the block source.
-        download_blocks(client, db_cache, &scan_range).await?;
-
         let chain_state = download_chain_state(client, scan_range.block_range().start - 1).await?;
+        download_blocks(
+            client,
+            block_source,
+            db_cache,
+            &scan_range,
+            Some(chain_state.block_hash()),
+        )
+        .await?;
 
         // Scan the downloaded blocks.
         let scan_ranges_updated =
@@ -598,10 +802,12 @@ where
 }
 
 #[cfg(feature = "sync")]
-async fn download_blocks<ChT, CaT, DbErr, TrErr>(
+async fn download_blocks<ChT, CaT, DbErr, TrErr, BlT>(
     client: &mut CompactTxStreamerClient<ChT>,
+    block_source: &mut BlT,
     db_cache: &CaT,
     scan_range: &ScanRange,
+    expected_prev_hash: Option<BlockHash>,
 ) -> Result<(), Error<CaT::Error, DbErr, TrErr>>
 where
     ChT: GrpcService<TonicBody>,
@@ -610,6 +816,7 @@ where
     <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
+    BlT: CompactBlockSource<ChT>,
 {
     info!("Fetching {}", scan_range);
     let mut start = service::BlockId::default();
@@ -621,11 +828,8 @@ where
         end: Some(end),
         pool_types: vec![],
     };
-    let compact_blocks = client
-        .get_block_range(range)
-        .await?
-        .into_inner()
-        .try_collect::<Vec<_>>()
+    let compact_blocks = block_source
+        .get_block_range(client, range, expected_prev_hash)
         .await?;
 
     db_cache

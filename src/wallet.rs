@@ -1,3 +1,4 @@
+use crate::compact_block_source::{CdnFallbackBlockSource, CompactBlockCdnConfig};
 use crate::*;
 
 use bip0039::{English, Mnemonic};
@@ -43,7 +44,10 @@ use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
 use zcash_client_backend::fees::{
     DustOutputPolicy, SplitPolicy, StandardFeeRule, TransparentChangePolicy,
 };
-use zcash_client_backend::sync::{run, run_next_batch};
+use zcash_client_backend::sync::{
+    CompactBlockSource, run_next_batch_optimized_with_block_source,
+    run_next_batch_with_block_source, run_with_block_source,
+};
 use zcash_client_backend::wallet::OvkPolicy;
 use zcash_client_backend::zip321::{Payment, TransactionRequest};
 use zcash_client_backend::{
@@ -575,7 +579,10 @@ impl<P: Parameters> WalletChainRevision for MemoryWalletDb<P> {
     }
 }
 
-fn ensure_chain_revision<W: WalletChainRevision>(db: &W, expected: &W::Revision) -> Result<(), Error> {
+fn ensure_chain_revision<W: WalletChainRevision>(
+    db: &W,
+    expected: &W::Revision,
+) -> Result<(), Error> {
     if &db.chain_state_revision() == expected {
         Ok(())
     } else {
@@ -590,6 +597,7 @@ pub struct Wallet<W, T> {
     pub(crate) client: CompactTxStreamerClient<T>,
     pub(crate) network: Network,
     confirmations_policy: ConfirmationsPolicy,
+    compact_block_cdn: Option<CompactBlockCdnConfig>,
     /// Note management: the number of notes to maintain in the wallet
     pub(crate) target_note_count: usize,
     /// Note management: the minimum allowed value for split change amounts
@@ -603,6 +611,7 @@ impl<W, T: Clone> Clone for Wallet<W, T> {
             client: self.client.clone(),
             network: self.network,
             confirmations_policy: self.confirmations_policy,
+            compact_block_cdn: self.compact_block_cdn.clone(),
             target_note_count: self.target_note_count,
             min_split_output_value: self.min_split_output_value,
         }
@@ -693,12 +702,23 @@ where
         network: Network,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Self, Error> {
+        Self::new_with_runtime_config(db, client, network, confirmations_policy, None)
+    }
+
+    pub(crate) fn new_with_runtime_config(
+        db: W,
+        client: T,
+        network: Network,
+        confirmations_policy: ConfirmationsPolicy,
+        compact_block_cdn: Option<CompactBlockCdnConfig>,
+    ) -> Result<Self, Error> {
         get_prover();
         Ok(Wallet {
             db: Arc::new(RwLock::new(db)),
             client: CompactTxStreamerClient::new(client),
             network,
             confirmations_policy,
+            compact_block_cdn,
             target_note_count: 4,
             min_split_output_value: 10000000,
         })
@@ -888,10 +908,13 @@ where
         let mut client = self.client.clone();
         // TODO: This should be held in the Wallet struct so we can download in parallel
         let db_cache = MemBlockCache::new();
+        let mut block_source =
+            CdnFallbackBlockSource::new(self.network, self.compact_block_cdn.clone());
 
         let mut db = self.db.write().await;
-        run(
+        run_with_block_source(
             &mut client,
+            &mut block_source,
             &self.network.clone(),
             &db_cache,
             &mut *db,
@@ -911,10 +934,13 @@ where
     {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();
+        let mut block_source =
+            CdnFallbackBlockSource::new(self.network, self.compact_block_cdn.clone());
 
         let mut db = self.db.write().await;
-        let did_work = run_next_batch(
+        let did_work = run_next_batch_with_block_source(
             &mut client,
+            &mut block_source,
             &self.network.clone(),
             &db_cache,
             &mut *db,
@@ -933,10 +959,13 @@ where
     {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();
+        let mut block_source =
+            CdnFallbackBlockSource::new(self.network, self.compact_block_cdn.clone());
 
         let mut db = self.db.write().await;
-        let did_work = zcash_client_backend::sync::run_next_batch_optimized(
+        let did_work = run_next_batch_optimized_with_block_source(
             &mut client,
+            &mut block_source,
             &self.network.clone(),
             &db_cache,
             &mut *db,
@@ -1352,6 +1381,8 @@ where
 
         let batch_size = batch_size.unwrap_or(BATCH_SIZE);
         let mut client = self.client.clone();
+        let mut block_source =
+            CdnFallbackBlockSource::new(self.network, self.compact_block_cdn.clone());
 
         // We need a write lock for update_chain_tip, suggest_scan_ranges, etc.
         let mut db = self.db.write().await;
@@ -1405,11 +1436,17 @@ where
                     .map_err(|e| Error::Generic(format!("{e}")))?;
                 match scan_ranges.first() {
                     Some(scan_range) if scan_range.priority() == ScanPriority::Verify => {
-                        Self::download_and_insert_blocks(&mut client, &db_cache, scan_range)
-                            .await?;
                         let chain_state = Self::fetch_chain_state(
                             &mut client,
                             scan_range.block_range().start - 1,
+                        )
+                        .await?;
+                        Self::download_and_insert_blocks(
+                            &mut client,
+                            &mut block_source,
+                            &db_cache,
+                            scan_range,
+                            chain_state.block_hash(),
                         )
                         .await?;
                         let rewound = Self::scan_with_reorg_handling(
@@ -1470,29 +1507,8 @@ where
             }
         };
 
-        // 5. Download compact blocks for the range
-        let start_id = service::BlockId {
-            height: scan_range.block_range().start.into(),
-            ..Default::default()
-        };
-        let end_id = service::BlockId {
-            height: (scan_range.block_range().end - 1).into(),
-            ..Default::default()
-        };
-        let compact_blocks: Vec<CompactBlock> = client
-            .get_block_range(service::BlockRange {
-                start: Some(start_id),
-                end: Some(end_id),
-                pool_types: vec![],
-            })
-            .await
-            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
-            .into_inner()
-            .try_collect()
-            .await
-            .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
-
-        // 6. Download tree state for range.start - 1
+        // 5. Download tree state for range.start - 1. This anchors CDN data to
+        // lightwalletd before the blocks are inserted or scanned.
         let tree_state_proto = client
             .get_tree_state(BlockId {
                 height: (scan_range.block_range().start - 1).into(),
@@ -1501,6 +1517,31 @@ where
             .await
             .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
             .into_inner();
+        let chain_state = tree_state_proto
+            .to_chain_state()
+            .map_err(|e| Error::Generic(format!("Failed to parse ChainState: {e}")))?;
+
+        // 6. Download compact blocks for the range.
+        let start_id = service::BlockId {
+            height: scan_range.block_range().start.into(),
+            ..Default::default()
+        };
+        let end_id = service::BlockId {
+            height: (scan_range.block_range().end - 1).into(),
+            ..Default::default()
+        };
+        let compact_blocks: Vec<CompactBlock> = block_source
+            .get_block_range(
+                &mut client,
+                service::BlockRange {
+                    start: Some(start_id),
+                    end: Some(end_id),
+                    pool_types: vec![],
+                },
+                Some(chain_state.block_hash()),
+            )
+            .await
+            .map_err(|e| Error::Generic(format!("Block download error: {e}")))?;
 
         // 7. Serialize into journal entry format:
         //    [range_start:u32 | range_end:u32 | tree_state_len:u32 | tree_state_bytes | (block_len:u32 + block_bytes)*]
@@ -1530,9 +1571,6 @@ where
         db_cache
             .insert(compact_blocks)
             .await
-            .map_err(|e| Error::Generic(format!("{e}")))?;
-        let chain_state = tree_state_proto
-            .to_chain_state()
             .map_err(|e| Error::Generic(format!("{e}")))?;
         let rewound = Self::scan_with_reorg_handling(
             &self.network,
@@ -1658,8 +1696,10 @@ where
     // Internal helper: download blocks and insert into cache
     async fn download_and_insert_blocks(
         client: &mut CompactTxStreamerClient<T>,
+        block_source: &mut CdnFallbackBlockSource,
         db_cache: &MemBlockCache,
         scan_range: &zcash_client_backend::data_api::scanning::ScanRange,
+        expected_prev_hash: zcash_primitives::block::BlockHash,
     ) -> Result<(), Error> {
         use zcash_client_backend::proto::service;
 
@@ -1672,15 +1712,10 @@ where
             end: Some(end),
             pool_types: vec![],
         };
-        let compact_blocks: Vec<zcash_client_backend::proto::compact_formats::CompactBlock> =
-            client
-                .get_block_range(range)
-                .await
-                .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
-                .into_inner()
-                .try_collect()
-                .await
-                .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+        let compact_blocks = block_source
+            .get_block_range(client, range, Some(expected_prev_hash))
+            .await
+            .map_err(|e| Error::Generic(format!("Block download error: {e}")))?;
         db_cache
             .insert(compact_blocks)
             .await
@@ -3401,6 +3436,7 @@ mod tests {
             network,
             confirmations_policy:
                 zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default(),
+            compact_block_cdn: None,
             target_note_count: 4,
             min_split_output_value: 10_000_000,
         };
