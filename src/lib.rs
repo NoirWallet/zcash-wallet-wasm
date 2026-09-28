@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 pub mod bindgen;
+mod compact_block_source;
 mod error;
 mod init;
 mod ledger_pczt;

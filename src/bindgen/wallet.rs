@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use crate::bindgen::sign::pczt_sign_inner;
 use crate::bindgen::{Pczt as WasmPczt, ProofGenerationKey, SeedFingerprint};
+use crate::compact_block_source::CompactBlockCdnConfig;
 use crate::wallet::TransferFundingSource;
 use crate::{Error, Network, PRUNING_DEPTH, Wallet};
 
@@ -39,6 +40,29 @@ struct ConfirmationsPolicyOptions {
     untrusted: NonZeroU32,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompactBlockCdnOptions {
+    base_url: String,
+    request_timeout_ms: Option<u32>,
+    max_chunk_bytes: Option<usize>,
+    max_concurrent_chunk_requests: Option<usize>,
+}
+
+impl TryFrom<CompactBlockCdnOptions> for CompactBlockCdnConfig {
+    type Error = Error;
+
+    fn try_from(options: CompactBlockCdnOptions) -> Result<Self, Self::Error> {
+        Self::new(
+            options.base_url,
+            options.request_timeout_ms,
+            options.max_chunk_bytes,
+            options.max_concurrent_chunk_requests,
+        )
+        .map_err(|error| Error::Generic(format!("Invalid compact block CDN config: {error}")))
+    }
+}
+
 impl TryFrom<ConfirmationsPolicyOptions> for ConfirmationsPolicy {
     type Error = Error;
 
@@ -64,6 +88,17 @@ export interface ConfirmationsPolicy {
     trusted: number;
     /** Positive uint32. */
     untrusted: number;
+}
+
+export interface CompactBlockCdnOptions {
+    /** Root containing {network}/shielded-default/manifest.json. */
+    baseUrl: string;
+    /** Per-request timeout. Defaults to 30000. */
+    requestTimeoutMs?: number;
+    /** Maximum decompressed chunk size. Defaults to 128 MiB. */
+    maxChunkBytes?: number;
+    /** Maximum concurrent CDN chunk requests. Defaults to 4; valid range is 1 through 8. */
+    maxConcurrentChunkRequests?: number;
 }
 "#;
 
@@ -146,6 +181,8 @@ impl WebWallet {
         >,
         #[wasm_bindgen(unchecked_optional_param_type = "ConfirmationsPolicy | null")]
         confirmations_policy: JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "CompactBlockCdnOptions | null")]
+        compact_block_cdn: JsValue,
     ) -> Result<WebWallet, Error> {
         let network = Network::from_str(network)?;
         let confirmations_policy = if confirmations_policy.is_null_or_undefined() {
@@ -164,6 +201,14 @@ impl WebWallet {
             options.try_into()?
         };
         let client = Client::new(lightwalletd_url.to_string());
+        let compact_block_cdn = if compact_block_cdn.is_null_or_undefined() {
+            None
+        } else {
+            Some(
+                serde_wasm_bindgen::from_value::<CompactBlockCdnOptions>(compact_block_cdn)?
+                    .try_into()?,
+            )
+        };
 
         let db = match db_bytes {
             Some(bytes) => {
@@ -176,11 +221,12 @@ impl WebWallet {
         };
 
         Ok(Self {
-            inner: Wallet::new_with_confirmations_policy(
+            inner: Wallet::new_with_runtime_config(
                 db,
                 client,
                 network,
                 confirmations_policy,
+                compact_block_cdn,
             )?,
         })
     }
