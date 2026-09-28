@@ -3346,6 +3346,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tonic-web-wasm-client-compat"
+version = "0.8.0"
+dependencies = [
+ "http-body",
+ "tonic",
+ "tonic-web-wasm-client",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4084,7 +4093,7 @@ dependencies = [
  "tokio",
  "tokio_with_wasm",
  "tonic",
- "tonic-web-wasm-client",
+ "tonic-web-wasm-client-compat",
  "tracing",
  "tracing-subscriber",
  "tracing-web",
