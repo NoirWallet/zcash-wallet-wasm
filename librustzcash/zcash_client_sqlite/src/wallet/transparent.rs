@@ -2959,6 +2959,14 @@ mod tests {
     }
 
     #[test]
+    fn transparent_send_max_to_tex_builds_zip320_pair() {
+        zcash_client_backend::data_api::testing::transparent::transparent_send_max_to_tex_builds_zip320_pair(
+            TestDbFactory::default(),
+            BlockCache::new(),
+        );
+    }
+
+    #[test]
     fn propose_t2t_transparent_change_exact_match() {
         zcash_client_backend::data_api::testing::transparent::propose_t2t_transparent_change_exact_match(
             TestDbFactory::default(),
