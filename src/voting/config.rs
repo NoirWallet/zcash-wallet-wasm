@@ -525,7 +525,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn service_layout_versions_proposals_and_helpers_are_strictly_checked() {
         let mut out_of_range = active();
-        out_of_range["proposals"][0]["id"] = serde_json::json!(16);
+        out_of_range["proposals"][0]["id"] =
+            serde_json::json!(zcash_voting::types::MAX_PROPOSAL_ID + 1);
         assert!(discover(vec![out_of_range], 1500).await.1.is_empty());
         for (key, value) in [
             (
@@ -566,6 +567,12 @@ pub(crate) mod tests {
         );
         let result = eligibility_for_inputs("01", 10, 10, &[]).unwrap();
         assert!(!result.eligible);
+        assert_eq!(result.snapshot_voting_value_zats, "0");
+        assert_eq!(result.minimum_required_zats, "12500000");
+        assert_eq!(
+            result.reason_code,
+            Some(VotingEligibilityReason::InsufficientSnapshotValue)
+        );
         assert_eq!(result.selected_value_zats, "0");
         assert_eq!(result.voting_power, "0");
         assert_eq!(result.bundle_count, 0);
@@ -617,11 +624,24 @@ pub(crate) mod tests {
         for value in [0, divisor - 1, divisor, divisor + 1] {
             let result = eligibility_for_inputs(ID, 100, 100, &[note(value, 0)]).unwrap();
             assert_eq!(result.eligible, value >= divisor);
+            assert_eq!(result.snapshot_voting_value_zats, value.to_string());
+            assert_eq!(result.minimum_required_zats, divisor.to_string());
+            assert_eq!(
+                result.reason_code,
+                (value < divisor).then_some(VotingEligibilityReason::InsufficientSnapshotValue)
+            );
             assert_eq!(
                 result.voting_power,
                 if value >= divisor { divisor } else { 0 }.to_string()
             );
         }
+        let fragmented = (0..20).map(|i| note(2_000_000, i)).collect::<Vec<_>>();
+        let fragmented_result = eligibility_for_inputs(ID, 100, 100, &fragmented).unwrap();
+        assert_eq!(fragmented_result.snapshot_voting_value_zats, "40000000");
+        assert_eq!(
+            fragmented_result.reason_code,
+            Some(VotingEligibilityReason::InsufficientVotingPower)
+        );
         let big = 1000 * divisor;
         let notes: Vec<_> = (0..3)
             .map(|i| note(big, i))
@@ -1245,6 +1265,18 @@ fn eligibility_for_inputs(
         zcash_voting::BundlePolicy::default(),
     )
     .map_err(|_| VotingApiError::new(VotingErrorCode::NotEligible))?;
+    let snapshot_value = notes
+        .iter()
+        .try_fold(0u128, |sum, note| sum.checked_add(u128::from(note.value)))
+        .ok_or_else(|| VotingApiError::new(VotingErrorCode::NotEligible))?;
+    let minimum_required = zcash_voting::MINIMUM_VOTING_WEIGHT_ZATOSHI;
+    let reason_code = if status.is_eligible() {
+        None
+    } else if snapshot_value < u128::from(minimum_required) {
+        Some(VotingEligibilityReason::InsufficientSnapshotValue)
+    } else {
+        Some(VotingEligibilityReason::InsufficientVotingPower)
+    };
     let selected = plan
         .bundles
         .iter()
@@ -1254,6 +1286,9 @@ fn eligibility_for_inputs(
     Ok(VotingEligibility {
         round_id: round_id.into(),
         eligible: status.is_eligible(),
+        snapshot_voting_value_zats: snapshot_value.to_string(),
+        minimum_required_zats: minimum_required.to_string(),
+        reason_code,
         selected_value_zats: selected.to_string(),
         voting_power: status.eligible_weight.to_string(),
         selected_note_count: u32::try_from(status.distinct_note_count)

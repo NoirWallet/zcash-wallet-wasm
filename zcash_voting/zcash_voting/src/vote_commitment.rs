@@ -386,7 +386,7 @@ mod tests {
         assert!(build_share_payloads(&mock_enc_shares(), &commitment, 0, 2, 42, false).is_err());
 
         let mut commitment = mock_commitment();
-        commitment.proposal_id = 16;
+        commitment.proposal_id = crate::types::MAX_PROPOSAL_ID + 1;
         assert!(build_share_payloads(&mock_enc_shares(), &commitment, 0, 2, 42, false).is_err());
     }
 

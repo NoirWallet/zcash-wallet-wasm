@@ -52,14 +52,14 @@ version = "0.3"
 version = "0.4"
 
 [dependencies.imt-tree]
-version = "0.5.2"
+version = "0.5.3"
 default-features = false
 
 [dependencies.log]
 version = "0.4"
 
 [dependencies.pir-types]
-version = "=0.6.2"
+version = "=0.6.3"
 features = ["reader"]
 default-features = false
 
@@ -75,7 +75,7 @@ features = [
 ]
 
 [dependencies.voting-crypto-deps]
-version = "=0.2.2"
+version = "=0.2.3"
 default-features = false
 
 [dependencies.ypir]

@@ -788,7 +788,7 @@ impl VotingDb {
                 "SELECT gov_comm FROM bundles WHERE round_id=?1 AND wallet_id=?2 AND bundle_index=?3",
                 params![round_id, wallet_id, bundle], |row| row.get(0),
             ).map_err(|_| invalid())?;
-            let mut authority = 65_535u64;
+            let mut authority = voting_circuits::MAX_PROPOSAL_AUTHORITY;
             let mut expected_old_van: [u8; 32] = original_van.try_into().map_err(|_| invalid())?;
             let mut last_proposal = None;
             let mut latest_van = original;

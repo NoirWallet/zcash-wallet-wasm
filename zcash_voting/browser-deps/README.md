@@ -37,6 +37,9 @@ The maintained release-to-local patch categories are:
 - The normalized manifest moves Tokio to a non-WASM dependency table and adds
   WASM-only `js-sys`. `PirClientBlocking` and its implementation remain native;
   the async client and proof APIs compile on both targets.
+- The manifest pins `imt-tree` 0.5.3, `pir-types` 0.6.3, and
+  `voting-crypto-deps` 0.2.3 so the browser adapter uses the same 50-proposal
+  circuit dependency set as the voting crate.
 - WASM timing uses a `Date::now()` adapter with negative elapsed time clamped
   to zero; native timing retains `std::time::Instant`.
 - Root/layout/geometry validation precedes large asset downloads.
@@ -53,12 +56,14 @@ The maintained release-to-local patch categories are:
 
 The voting crate uses this same adapter on both targets. The reviewed complete
 release-to-local diff SHA-256 is
-`ddab09cabd842d5a0828066f3396d4ffc6983300653b1bd769b072e7884706f0`.
+`6e752d17cb584d476bba1c2f325e50a3ecc78ba85c833e645f047dc82a7294ef`.
+It is computed from `diff -ruN release local` after extracting the release and
+omitting its registry-only `.cargo_vcs_info.json` file.
 Final maintained file SHA-256 values (release source/archives remain above):
 
 | File | SHA-256 |
 | --- | --- |
-| `Cargo.toml` | `2a92f58cfd349c20c20391454b85e60f28bef15ee287baeef24b8821dc255a7d` |
+| `Cargo.toml` | `5ed8e02841c90fc522afc186a140450891f8cfd38f2a21c1ba12d5b0af98ce0a` |
 | `src/lib.rs` | `7b78f0cef77c098a251768e86096cb5382b170884579884656364d124d8c7f03` |
 | `src/transport.rs` | `45b9920ad251d0e4dbc51fe122aafe0b54a1ebe77ebeb52f6a102acd004a80a3` |
 

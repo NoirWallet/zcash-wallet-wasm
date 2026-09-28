@@ -18,7 +18,8 @@ export interface VotingRoundSummary { roundId: string; name: string; snapshotHei
 export interface VotingRejectedRound { roundId: string; code: VotingErrorCode; message: string; }
 export interface VotingProposal { proposalId: number; title: string; options: string[]; }
 export interface VotingDiscovery { accepted: VotingRoundSummary[]; rejected: VotingRejectedRound[]; configFingerprint: string; }
-export interface VotingEligibility { roundId: string; eligible: boolean; selectedValueZats: string; votingPower: string; selectedNoteCount: number; bundleCount: number; trimmedValueZats: string; }
+export type VotingEligibilityReason = "INSUFFICIENT_SNAPSHOT_VALUE" | "INSUFFICIENT_VOTING_POWER";
+export interface VotingEligibility { roundId: string; eligible: boolean; snapshotVotingValueZats: string; minimumRequiredZats: string; reasonCode: VotingEligibilityReason | null; selectedValueZats: string; votingPower: string; selectedNoteCount: number; bundleCount: number; trimmedValueZats: string; }
 export interface PreparedVotingRound { roundId: string; bundleCount: number; selectedNoteCount: number; votingPower: string; state: VotingRoundPhase; }
 export type BallotDecision = { kind: "choice"; proposalId: number; option: number } | { kind: "skip"; proposalId: number };
 export interface VotingActionResult { roundId: string; phase: VotingRoundPhase; completedBundles: number; totalBundles: number; nextAction: string; }

@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { PNG } from 'pngjs';
 import { readFile } from 'node:fs/promises';
 async function fixture(page) {
-    await page.route('**/pkg-voting/zcash_wallet_wasm.js', route => route.fulfill({ path: 'tests/voting_fake_wasm.mjs', contentType: 'text/javascript' }));
+    await page.route('**/pkg/zcash_wallet_wasm.js', route => route.fulfill({ path: 'tests/voting_fake_wasm.mjs', contentType: 'text/javascript' }));
     await page.goto('/test_voting.html');
     await expect(page.locator('#initialize')).toBeEnabled();
 }
@@ -21,7 +21,7 @@ export class WebVotingSession extends BaseSession {
   }
   async resumeRound() {this.bytes=new Uint8Array([32]);await this.persist(this.bytes,++this.revision);}
 }`;
-    await page.route('**/pkg-voting/zcash_wallet_wasm.js', route => route.fulfill({ contentType: 'text/javascript', body: source.replace('export class WebVotingSession', 'class BaseSession') + continuation }));
+    await page.route('**/pkg/zcash_wallet_wasm.js', route => route.fulfill({ contentType: 'text/javascript', body: source.replace('export class WebVotingSession', 'class BaseSession') + continuation }));
     await page.goto('/test_voting.html');
     await expect(page.locator('#initialize')).toBeEnabled();
     await page.locator('#mnemonic').fill(await page.evaluate(() => crypto.randomUUID()));
@@ -50,7 +50,7 @@ export class WebVotingSession extends BaseSession {
 });
 test('persistence failure freezes mutation until reload and does not show durable success', async ({ page }) => {
     const source = await readFile('tests/voting_fake_wasm.mjs', 'utf8');
-    await page.route('**/pkg-voting/zcash_wallet_wasm.js', route => route.fulfill({ contentType: 'text/javascript', body: source.replace('await this.persist(this.bytes,++this.revision); return', "throw Object.assign(new Error('checkpoint rejected'),{name:'PERSISTENCE_FAILED'}); return") }));
+    await page.route('**/pkg/zcash_wallet_wasm.js', route => route.fulfill({ contentType: 'text/javascript', body: source.replace('await this.persist(this.bytes,++this.revision); return', "throw Object.assign(new Error('checkpoint rejected'),{name:'PERSISTENCE_FAILED'}); return") }));
     await page.goto('/test_voting.html');
     await expect(page.locator('#initialize')).toBeEnabled();
     await page.locator('#mnemonic').fill(await page.evaluate(() => crypto.randomUUID()));

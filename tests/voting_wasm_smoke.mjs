@@ -8,7 +8,7 @@ try {
   page.on('requestfailed',request=>{const url=new URL(request.url());console.log(JSON.stringify({networkFailure:{host:url.host,path:url.pathname,error:request.failure()?.errorText}}));});
   await page.goto(origin+'/');
   const observation=await Promise.race([page.evaluate(async lwd=>{
-    const wasm=await import('/pkg-voting/zcash_wallet_wasm.js');await wasm.default();
+    const wasm=await import('/pkg/zcash_wallet_wasm.js');await wasm.default();
     if(typeof wasm.initThreadPool==='function') await wasm.initThreadPool(2);
     if(typeof wasm.votingTestOwnedProof!=='undefined') throw new Error('test fixture leaked into release');
     const nativeFetch=globalThis.fetch;

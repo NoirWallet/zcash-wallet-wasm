@@ -15,6 +15,15 @@ so the vendor import passes `git diff --check`.
 
 ## Local Compatibility Patches
 
+The browser fork also carries the proposal-capacity portion of upstream
+`b5f30c13aff1bc9f57b260f3c6174a799c78add6` (the v4.0.x 1–50 proposal
+upgrade). It uses the stable compatible dependency set from upstream v5.0.2:
+`voting-circuits` 0.12.1, `voting-crypto-deps` 0.2.3, `imt-tree` 0.5.3,
+`pir-types` 0.6.3, and `zakura-wallet-lib` 0.1.0-rc5. It also uses the matching
+51-bit proposal-authority mask and accepts vote protocol v1.
+These changes are inseparable because the authority mask is part of the VAN
+commitment and vote proof circuit.
+
 The root and this workspace patch public LRZ crates to `../librustzcash` so
 PCZT, wallet backend, keys, primitives, protocol, and transparent types come
 from the same local source. WASM imports those crates directly; native builds

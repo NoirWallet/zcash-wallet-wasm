@@ -83,6 +83,7 @@ const ALG_ED25519: &str = "ed25519";
 const CHECKSUM_QUERY_NAME: &str = "checksum";
 const SHA256_CHECKSUM_PREFIX: &str = "sha256:";
 const VERSION_V0: &str = "v0";
+const VOTE_PROTOCOL_VERSION_V1: &str = "v1";
 const VOTE_SERVER_VERSION_V1: &str = "v1";
 const ROUND_PARAM_BYTE_LEN: usize = 32;
 
@@ -99,7 +100,7 @@ impl Default for WalletCapabilities {
     fn default() -> Self {
         Self {
             vote_server: vec![VOTE_SERVER_VERSION_V1.to_string()],
-            vote_protocol: vec![VERSION_V0.to_string()],
+            vote_protocol: vec![VERSION_V0.to_string(), VOTE_PROTOCOL_VERSION_V1.to_string()],
             tally: vec![VERSION_V0.to_string()],
             pir: vec![VERSION_V0.to_string()],
         }
