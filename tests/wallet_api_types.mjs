@@ -4,6 +4,12 @@ import { WebWallet } from '../pkg/zcash_wallet_wasm.js';
 function constructorContract(Wallet) {
   /** @type {import('../pkg/zcash_wallet_wasm.js').ConfirmationsPolicy} */
   const policy = { trusted: 1, untrusted: 2 };
+  /** @type {import('../pkg/zcash_wallet_wasm.js').CompactBlockCdnOptions} */
+  const cdn = {
+    baseUrl: 'http://127.0.0.1:8081/compact-blocks/v1',
+    requestTimeoutMs: 5000,
+    maxConcurrentChunkRequests: 2,
+  };
   const wallets = [
     new Wallet('test', 'https://example.invalid'),
     new Wallet('test', 'https://example.invalid', undefined),
@@ -11,6 +17,8 @@ function constructorContract(Wallet) {
     new Wallet('main', 'https://example.invalid', undefined, null),
     new Wallet('main', 'https://example.invalid', undefined, policy),
     new Wallet('test', 'https://example.invalid', new Uint8Array(), policy),
+    new Wallet('test', 'https://example.invalid', undefined, policy, cdn),
+    new Wallet('test', 'https://example.invalid', undefined, undefined, cdn),
   ];
   for (const wallet of wallets) wallet.free();
   // @ts-expect-error Confirmation counts must be numbers.
@@ -19,6 +27,12 @@ function constructorContract(Wallet) {
   new Wallet('test', 'https://example.invalid', undefined, { trusted: 1 });
   // @ts-expect-error Zero-confirmation shielding is not a frontend setting.
   new Wallet('test', 'https://example.invalid', undefined, { ...policy, allowZeroConfShielding: false });
+  // @ts-expect-error CDN baseUrl is required.
+  new Wallet('test', 'https://example.invalid', undefined, policy, { requestTimeoutMs: 5000 });
+  // @ts-expect-error CDN timeouts must be numbers.
+  new Wallet('test', 'https://example.invalid', undefined, policy, { ...cdn, requestTimeoutMs: '5000' });
+  // @ts-expect-error CDN concurrency must be a number.
+  new Wallet('test', 'https://example.invalid', undefined, policy, { ...cdn, maxConcurrentChunkRequests: '2' });
 }
 
 export function walletConstructorTypes() {

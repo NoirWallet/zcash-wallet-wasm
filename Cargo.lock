@@ -4062,6 +4062,7 @@ name = "zcash-wallet-wasm"
 version = "0.1.0"
 dependencies = [
  "age",
+ "async-trait",
  "base64 0.22.1",
  "bip0039",
  "bitcoin_hashes",
