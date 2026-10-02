@@ -48,7 +48,7 @@ impl HttpTransport for BrowserFetchTransport {
 }
 
 struct FetchCleanup {
-    window: web_sys::Window,
+    global: wasm_bindgen::JsValue,
     controller: web_sys::AbortController,
     timeout_id: i32,
     _callback: Closure<dyn FnMut()>,
@@ -57,7 +57,9 @@ struct FetchCleanup {
 impl Drop for FetchCleanup {
     fn drop(&mut self) {
         self.controller.abort();
-        self.window.clear_timeout_with_handle(self.timeout_id);
+        if let Ok(clear_timeout) = method(&self.global, "clearTimeout") {
+            let _ = clear_timeout.call1(&self.global, &self.timeout_id.into());
+        }
     }
 }
 
@@ -139,7 +141,7 @@ async fn read_bounded_body(
 }
 
 async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, TransportError> {
-    let window = web_sys::window().ok_or(TransportError::Definite)?;
+    let global = js_sys::global();
     let controller = web_sys::AbortController::new().map_err(|_| TransportError::Definite)?;
     let init = web_sys::RequestInit::new();
     init.set_method(&request.method);
@@ -160,11 +162,7 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
     }
     let js_request = web_sys::Request::new_with_str_and_init(&request.url, &init)
         .map_err(|_| TransportError::Definite)?;
-    let fetch: js_sys::Function =
-        js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("fetch"))
-            .map_err(|_| TransportError::Definite)?
-            .dyn_into()
-            .map_err(|_| TransportError::Definite)?;
+    let fetch = method(&global, "fetch").map_err(|_| TransportError::Definite)?;
 
     let (timeout_sender, timeout_receiver) = oneshot::channel::<()>();
     let mut timeout_sender = Some(timeout_sender);
@@ -175,14 +173,18 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
             let _ = sender.send(());
         }
     });
-    let timeout_id = window
-        .set_timeout_with_callback_and_timeout_and_arguments_0(
+    let timeout_id = method(&global, "setTimeout")
+        .map_err(|_| TransportError::Definite)?
+        .call2(
+            &global,
             timeout_callback.as_ref().unchecked_ref(),
-            request.timeout_ms as i32,
+            &(request.timeout_ms as f64).into(),
         )
-        .map_err(|_| TransportError::Definite)?;
+        .map_err(|_| TransportError::Definite)?
+        .as_f64()
+        .ok_or(TransportError::Definite)? as i32;
     let cleanup = FetchCleanup {
-        window: window.clone(),
+        global: global.clone().into(),
         controller,
         timeout_id,
         _callback: timeout_callback,
@@ -204,7 +206,7 @@ async fn fetch(request: OwnedHttpRequest) -> Result<OwnedHttpResponse, Transport
         // web-sys Fetch binding. Once invocation begins, non-delivery is unknown.
         dispatched.set(true);
         let promise: js_sys::Promise = fetch
-            .call1(&window, &js_request)
+            .call1(&global, &js_request)
             .map_err(|_| after_dispatch())?
             .dyn_into()
             .map_err(|_| after_dispatch())?;
