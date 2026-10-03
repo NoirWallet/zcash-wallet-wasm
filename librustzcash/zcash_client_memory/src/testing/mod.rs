@@ -33,6 +33,9 @@ use {
 
 pub mod pool;
 
+#[cfg(all(test, feature = "unstable"))]
+mod slack_scan_fixture;
+
 #[cfg(test)]
 #[cfg(feature = "transparent-inputs")]
 mod transparent;

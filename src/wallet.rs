@@ -11,7 +11,7 @@ use sapling::ProofGenerationKey;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
@@ -26,6 +26,7 @@ use tonic::{
     codegen::{Body, Bytes, StdError},
 };
 use zcash_address::ZcashAddress;
+use zcash_client_backend::data_api::error::Error as WalletError;
 use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
 use zcash_client_backend::data_api::wallet::input_selection::{
     GreedyInputSelector, SpendPolicy, TransparentSpendPolicy,
@@ -1895,6 +1896,32 @@ where
             .get_wallet_summary(self.query_confirmations_policy())?)
     }
 
+    pub(crate) async fn get_wallet_summary_with_shieldable_balances(
+        &self,
+    ) -> Result<Option<(WalletSummary<AccountId>, HashMap<AccountId, Zatoshis>)>, Error> {
+        let db = self.db.read().await;
+        let Some(summary) = db.get_wallet_summary(self.query_confirmations_policy())? else {
+            return Ok(None);
+        };
+        let target_height = TargetHeight::from(summary.chain_tip_height() + 1);
+        let mut shieldable_balances = HashMap::new();
+        for account_id in summary.account_balances().keys() {
+            let balances = db.get_transparent_balances(
+                *account_id,
+                target_height,
+                self.selection_confirmations_policy(),
+            )?;
+            let value = balances
+                .values()
+                .try_fold(Zatoshis::ZERO, |total, (_, balance)| {
+                    (total + balance.spendable_value())
+                        .ok_or(zcash_protocol::value::BalanceError::Overflow)
+                })?;
+            shieldable_balances.insert(*account_id, value);
+        }
+        Ok(Some((summary, shieldable_balances)))
+    }
+
     /// Get account ID by account name
     ///
     /// # Arguments
@@ -2187,9 +2214,16 @@ where
                     }
                 }
 
-                Err(Error::Generic(format!(
+                let message = format!(
                     "Failed to propose transfer. Possibly insufficient permitted funds: {transfer_error:?}"
-                )))
+                );
+                Err(
+                    if matches!(transfer_error, WalletError::InsufficientFunds { .. }) {
+                        Error::InsufficientTransferFunds(message)
+                    } else {
+                        Error::Generic(message)
+                    },
+                )
             }
         }
     }
@@ -2469,10 +2503,15 @@ where
             None,
             None,
         )
-        .map_err(|e| {
-            Error::Generic(format!(
-                "Failed to propose transfer. Possibly insufficient permitted funds: {e:?}"
-            ))
+        .map_err(|error| {
+            let message = format!(
+                "Failed to propose transfer. Possibly insufficient permitted funds: {error:?}"
+            );
+            if matches!(error, WalletError::InsufficientFunds { .. }) {
+                Error::InsufficientTransferFunds(message)
+            } else {
+                Error::Generic(message)
+            }
         })?;
         let pczt = create_pczt_from_proposal::<
             _,
@@ -2831,9 +2870,16 @@ where
                 match max_proposal {
                     Some(proposal) if proposal_payment_amount_zats(&proposal)? == value => proposal,
                     _ => {
-                        return Err(Error::Generic(format!(
+                        let message = format!(
                             "Failed to propose transfer. Possibly insufficient permitted funds: {transfer_error:?}"
-                        )));
+                        );
+                        return Err(
+                            if matches!(transfer_error, WalletError::InsufficientFunds { .. }) {
+                                Error::InsufficientTransferFunds(message)
+                            } else {
+                                Error::Generic(message)
+                            },
+                        );
                     }
                 }
             }
@@ -3183,7 +3229,14 @@ where
             None,
             None,
         )
-        .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {e:?}")))?;
+        .map_err(|error| {
+            let message = format!("Error when estimating transfer fee: {error:?}");
+            if matches!(error, WalletError::InsufficientFunds { .. }) {
+                Error::InsufficientTransferFunds(message)
+            } else {
+                Error::Generic(message)
+            }
+        })?;
 
         proposal_fee_required_zats(&proposal)
     }
@@ -3215,7 +3268,14 @@ where
             &Default::default(),
             None,
         )
-        .map_err(|e| Error::Generic(format!("Error when estimating max transfer: {e:?}")))?;
+        .map_err(|error| {
+            let message = format!("Error when estimating max transfer: {error:?}");
+            if matches!(error, WalletError::InsufficientFunds { .. }) {
+                Error::InsufficientTransferFunds(message)
+            } else {
+                Error::Generic(message)
+            }
+        })?;
 
         Ok((
             proposal_payment_amount_zats(&proposal)?,
