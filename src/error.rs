@@ -90,6 +90,8 @@ pub enum Error {
         note_count: usize,
         value_zats: u64,
     },
+    #[error("{0}")]
+    InsufficientTransferFunds(String),
     #[error("Failed to prove Pczt: {0}")]
     PcztProve(String),
     #[error("Failed to send Pczt: {0}")]

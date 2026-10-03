@@ -166,6 +166,17 @@ impl WebWallet {
             Ok(())
         }
     }
+
+    async fn diagnose_transfer_result<T>(
+        &self,
+        account_id: AccountId,
+        result: Result<T, Error>,
+    ) -> Result<T, Error> {
+        if matches!(&result, Err(Error::InsufficientTransferFunds(_))) {
+            self.ensure_spendability_consistent(account_id).await?;
+        }
+        result
+    }
 }
 
 #[wasm_bindgen]
@@ -304,11 +315,22 @@ impl WebWallet {
     }
 
     pub async fn get_wallet_summary(&self) -> Result<Option<WalletSummary>, Error> {
-        self.inner
-            .get_wallet_summary()
+        let Some((summary, shieldable_balances)) = self
+            .inner
+            .get_wallet_summary_with_shieldable_balances()
             .await?
-            .map(WalletSummary::try_from)
-            .transpose()
+        else {
+            return Ok(None);
+        };
+        let mut summary = WalletSummary::try_from(summary)?;
+        for (account_id, balance) in &mut summary.account_balances {
+            balance.unshielded_shieldable_balance = shieldable_balances
+                .get(&AccountId::from(*account_id))
+                .copied()
+                .unwrap_or(zcash_protocol::value::Zatoshis::ZERO)
+                .into();
+        }
+        Ok(Some(summary))
     }
 
     /// Get the birthday height for a specific account
@@ -805,9 +827,6 @@ impl WebWallet {
     ) -> Result<JsValue, Error> {
         let account_id = AccountId::from(account_id);
         let funding_source = funding_source.parse::<TransferFundingSource>()?;
-        if funding_source == TransferFundingSource::Shielded {
-            self.ensure_spendability_consistent(account_id).await?;
-        }
         let result = self
             .inner
             .oneclick_transfer(
@@ -820,7 +839,12 @@ impl WebWallet {
                 marginal_fee_zats,
                 expiry_delta_blocks,
             )
-            .await?;
+            .await;
+        let result = if funding_source == TransferFundingSource::Shielded {
+            self.diagnose_transfer_result(account_id, result).await?
+        } else {
+            result?
+        };
         Ok(serde_wasm_bindgen::to_value(&result)?)
     }
 
@@ -911,14 +935,12 @@ impl WebWallet {
         marginal_fee_zats: u64,
     ) -> Result<WasmPczt, Error> {
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        self.inner
-            .pczt_create_dynamic_fee(
-                AccountId::from(account_id),
-                to_address,
-                value,
-                memo,
-                marginal_fee_zats,
-            )
+        let account_id = AccountId::from(account_id);
+        let result = self
+            .inner
+            .pczt_create_dynamic_fee(account_id, to_address, value, memo, marginal_fee_zats)
+            .await;
+        self.diagnose_transfer_result(account_id, result)
             .await
             .map(Into::into)
     }
@@ -1059,7 +1081,7 @@ impl WebWallet {
                         marginal_fee_zats,
                         expiry_delta_blocks,
                     )
-                    .await?
+                    .await
             }
             None => {
                 self.inner
@@ -1070,9 +1092,13 @@ impl WebWallet {
                         memo,
                         marginal_fee_zats,
                     )
-                    .await?
+                    .await
             }
         };
+
+        let pczt = self
+            .diagnose_transfer_result(AccountId::from(account_id), pczt)
+            .await?;
 
         self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
             .await
@@ -1167,9 +1193,6 @@ impl WebWallet {
     ) -> Result<JsValue, Error> {
         let account_id = AccountId::from(account_id);
         let funding_source = funding_source.parse::<TransferFundingSource>()?;
-        if funding_source == TransferFundingSource::Shielded {
-            self.ensure_spendability_consistent(account_id).await?;
-        }
         let estimate = self
             .inner
             .estimate_transfer(
@@ -1181,7 +1204,12 @@ impl WebWallet {
                 marginal_fee_zats,
                 expiry_delta_blocks,
             )
-            .await?;
+            .await;
+        let estimate = if funding_source == TransferFundingSource::Shielded {
+            self.diagnose_transfer_result(account_id, estimate).await?
+        } else {
+            estimate?
+        };
         Ok(serde_wasm_bindgen::to_value(&estimate)?)
     }
 
@@ -1195,11 +1223,12 @@ impl WebWallet {
         marginal_fee_zats: u64,
     ) -> Result<u64, Error> {
         let account_id = AccountId::from(account_id);
-        self.ensure_spendability_consistent(account_id).await?;
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        self.inner
+        let result = self
+            .inner
             .estimate_pczt_transfer_fee(account_id, to_address, value, memo, marginal_fee_zats)
-            .await
+            .await;
+        self.diagnose_transfer_result(account_id, result).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1238,13 +1267,12 @@ impl WebWallet {
         }
 
         let account_id = AccountId::from(account_id);
-        self.ensure_spendability_consistent(account_id).await?;
-
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        let (max_amount_zats, fee_zats) = self
+        let result = self
             .inner
             .estimate_pczt_max_transfer(account_id, to_address, memo, marginal_fee_zats)
-            .await?;
+            .await;
+        let (max_amount_zats, fee_zats) = self.diagnose_transfer_result(account_id, result).await?;
 
         serde_wasm_bindgen::to_value(&MaxTransferEstimate {
             max_amount_zats: max_amount_zats.to_string(),
@@ -1383,6 +1411,7 @@ pub struct AccountBalance {
     pub orchard_balance: u64,
     pub ironwood_balance: u64,
     pub unshielded_balance: u64,
+    pub unshielded_shieldable_balance: u64,
     pub sapling_pending_balance: u64,
     pub orchard_pending_balance: u64,
     pub ironwood_pending_balance: u64,
@@ -1424,6 +1453,7 @@ impl TryFrom<zcash_client_backend::data_api::AccountBalance> for AccountBalance 
             orchard_balance: balance.orchard_balance().spendable_value().into(),
             ironwood_balance: balance.ironwood_balance().spendable_value().into(),
             unshielded_balance: balance.unshielded_balance().spendable_value().into(),
+            unshielded_shieldable_balance: balance.unshielded_balance().spendable_value().into(),
             sapling_pending_balance: sapling_pending_balance.into(),
             orchard_pending_balance: orchard_pending_balance.into(),
             ironwood_pending_balance: ironwood_pending_balance.into(),
