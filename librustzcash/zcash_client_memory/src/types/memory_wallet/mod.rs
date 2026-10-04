@@ -697,13 +697,31 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let account = self
                 .get_account(note.account_id())?
                 .ok_or(Error::AccountUnknown(note.account_id()))?;
-            let metadata_incomplete = account.ufvk().is_none()
-                || note.nullifier().is_none()
-                || note.commitment_tree_position.is_none()
-                || transaction.mined_height().is_none()
-                || note.recipient_key_scope.is_none();
+            let ufvk_present = account.ufvk().is_some();
+            let nullifier_present = note.nullifier().is_some();
+            let position_present = note.commitment_tree_position.is_some();
+            let mined_height_present = transaction.mined_height().is_some();
+            let key_scope_present = note.recipient_key_scope.is_some();
+            let metadata_incomplete = !ufvk_present
+                || !nullifier_present
+                || !position_present
+                || !mined_height_present
+                || !key_scope_present;
 
             if metadata_incomplete {
+                // Support logs omit note identifiers and amounts to avoid linking wallet activity.
+                tracing::warn!(
+                    account_id = *account_id,
+                    diagnostic_note_index = diagnostics.incomplete_note_count + 1,
+                    pool = %note.pool(),
+                    is_change = note.is_change,
+                    ufvk_present,
+                    nullifier_present,
+                    position_present,
+                    mined_height_present,
+                    key_scope_present,
+                    "WALLET_SPENDABILITY_INCONSISTENT note diagnosis"
+                );
                 diagnostics.incomplete_note_count += 1;
                 diagnostics.incomplete_value =
                     (diagnostics.incomplete_value + note.note.value())
