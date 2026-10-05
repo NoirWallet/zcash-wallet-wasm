@@ -523,6 +523,69 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn skipped_config_round_is_rejected_only_when_active() {
+        let mut dynamic: Value = serde_json::from_slice(DYNAMIC).unwrap();
+        dynamic["rounds"][ID]["signatures"][0]["sig"] = serde_json::json!(BASE64.encode([0; 64]));
+        let dynamic = serde_json::to_vec(&dynamic).unwrap();
+        let resolved = resolve_dynamic_voting_config(
+            resolve_static_voting_config(&source(), STATIC).unwrap(),
+            &dynamic,
+            ResolveVotingConfigOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(resolved.skipped_round_ids, vec![ID]);
+
+        for response in [
+            ok(br#"{"round":null}"#.to_vec()),
+            ok(br#"{"rounds":[]}"#.to_vec()),
+            Ok(OwnedHttpResponse {
+                content_type: None,
+                status: 404,
+                body: vec![],
+            }),
+        ] {
+            let transport = fixture(vec![
+                ok(STATIC.to_vec()),
+                ok(dynamic.clone()),
+                Ok(OwnedHttpResponse {
+                    content_type: None,
+                    status: 404,
+                    body: vec![],
+                }),
+                response,
+            ]);
+            let (discovery, trusted) = discover_stage_with_source(&transport, &source(), 1500)
+                .await
+                .unwrap();
+            assert!(discovery.accepted.is_empty());
+            assert!(discovery.rejected.is_empty());
+            assert!(trusted.is_empty());
+        }
+
+        let transport = fixture(vec![
+            ok(STATIC.to_vec()),
+            ok(dynamic),
+            Ok(OwnedHttpResponse {
+                content_type: None,
+                status: 404,
+                body: vec![],
+            }),
+            ok(envelope(vec![active()])),
+        ]);
+        let (discovery, trusted) = discover_stage_with_source(&transport, &source(), 1500)
+            .await
+            .unwrap();
+        assert!(discovery.accepted.is_empty());
+        assert!(trusted.is_empty());
+        assert_eq!(discovery.rejected.len(), 1);
+        assert_eq!(discovery.rejected[0].round_id, ID);
+        assert_eq!(
+            discovery.rejected[0].code,
+            VotingErrorCode::RoundUnauthenticated
+        );
+    }
+
+    #[tokio::test]
     async fn service_layout_versions_proposals_and_helpers_are_strictly_checked() {
         let mut out_of_range = active();
         out_of_range["proposals"][0]["id"] =
@@ -901,9 +964,6 @@ async fn discover_with_clock(
         rejected: vec![],
         config_fingerprint: resolved.dynamic_config_fingerprint.clone(),
     };
-    for id in &resolved.skipped_round_ids {
-        reject(&mut discovery, id, VotingErrorCode::RoundUnauthenticated);
-    }
     let mut active = None;
     for endpoint in &resolved.vote_servers {
         let base = endpoint_base(&endpoint.url)
