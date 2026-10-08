@@ -195,6 +195,14 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .min())
     }
 
+    fn get_wallet_recover_until(&self) -> Result<Option<BlockHeight>, Self::Error> {
+        Ok(self
+            .accounts
+            .values()
+            .filter_map(|account| account.birthday().recover_until())
+            .max())
+    }
+
     fn get_wallet_summary(
         &self,
         confirmations_policy: ConfirmationsPolicy,
@@ -255,7 +263,12 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             // Keep the summary aligned with input selection: dust is uneconomic, while confirmed
             // notes that still lack witness metadata remain pending until a rescan repairs them.
             let update_balance_with_note = |b: &mut Balance| -> Result<(), Error> {
-                if note.note.value() <= zip317::MARGINAL_FEE {
+                if self
+                    .active_output_lock(&note.note_id.into(), target_height.into())
+                    .is_some()
+                {
+                    b.add_locked_value(note.note.value())?;
+                } else if note.note.value() <= zip317::MARGINAL_FEE {
                     b.add_uneconomic_value(note.note.value())?;
                 } else {
                     match (note_is_spendable, note.is_change) {
@@ -286,10 +299,12 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             let transparent_balances =
                 self.get_transparent_balances(*account, target_height, confirmations_policy)?;
             for (_, (_, bal)) in transparent_balances.into_iter() {
-                balance.with_unshielded_balance_mut(|b: &mut Balance| -> Result<(), Error> {
-                    *b = (*b + bal)?;
-                    Ok(())
-                })?;
+                balance.with_unshielded_regular_balance_mut(
+                    |b: &mut Balance| -> Result<(), Error> {
+                        *b = (*b + bal)?;
+                        Ok(())
+                    },
+                )?;
             }
         }
 
@@ -851,6 +866,20 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                     Balance::ZERO,
                 ));
 
+                if self
+                    .active_output_lock(
+                        &zcash_client_backend::wallet::OutputRef::new(
+                            *outpoint.txid(),
+                            PoolType::Transparent,
+                            outpoint.n(),
+                        ),
+                        target_height.into(),
+                    )
+                    .is_some()
+                {
+                    entry.1.add_locked_value(txo.txout.value())?;
+                    continue;
+                }
                 match status {
                     TransparentOutputStatus::Spendable => {
                         entry.1.add_spendable_value(txo.txout.value())?

@@ -1,0 +1,1160 @@
+# Changelog
+All notable changes to this workspace will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this workspace adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## Unreleased
+
+### Fixed
+
+- Session cleanup now preserves delegation setup fields for bundles with a
+  successful proof so wallets can resume signing without regenerating ZKP1.
+
+## v3.1.0-rc.15
+
+### Fixed
+
+- Persisted helper-share plans can now resume after the authenticated helper
+  fleet changes. Plans remain bound to their original planning fleet and
+  target, while removed helpers are not contacted and current helpers are
+  eligible as fallbacks.
+
+## v3.1.0-rc.14
+
+### Added
+- `VotingDb::store_keystone_signatures_batch` now provides atomic, idempotent
+  Keystone signature persistence, and `VotingDb::clear_wallet_state` also
+  removes the wallet's round-independent PIR cache.
+- `RoundPlan` and `RoundPlanView` now expose `immediate_share_confirmed`.
+- Added atomic multi-proposal vote batches through
+  `commit_atomic_vote_batch`, `prepare_atomic_vote_batch`, and
+  `recover_atomic_vote_batch`. `SignedVoteBatch` provides the canonical
+  `cast-vote-batch` request, while restart planning and confirmation preserve
+  the batch as one recoverable authority chain. Existing batch APIs remain
+  singleton compatibility wrappers.
+- Added a typed `HelperClient` and host-owned `HelperTransport` for readiness,
+  share submission, and status polling. The client validates protocol data,
+  bounds requests and responses, applies endpoint-specific retry rules, and
+  tracks helper health. `HyperTransport` remains the default direct transport;
+  wallets can inject custom, proxy, or Rustls-wrapped Hyper connectors.
+- Added `track_pending_shares` for durable confirmation and recovery of pending
+  helper shares, plus `confirm_pending_share` for checking one share with the
+  same quorum, timeout, cancellation, and health-ordering rules.
+- Added the SDK-owned helper delivery lifecycle:
+  `HelperClient::preflight_fleet`,
+  `CommittedVote::prepare_share_delivery`, and
+  `CommittedVote::submit_prepared_shares`. It persists and resumes one
+  generation-bound plan for the complete commitment before submitting shares,
+  without exposing encrypted helper payloads to the host.
+
+### Changed
+- Local voting-hotkey delegation now derives each bundle's VAN blinding from
+  the stored hotkey secret and exact round and bundle identity. Restoring that
+  secret and using `recoverable_bundle_policy_v1()` reconstructs the same VAN
+  after voting database loss without new authority-root or recovery tables.
+- Helper-share planning, persistence, submission, and recovery are now
+  authoritative SDK responsibilities. Hosts provide authenticated helper
+  configuration, round timing, transport, and cancellation.
+- **Breaking:** invalid helper URLs now fail with
+  `VotingError::InvalidInput` before network I/O instead of being silently
+  dropped. `helper::url::canonicalize_helper_base_url` and
+  `canonical_helper_url_list` are public so hosts can validate configuration.
+- **Breaking:** initial helper delivery now uses
+  `CommittedVote::prepare_share_delivery` followed by
+  `CommittedVote::submit_prepared_shares`; the per-share
+  `submit_share_to_helpers(ShareSubmissionRequest)` API was removed.
+- **Breaking:** `ShareDeliveryPlanningParams` now accepts the authenticated
+  round's complete `proposal_ids` roster and derives the immediate share from
+  durable ballot intent.
+- **Breaking:** encrypted helper payloads and their low-level construction and
+  recovery APIs are no longer public. Vote-chain submission continues to use
+  the public `VoteCommitmentWire`.
+- **Breaking:** helper confirmation polls the complete configured fleet and
+  requires agreement from two distinct helpers when at least two are
+  configured. Direct confirmation and confirmation-persistence APIs were
+  removed in favor of `track_pending_shares` and `confirm_pending_share`.
+- **Breaking:** removed `HELPER_PREFLIGHT_TIMEOUT_SECONDS`; preflight timing is
+  now derived from
+  `share_policy::SHARE_HELPER_PREFLIGHT_SOFT_TIMEOUT_MILLISECONDS`.
+- `HelperClientConfig` now validates nonzero deadlines and permits at most two
+  nonzero retry delays. Confirmation polling is limited to four concurrent
+  requests and ten seconds per share.
+- Schema versions 16 and 17 persist definite, ambiguous, and interrupted
+  delivery outcomes together with complete generation-bound helper plans.
+  Legacy rows remain readable but do not weaken placement or quota validation.
+
+### Fixed
+- Wallet examples now separate vote-chain submission from helper delivery and
+  use the preflight, persisted-plan, and prepared-batch APIs.
+- Helper plans remain valid across normal vote confirmation while staying
+  bound to the exact vote generation, wallet scope, configured fleet, durable
+  VC-tree position, and complete payload set. Stale or inconsistent plans fail
+  before network or storage side effects.
+- Whole-plan validation now rejects duplicate helpers, fleet drift, invalid
+  schedules, target-count drift, and aggregate quota violations before the
+  first POST. Concurrent submissions share a process-wide 16-request limit and
+  cannot overfill placement targets.
+- Helper attempts are journaled before dispatch and retain accepted,
+  ambiguous, interrupted, or definite-failure outcomes across cancellation and
+  restart. Outcome-unknown POSTs are never retried as definitely unsent;
+  overdue recovery uses duplicate-safe reconciliation.
+- Recovery preserves durable reveal schedules and placement history, waits for
+  vote confirmation, replenishes complete deficits, and rechecks confirmation
+  and vote-end state before each POST. Legacy or malformed helper identities
+  remain readable without participating in delivery.
+- Helper requests now enforce shared deadlines, bounded JSON responses, and
+  content types even for custom transports. Boundary completions,
+  cancellation, retry backoff, and helper-health scoring no longer lose or
+  double-count completed outcomes.
+- Nullifier-inconsistent recovery bundles are reported as unrecoverable, and
+  delayed network results cannot mutate a replacement share generation.
+- SQLite operations that validate durable voting state before updating it now
+  use immediate transactions, preventing concurrent WAL writers from causing
+  stale-snapshot `database is locked` failures during submission and
+  confirmation recording.
+
+## v3.1.0-rc.13
+
+### Changed
+- `zcash_voting` now defaults to Zakura and exposes upstream librustzcash
+  through the mutually exclusive `lrz` feature while depending directly on
+  the leak-free `zakura` or `lrz` complete backend mode from
+  `zakura-wallet-lib`. This keeps wallet-family selection in one facade while
+  preventing disabled Zakura forks from entering LRZ consumers' Cargo
+  lockfiles and metadata. See the "Dependency notes" section of
+  `zcash_voting/README.md`.
+- Updated the Zakura stack to wallet-libraries RC4 and stable crypto 1.0,
+  `voting-crypto-deps 0.2.2`, `voting-circuits 0.11.2`, `imt-tree 0.5.2`,
+  `pir-types 0.6.2`, and `pir-client 0.7.2`. This raises the workspace MSRV to
+  Rust 1.91.
+- Prepared `vote-commitment-tree 0.6.0` and
+  `vote-commitment-tree-client 0.8.0` for their Zakura-default feature
+  contracts; publish them before `zcash_voting 3.1.0-rc.13`.
+
+## v3.1.0-rc.12
+
+### Added
+- Added shared progressive helper timing and initial-delivery limits, plus
+  readiness-ranked batch planning that balances a commitment's initial shares
+  across the preferred helper pool.
+- Added process-local `HelperHealth` scoring that demotes repeatedly failing
+  helper servers for fixed cooldown windows, immediately re-demotes them on the
+  first failure after expiry, and never removes them from candidate lists.
+- Added public helper URL canonicalization for stable server identity. Helper
+  base URLs may use HTTP or HTTPS and a mount path, but not credentials, query
+  parameters, or fragments; equivalent default ports, trailing slashes, and
+  mount-path percent escapes are normalized before comparison or persistence.
+- Added a host-owned `HelperTransport` abstraction for helper-server requests.
+  The bundled `HyperTransport` provides direct HTTP, while wallets can supply
+  Tor or proxy-backed transports without fallback to a different route.
+
+### Changed
+- Initial share delivery continues to target half the configured fleet, rounded
+  up, while balancing a complete commitment across the ready helper pool.
+  Retries may exceed the initial distribution for liveness.
+
+## v3.1.0-rc.11
+
+### Added
+- `DelegationKeys::with_round_bound_voting_target` is now public, allowing
+  callers to bind a secret-free `RoundBoundVotingHotkeyTarget` directly without
+  depending on `WalletDb`, lightwalletd, or
+  `prepare_delegation_bundle_for_target`.
+
+### Fixed
+- `DelegationKeys::with_round_bound_voting_target` now retains the validated
+  public target. Lower-level delegation setup, signing request, and proof APIs
+  reject those keys when used with a different stored voting round.
+
+## v3.1.0-rc.10
+
+### Added
+- Added deterministic round-level immediate-share selection: share index 0 of
+  the lowest voted proposal in the lowest-value eligible bundle is designated
+  for immediate helper submission. `RoundPlan` and `RoundPlanView` expose the
+  selected `ImmediateShareKey`, while batch submission plans mark the matching
+  caller-supplied batch position with `immediate = true` and `submit_at = 0`.
+
+## v3.1.0-rc.9
+
+### Added
+- `lwd::anchor_tree_state_with_retry_on` fetches the snapshot note-commitment
+  tree on a caller-owned lightwalletd client, so a wallet that already holds a
+  channel (Tor, a proxy, a pool) keeps that route instead of the crate dialing
+  a second, always-direct connection.
+- `precompute_snapshot_bundles` persists the canonical bundle plan for a
+  snapshot-stable note set, samples padded-note secrets, and warms PIR for
+  real notes plus padded-slot nullifiers. The round must already exist; no
+  hotkey or wallet DB is required. Once the wallet is scanned through
+  `snapshot_height`, historical note selection is frozen, so first-write-wins
+  bundle rows are the intended lock-in rather than a stale-plan hazard.
+  Witnesses still come from `prepare_delegation_bundle`. New type:
+  `SnapshotBundlePrecomputeReport`.
+
+### Changed
+- Voting no longer builds a whole `WalletSummary` just to learn how far the
+  wallet has scanned. The sync guards behind `select_notes_with_wallet_db` and
+  `prepare_delegation_bundle` now read `block_fully_scanned` — one indexed
+  `scan_queue` row plus one `blocks` row — and fall back to
+  `birthday_height - 1` exactly as the summary does. Everything else the
+  summary computed was discarded: Sapling and Orchard scan-progress estimates
+  that scan the full `blocks` table with a correlated subquery per row,
+  per-account balances joined across all three shielded pools, and a shard-root
+  read per pool. That work grows with the size of the wallet, and it ran on
+  every note selection and every delegation. The summary also opened a nested
+  transaction, which errors outright if two threads ask at the same time.
+- **Behaviour:** when the wallet summary was unavailable — no chain tip
+  recorded yet, or scan progress not estimable — the sync guard previously read
+  a scanned height of 0 and rejected every nonzero snapshot height. It now
+  reads the height actually scanned. Voting needs the snapshot height to be
+  covered by the scan; it does not need the wallet to know the chain tip.
+
+### Removed
+- **Breaking:** URL-taking lightwalletd helpers that opened their own channel:
+  `latest_block_height`, `latest_block_height_with_retry`, `tree_state_bytes`,
+  `anchor_tree_state_with_retry`, and `anchor_tree_state_bytes_with_retry`.
+  They always dialed a direct connection, which overrode any host-owned route.
+  Open a client on the route you want and call `get_latest_block`,
+  `get_tree_state`, or `anchor_tree_state_with_retry_on`.
+
+## v3.1.0-rc.8
+
+### Added
+- Added a bundle- and round-independent PIR proof cache. `precompute_pir_proofs`
+  fetches and persists IMT non-membership proofs for notes that survive the
+  caller-supplied `BundlePolicy` (the same plan round setup uses: sub-ballot
+  drop and privacy trim) against whatever snapshot the connected PIR server
+  currently serves, keyed by `(wallet_id, network, root, nullifier)`, so
+  wallets can warm proofs in the background from the selected snapshot set
+  before any round is initialized, bundles exist, or a hotkey is generated.
+  Padded-slot nullifiers are fetched later on the per-bundle path.
+  `validate_cached_pir_proofs` classifies
+  cached proofs against an expected round root offline (`Valid` / `StaleRoot`
+  / `Missing` / `Invalid`). Snapshots coexist in the cache; leftover roots
+  are unused, not harmful. New types: `PirCachePrecomputeResult`,
+  `PirCacheValidationReport`, `PirProofCacheEntry`, `PirProofCacheStatus`.
+
+### Changed
+- The delegation prove path and `precompute_delegation_pir` now read and write
+  the shared `pir_proof_cache` table instead of the bundle-scoped `imt_proofs`
+  table, so background-warmed real-note proofs are never refetched at proving
+  time; only the per-bundle padded-slot nullifiers can still require a fetch.
+  A cached row that fails to decode or verify is treated as a miss and
+  overwritten by the refetched proof, so a corrupt row self-heals instead of
+  wedging the precompute. Schema version 15 migrates existing `imt_proofs`
+  rows into the new cache (keyed by the owning round's network) and drops the
+  old table.
+- `precompute_pir_proofs` now prunes PIR proof cache rows created more than
+  four weeks ago before warming the requested notes. Prove-time cache access
+  remains non-pruning so an already cached proof can still complete a bundle.
+
+## v3.1.0-rc.7
+
+### Added
+- Added `prepare_commit`, `prepare_commit_batch`, `persist_prepared_commit`,
+  and `persist_prepared_commit_batch` so wallets can perform expensive ZKP #2
+  proving outside SQLite transactions, then atomically persist the prepared
+  result only if its vote-authority, ballot-intent, and current-vote state are
+  still unchanged. `prepare_commit_batch` takes a `VoteCommitBatch` for the
+  round, drafts, witness, and stage reporter.
+- Added `warm_zkp2_proving_cache` for callers that want to initialize the vote
+  proving parameters independently of the other proving caches.
+
+## v3.1.0-rc.6
+
+### Changed
+- Updated the selectable cryptography facade to `voting-crypto-deps 0.1.2`,
+  voting circuits to `0.10.3`, the indexed Merkle tree to `imt-tree 0.4.0`,
+  and the PIR stack to `pir-types 0.5.0` and `pir-client 0.6.0`.
+- Released `vote-commitment-tree 0.5.2` and
+  `vote-commitment-tree-client 0.7.2` with backend-neutral field, group, and
+  randomness trait imports for the updated upstream and Zakura dependency
+  families.
+- Updated the Zakura wallet stack to `zakura-wallet-lib 0.1.0-rc2`,
+  `zakura-pczt 0.1.0-rc1`, `zakura-client-backend 0.1.0-rc2`,
+  `zakura-client-sqlite 0.1.0-rc2`, and the `zakura-orchard`, `zakura-keys`, and
+  `zakura-primitives` `1.0.0-rc.3` crypto family. These releases move the Zakura
+  backend to `ff 0.14`, `group 0.14`, and `rand_core 0.10`.
+- Routed the remaining test-only randomness imports through the selected backend
+  facade (`voting_crypto_deps::rand`) instead of a direct `rand 0.8` dependency, so
+  the same tests compile under both the upstream and Zakura families.
+
+## v3.1.0-rc.5
+
+### Added
+- `VotingDb::effective_bundle_policy` is now public. A wallet that plans or
+  reports outside the `*_for_round` helpers -- because its seed policy is not
+  `BundlePolicy::default()` -- previously had no way to resolve a round's
+  authoritative policy, and reconstructing the rule from the bundle count alone
+  is wrong: a round planned by this binary stores a *trimming* policy, so
+  treating "has bundle rows" as "no trim" under-reports withheld value for
+  every round that was actually trimmed.
+- `minimum_voting_eligibility_and_plan_for_notes` is now public, returning the
+  eligibility status together with the `ChunkResult` it came from.
+  `minimum_voting_eligibility_for_notes` computes the plan and discards it, so a
+  wallet surfacing `PrivacyTrim` next to the eligible weight had to plan a
+  second time and repeat the canonical duplicate-nullifier collapse to do it --
+  two ways for the two numbers to start describing different note sets.
+
+## v3.1.0-rc.4
+
+### Changed
+- **Breaking:** `BundleLayout` reports privacy-trim totals as flat fields
+  (`privacy_trim_dropped_bundles`, `privacy_trim_dropped_notes`,
+  `privacy_trim_dropped_value_zatoshi`) instead of a nested `PrivacyTrim`.
+  Struct literals and JSON consumers must use the new names; absent fields still
+  default to zero.
+- **Breaking:** removed `privacy_trim` from `SignedDelegationBundle` and
+  `SignedDelegationPayloadView`. Trim reporting stays on `BundleLayout` and
+  `VotingNoteSelectionResultView` (`ChunkResult` is unchanged).
+
+## v3.1.0-rc.3
+
+### Added
+- Accept `static_config_version: 2` static voting configs, which replace v1's
+  single `dynamic_config_url` with an ordered `dynamic_config_urls` mirror list.
+  `ResolvedStaticVotingConfig` gains `dynamic_config_urls` and
+  `static_config_version`; `dynamic_config_url` is retained as the first mirror
+  so v1 callers and every existing v1 hash pin keep working unchanged.
+- Added `resolve_dynamic_voting_config_from_attempts`, which takes the wallet's
+  ordered per-mirror fetch outcomes (`DynamicConfigAttempt`) and returns the
+  first that resolves plus the mirrors it passed over
+  (`DynamicConfigMirrorFailure`). A mirror is skipped when its fetch failed, its
+  bytes did not decode, or its versions are unsupported; one that resolves but
+  authenticates no rounds is deprioritized rather than skipped, so a round-less
+  resolution is still returned when no mirror carries a verifiable round set.
+  When no mirror resolves at all, the new `VotingConfigError::AllMirrorsFailed`
+  enumerates every mirror and its reason; a one-mirror list, which is every v1
+  static config, reports its own error verbatim instead — including the
+  transport cause on a fetch failure, rather than a bare
+  "dynamic config fetch failed".
+  Falling back widens availability, not trust: every candidate is still
+  authenticated against the static trusted keys, and the static hash pin is
+  unchanged. Resolving from a non-first mirror emits the new
+  `ConfigConditionKind::DynamicMirrorFallbackUsed` condition.
+- Added `resolve_dynamic_voting_config_over_mirrors` and
+  `DYNAMIC_MIRROR_FETCH_TIMEOUT` (30s): a reference lazy walk that bounds each
+  mirror fetch so a blackholed primary cannot leave a healthy later mirror
+  unused. The wallet-example and `config_fetcher` transports use it; wallets
+  with their own networking should apply an equivalent per-attempt deadline.
+
+### Changed
+- `ConfigConditionKind::StaticHashPinVerified` now reports the real outcome. It
+  previously reported `status: true` even when the static config source carried
+  no `?checksum=sha256:` pin and no verification had run.
+
+## v3.1.0-rc.2
+
+### Added
+- Privacy trim in bundle planning: trailing low-value bundles are dropped toward
+  `BundlePolicy::max_privacy_bundles` (default 2) to shrink the observable
+  delegation-submission count. The count is a target; the discarded value is
+  bounded by two hard ceilings, `privacy_drop_bps` (default 1% of selected note
+  value) and `max_privacy_drop_zatoshi` (default 1,000 ZEC).
+- `PrivacyTrim` on `ChunkResult`, `BundleLayout`, `VotingNoteSelectionResultView`,
+  and `SignedDelegationPayloadView`, reporting the raw note value withheld — not
+  its bundle-quantized voting weight. Surface it rather than discarding voting
+  power silently.
+- Round-aware planning helpers that resolve a round's stored policy, so callers
+  no longer supply policy internals: `voting_power_for_round`,
+  `note_bundles_for_round`, `bundle_notes_for_index_for_round`, and
+  `VotingNoteSelectionResultView::from_selected_for_round`.
+- In-place upgrades for launched voting databases. Schema changes at or above the
+  launch version apply ordered `ALTER` statements and keep persisted round state;
+  only pre-launch databases are reset. A reset would have destroyed the randomly
+  sampled `van_comm_rand` of any wallet upgrading between submitting a delegation
+  and casting its vote, costing that round's weight unrecoverably.
+
+### Changed
+- **Breaking:** `BundlePolicy::default()` now trims. Opt out with
+  `.with_max_privacy_bundles(None)` to keep the previous planning behavior.
+- **Breaking:** added `privacy_trim` to `ChunkResult`, `BundleLayout`,
+  `SignedDelegationBundle`, `SignedDelegationPayloadView`, and
+  `VotingNoteSelectionResultView`. Struct literals must supply it; use
+  `PrivacyTrim::default()` when no trim occurred. Serde-backed views still accept
+  older payloads with the field absent.
+- **Breaking:** `BundlePolicy::with_privacy_drop_bps` returns
+  `Result<Self, VotingError>` and rejects budgets above `MAX_PRIVACY_DROP_BPS`.
+- The effective `BundlePolicy` is persisted per round and becomes authoritative
+  once stored, so an SDK upgrade that changes the defaults cannot invalidate
+  bundle rows that were already signed or submitted. Rounds carried across the
+  in-place upgrade have no stored policy, so the trim is disabled for any round
+  that already holds bundle rows; they keep re-deriving the plan they were signed
+  against.
+
+### Removed
+- **Breaking:** `VotingNoteSelectionResultView::from_selected` — use
+  `from_selected_for_round`, which honors a resumed round's persisted policy.
+- **Breaking:** `bundle_notes_for_index` — use `bundle_notes_for_index_for_round`,
+  or `bundle_notes_for_index_with_policy` to pass a policy explicitly.
+
+## v3.1.0-rc.1
+
+### Changed
+- Updated `zakura-client-backend`, `zakura-client-sqlite`, and
+  `zakura-wallet-lib` to their coordinated `0.1.0-rc1` releases.
+
+## v3.1.0-rc.0
+
+### Added
+- Added `share::pending_rounds` so wallets can restore unconfirmed helper-share
+  tracking with the caller context persisted for each round.
+- Extended `zcash_voting` with mutually exclusive `upstream` (default) and
+  `zakura` features so the wallet layer can select crates.io librustzcash or the
+  Zakura wallet-libraries forks via `zakura-wallet-lib`, in lockstep with the
+  vote commitment tree crypto backend.
+
+### Changed
+- Replaced temporary Git dependency patches with the published backend-selector
+  releases for IMT, PIR, voting circuits, and voting crypto dependencies.
+- Released `vote-commitment-tree 0.5.1` and
+  `vote-commitment-tree-client 0.7.1`, allowing both crates to select either
+  the default upstream voting crypto backend or the mutually exclusive Zakura
+  backend.
+- Cap each randomized initial helper-share delay at 100 hours while preserving
+  the round's last-moment safety window and retry timing from the sampled
+  `submit_at`.
+
+## v3.0.0
+
+### Changed
+- Released the exact `v3.0.0-rc.4` implementation as `v3.0.0` without
+  implementation changes. Its supporting production snapshots were released
+  as `pir-types 0.3.0`, `pir-client 0.4.0`, `voting-circuits 0.10.0`,
+  `vote-commitment-tree 0.5.0`, and `vote-commitment-tree-client 0.7.0`.
+
+## v3.0.0-rc.4
+
+### Added
+- Added a non-default `test-fixtures` feature exposing an atomic vote recovery
+  fixture for downstream integration tests that should not build ZKP2.
+
+### Changed
+- Aligned the release line on stable `pir-types 0.3.0`, `pir-client 0.4.0`,
+  `voting-circuits 0.10.0`, `vote-commitment-tree 0.5.0`, and
+  `vote-commitment-tree-client 0.7.0` releases.
+- Complete 16-share batch planning now spreads initial targets so that, when
+  multiple helpers are configured, no helper is selected for every share.
+  Fallback and recovery remain liveness first and may use any available helper.
+
+## v3.0.0-rc.3
+
+### Changed
+- **Breaking:** `SharePayload` and `VoteShareWire` now carry the authoritative
+  lowercase-hex `vote_round_id` from the vote commitment or recovery bundle.
+  Wallets can submit the crate-produced helper-share JSON directly instead of
+  injecting round context at the transport boundary.
+
+## v3.0.0-rc.2
+
+### Changed
+- **Breaking:** extended the still-prerelease `auth_version: 2` round-auth
+  payload to append `pir_layout.poly_len` as a `u32` in little-endian order.
+  This binds the YPIR polynomial degree into each round attestation. Any v2
+  signatures produced for `v3.0.0-rc.1` used the shorter preimage and must be
+  regenerated before wallets adopt this release.
+- Updated the PIR client stack to `pir-types 0.3.0-rc.6`,
+  `pir-client 0.4.0-rc.7`, and `valar-ypir 0.2.0`. Dynamic voting config
+  `pir_layout` now includes `poly_len` (`2048` or `4096`), and PIR connection
+  passes the full layout into the server handshake. It fails closed before any
+  private query when `/root.pir_layout` or `GET /params/tier1` disagrees.
+
+### Fixed
+- Restored negotiated PIR layout support after `v3.0.0-rc.1` inadvertently
+  restricted wallets to the current production default. Dynamic config and
+  direct PIR connection again accept layouts supported by the shared client
+  capability predicate while requiring an exact config/server match before any
+  private query. Snapshot tooling and fleet deployment remain responsible for
+  advertising only layouts they can materialize, so compatible service layout
+  changes do not require a wallet release.
+
+## v3.0.0-rc.1
+
+### Added
+- Added secret-free, round-bound voting hotkey targets and a canonical
+  delegation capability handoff. A funds controller, such as a custody
+  provider, can prepare delegation for a voter's public target, durably store
+  the package before broadcasting, verify delivery by its digest, and let the
+  voter use the existing confirmation, tree-sync, and ZKP2 voting path without
+  sharing account viewing material or the voting hotkey secret. Imported
+  capability rounds keep their complete bundle batch atomic and wait for every
+  delegation bundle to confirm before creating fresh vote commitments, keeping
+  pre-vote package replacement recoverable.
+
+### Changed
+- **Breaking:** dynamic voting config round authentication now requires
+  `auth_version: 2`. The trusted-key Ed25519 signature covers the canonical
+  fixed-width encoding of `RoundAuthPayloadV2`, whose fields encode as
+  `"zcash-shielded-vote:round-auth:v2" || round_id (32 raw bytes decoded from
+  the rounds-map key) || ea_pk (32 bytes) || pir_depth (u32 LE) ||
+  tier0_layers (u32 LE) || tier1_layers (u32 LE)` instead of the bare `ea_pk`.
+  This binds each attestation to its round and to the advertised PIR layout, so
+  a compromised config host can neither replay a signed `ea_pk` under a
+  different round id nor swap the `pir_layout` under attested rounds (a layout
+  change requires re-signing every active round).
+  `auth_version: 1` entries are no longer authenticated and are reported in
+  `skipped_round_ids`; round entries must be re-signed with vote-sdk tooling
+  that emits v2 before wallets adopt this release.
+- **Breaking:** config resolution and direct PIR connection now accept only the
+  deployed 19/12/7 layout currently produced by the production snapshot
+  tooling, exposed as `PirLayout::DEPLOYED`. Negotiated geometry is still
+  validated first with the shared `pir-types` supported-layout predicate so
+  malformed layouts retain detailed validation errors.
+- Aligned the prerelease family on `voting-circuits 0.10.0-rc.1`,
+  `vote-commitment-tree 0.5.0-rc.1`, and
+  `vote-commitment-tree-client 0.7.0-rc.1`.
+
+### Fixed
+- Vote commitment tree sync now exposes `SyncLimits` and
+  `TreeClient::sync_with_limits`, with defaults of 4,096 pages and five minutes
+  per complete sync. The built-in wallet and `vote-tree-cli` transports bound
+  each HTTP response to 8 MiB and each request to 60 seconds. Per-round client
+  locks prevent a stalled node from blocking tree operations for unrelated
+  rounds in the same wallet.
+
+## v2.0.0
+
+### Changed
+- Released the exact `v2.0.0-rc.5` implementation as `v2.0.0` without
+  implementation changes. Its supporting production snapshots were released
+  as `voting-circuits 0.9.0`, `vote-commitment-tree 0.4.0`, and
+  `vote-commitment-tree-client 0.6.0`.
+
+## v2.0.0-rc.5
+
+### Fixed
+- Keystone signing requests now mark deliberate zero-value hotkey outputs with
+  their user-facing address so signer devices display the bundle memo.
+
+## v2.0.0-rc.4
+
+### Changed
+- Published `vote-commitment-tree 0.4.0-rc.2` and
+  `vote-commitment-tree-client 0.6.0-rc.2` with the workspace's
+  `imt-tree 0.2.1` dependency.
+- `pir::connect_pir` / `pir::connect_pir_blocking` now take an explicit
+  `PirLayout` and fail closed on config/server layout mismatch before any
+  private query (`VotingError::InvalidInput`). Clients accept any valid
+  two-tier layout matching `/root` rather than a compiled-layout gate.
+  `COMPILED_PIR_LAYOUT` is no longer re-exported from `zcash_voting` /
+  `prelude`; use resolved config `pir_layout` (tests may still import from
+  `pir-types`).
+- Dynamic voting config now requires top-level `pir_layout` (`pir_depth`,
+  `tier0_layers`, `tier1_layers`). `ResolvedVotingConfig` and its wire exports
+  expose it; layout changes are same-chain service updates.
+- Delegation submissions now carry compact, versioned Ironwood transaction
+  effects so verifiers derive the signing digest directly instead of receiving
+  it as a separate field. The payload excludes PCZT signer metadata, and
+  synthetic outputs omit account-scoped outgoing viewing metadata. Synthetic
+  signing PCZTs also leave their unused V6 anchor and spend witness unset.
+- Changed vote-share wire JSON to include only the encrypted share assigned to
+  the receiving helper. The `all_enc_shares` field is no longer serialized.
+
+## v2.0.0-rc.3
+
+### Changed
+- `NoteInfo::from_orchard_note` now rejects non-Ironwood/V3 notes with
+  `VotingError::InvalidInput`. Voting is Ironwood-only, but `NoteInfo` does not
+  carry the note version, so an Orchard/V2 note previously passed ingestion and
+  bundling and failed only during proof construction — after the governance PCZT
+  had been built and signed.
+- Updated the published librustzcash dependency requirements to `pczt 0.9.2`,
+  `zcash_client_backend 0.24.0-rc.7`, `zcash_client_sqlite 0.22.0-rc.7`,
+  `zcash_keys 0.16.1`, and `zcash_protocol 0.10.4`. Orchard remains on the
+  compatible `0.15` line so downstream workspaces select their own patch release.
+- Updated the real delegation proof fixture to use Ironwood/V3 notes and run the
+  ignored Halo2 proof tests under the release profile in CI.
+
+## v2.0.0-rc.2
+
+### Changed
+- Published the retained-checkpoint vote tree on `shardtree 0.7` as
+  `vote-commitment-tree 0.4.0-rc.1`, with the aligned
+  `vote-commitment-tree-client 0.6.0-rc.1` release.
+- Updated the librustzcash dependency family to published
+  `zcash_client_backend 0.24.0-rc.4`, `zcash_client_sqlite 0.22.0-rc.4`, and
+  `pczt 0.9.1`.
+
+## v2.0.0-rc.1
+
+### Changed
+- Updated the librustzcash dependency family to published `zcash_primitives 0.30.0`,
+  `zcash_keys 0.16.0`, `zcash_client_backend 0.24.0-rc.2`,
+  `zcash_client_sqlite 0.22.0-rc.2`, and `pczt 0.8.0`.
+- Aligned the Ironwood crate line on `voting-circuits 0.9.0-rc.3`,
+  `pir-client 0.4.0-rc.2`, and `pir-types 0.3.0-rc.2`. Wallet integrations
+  resolve one shielded/PCZT stack, vote tree storage APIs use `shardtree 0.7`,
+  and the wallet crates require Rust 1.88 or newer.
+- Updated snapshot selection and governance PCZT construction to use only
+  Ironwood/V3 notes. Pre-NU6.3 Orchard/V2 voting is no longer supported on this
+  branch, and Ironwood voting no longer requires a custom Rust compile flag.
+- Changed public round initialization and delegation APIs to require an explicit
+  wallet network, which is persisted with the round state.
+- Moved governance PCZT construction behind `VotingDb::build_governance_pczt`,
+  which validates branch IDs against the stored round snapshot before writing
+  PCZT setup state.
+
+## v1.0.0
+
+### Added
+- Added an optional `BundlePolicy` threshold that starts a new bundle when
+  adding a note would push the current bundle over the threshold.
+- Added shared last-moment round timing helpers in `share_policy` so wallet
+  integrations can derive the same helper-share buffer, deadline, and
+  `single_share` decision from ceremony start and vote end times.
+- Added the public `VOTING_HOTKEY_STORED_SECRET_LEN` constant and updated v2
+  hotkey guidance so software and hardware wallets both use app-owned random
+  hotkeys instead of deriving software hotkeys from wallet seed material.
+- Added crate-owned FRB DTO views in `zcash_voting::wire` for wallet API
+  surfaces that previously used local mirrors in `vizor-wallet`:
+  `VotingNoteRefView`, `VotingNoteSelectionResultView`, `BundleSetupResultView`,
+  `DelegationPirPrecomputeResultView`, `SignedDelegationPayloadView`,
+  `KeystoneDelegationRequestView`, `KeystoneSignatureRecordView`, `DraftVoteView`,
+  `VanWitnessView`, `SignedVoteCommitmentView`, `SignedVoteCommitmentsView`,
+  and `VoteRecordView`.
+- Added stable resume-plan wire DTOs in `zcash_voting::wire`
+  (`NextStepView`, `RoundPlanView`) so wallet adapters can consume crate-owned
+  `session::resume_plan` outputs directly over FRB without maintaining local
+  `ApiRoundPlan`/`ApiNextStep` mirrors.
+- Added stable recovery/scheduling wire DTOs under `zcash_voting::wire` so wallet
+  adapters can share one serde-backed JSON shape for recovery snapshots and
+  share submission planning (`ShareSubmissionPlanView`,
+  `DelegationRecoveryView`, `VoteRecoveryView`,
+  `CommitmentBundleRecoveryView`, `ShareWorkflowRecoveryView`,
+  `ShareDelegationRecordView`, and `RoundRecoveryStateView`).
+- Added wallet-sidecar and round-context convenience APIs so SDK adapters can
+  reuse crate-owned voting DB/session policy instead of local wrappers:
+  `VotingDb::wallet_sidecar_path`, `VotingDb::open_wallet_sidecar`,
+  `VotingDb::ensure_round_state`, and `delegate::ensure_round_context`
+  (`DelegationRoundContext`).
+- Extended `session::RoundPlan` with crate-owned recovery/display projection
+  fields (`blocking_recovery`, `blocking_share_work`,
+  `completed_vote_artifact`, `completed_for_display`, `needs_draft_setup`,
+  `primary_action`, `delegation_statuses`, `completed_vote_display`, grouped
+  `recovered_delegation_work`, and grouped `recovered_vote_work`) so wallet
+  integrations can stop rebuilding foreground-blocking, "voted" display,
+  delegation phase, hotkey reuse, vote recovery completeness, delegation
+  polling, vote polling, recovered vote submission, and blocking share retry
+  decisions from raw recovery snapshots. The same projection is exposed through
+  `wire::RoundPlanView` for FFI consumers.
+- Added canonical wire JSON types in `zcash_voting::wire`
+  (`DelegationSubmissionWire`, `VoteCommitmentWire`, `VoteShareWire`,
+  `WireEncryptedShareJson`) so wallets can reuse one source of truth for
+  protocol field names, serde renames, and base64/JSON-safe shaping instead of
+  reimplementing submission serializers. The wire API now includes
+  `VoteShareWire::with_late_bound` for safely applying runtime
+  `tree_position`/`submit_at` values while preserving the crate-owned JSON
+  integer bounds checks.
+- Added a stable `recovery` reporting API so wallets can fetch one typed round
+  snapshot from `zcash_voting` instead of reassembling recovery state with
+  low-level SQL. New exports include `recovery::round_snapshot`,
+  `recovery::recoverable_commitment_bundle`, and `recovery::clear`, plus
+  prelude re-exports and a wallet example (`wallet-example::example_recovery`)
+  that pairs snapshots with `session::resume_plan`.
+- Added `vote::SignedVoteCommitments`, `vote::commit_batch`, and
+  `vote::recover_signed_commitments` so wallet SDKs can commit and recover
+  per-bundle cast-vote batches through one crate-owned entry point instead of
+  reimplementing per-draft loops and recovery wrapping.
+- Added atomic idempotent recovery writers on `VotingDb`:
+  `mark_delegation_submitted` and `mark_vote_submitted`, including conflict
+  checks for tx hashes.
+- Added `vote::SignedVoteCommitment` plus
+  `CommittedVote::signed_commitment` as the canonical wallet-facing aggregate
+  for cast-vote outputs. The API now exposes submission fields, helper-share
+  payloads, and persisted recovery JSON through one typed surface with
+  fixed-size cryptographic fields (`[u8; 32]` / `[u8; 64]`) to keep byte-length
+  guarantees inside the shared crate while still supporting boundary adapters.
+- Added `VanWitness::from_wire` to validate and convert wire-friendly witness
+  siblings into the typed `[[u8; 32]; 24]` witness form used by vote
+  commitment APIs.
+- Added `vote::CommittedVote`, a stateful cast-vote handle that mirrors the
+  `PreparedDelegationBundle` method flow. Wallet SDKs can now commit/recover a
+  vote once, then drive submission and helper-share lifecycle steps through
+  methods (`submission`, `share_payloads`, `record_share`, `confirm_share`,
+  `add_sent_servers`, `record_submission`, `record_vc_position`) without
+  re-threading `(round_id, bundle_index, proposal_id)` across free functions.
+- Added `DelegationSigningRequest`, `delegation_signing_request`, and generic
+  external delegation signature constructors so wallet SDKs can keep wallet seed
+  material outside `zcash_voting`, sign the PCZT sighash locally with the account
+  SpendAuth key, and pass only the resulting signature back to the crate.
+- Added shared draft vote bounds validation for SDK integrations. The crate now
+  exposes proposal and option count bounds plus `vote::validate_draft_vote(s)`,
+  and `vote::commit` rejects invalid drafts before proof construction.
+  `VotingDb::set_ballot_intent_for_draft_vote` records choice intent through
+  the same validated draft surface, and direct ballot-intent writes now require
+  the proposal's option count so choices are validated before persistence.
+- Added `session::resume_plan` plus a durable `ballot_intent` table (schema v11):
+  a pure, I/O-free round-level planner that fuses the per-bundle delegation,
+  vote, and share phases with the voter's recorded ballot intent into an ordered
+  list of `NextStep`s, so wallet SDKs can resume an interrupted multi-question
+  vote without re-deriving recovery state. Exported via the prelude
+  (`Decision`, `NextStep`, `RoundPlan`, `resume_plan`). `NextStep` is
+  `non_exhaustive`; `CastVote` carries the recorded choice, committed but
+  unsubmitted votes resume through `SubmitVote`, and confirmed votes missing
+  helper-share rows resume through per-share `SubmitShares` steps derived from
+  recovered share payloads. Vote work is ordered by proposal before bundle so
+  interrupted multi-bundle questions finish before later questions resume.
+  Skipped ballot intents are terminal decisions, `open_proposals` contains only
+  proposals with no recorded decision, and choice intents fail fast if no
+  eligible bundle rows exist for the round. Intent changes that conflict with an
+  already-submitted vote fail before any recovery rows are cleaned up, and stale
+  vote submissions are rejected after an intent changes.
+- Added `vote::submission` / `vote::recover_commit` guidance for
+  `NextStep::SubmitVote` handling. Wallets can reconstruct cast-vote
+  submission fields from persisted recovery state without rebuilding from a
+  draft, then call `recover_commit` again after confirmation to recover
+  helper-share payloads with the confirmed VC position.
+- Added `confirmation::*` APIs for wallet SDKs to parse confirmed
+  `delegate_vote` and `cast_vote` tx events, then atomically record delegation
+  tx hashes, VAN positions, cast-vote tx hashes, and vote commitment tree
+  positions without writing workflow SQL locally.
+- Added shared delegation request/report types, account-key loading, Keystone
+  PCZT redaction, display memo formatting, skipped-suffix bundle validation,
+  and bundle weight helpers so wallet SDKs can keep only their runtime-specific
+  async/lightwalletd shims.
+- Added shared `lwd` helpers for mainnet lightwalletd channel setup, bounded
+  unary RPCs, chain-tip lookup, consensus branch resolution, and snapshot
+  `TreeState` fetching with retry so wallet SDKs no longer need local copies of
+  these queries.
+- Added shared wallet note-selection helpers and delegation input gathering
+  (`select_snapshot_notes`, `select_snapshot_note_infos`, and
+  `gather_delegation_wallet_inputs`) so wallet SDKs can reuse the snapshot
+  eligibility, shielded note-info extraction, and selected-note summary logic.
+- Added `select_notes_with_wallet_db` and tree-sync-gated `select_notes_with_lwd`
+  so wallet SDKs can reuse scan-height validation, wallet/network consistency
+  checks, lightwalletd snapshot-anchor fetching, and selected-note assembly
+  without carrying SDK-local wrapper logic.
+- Added `BundlePolicy`, policy-aware note planning, and policy-aware delegation
+  precompute entry points so wallet SDKs can choose how many real notes are
+  placed in each bundle while the default fills each bundle up to the circuit
+  note-slot count.
+- Added library-owned delegation lifecycle stage reporting and branch-id
+  provider traits so wallet SDKs can pass progress and consensus-branch
+  resolution into `delegate::setup` and `delegate::prove` without duplicating
+  library internals.
+- Added voting hotkey helpers for app-owned random hotkeys, stored hotkey secret
+  reconstruction, raw Orchard delegation-address derivation, and typed
+  `DelegationKeys` / `VoteSigner` helpers. New wallet SDKs should generate a
+  random hotkey once, store `VotingHotkey::stored_secret()`, and reconstruct a
+  typed `VotingHotkey` with `VotingHotkey::from_stored_secret` when needed.
+  `generate_random_voting_hotkey` replaces the older raw hotkey generation
+  helpers exposed through `hotkey::generate_hotkey` and
+  `VotingDb::generate_hotkey`.
+- Added `delegate::LightwalletdBranchIdProvider` and
+  `delegate::branch_id_for_height` so wallet SDKs can resolve delegation
+  consensus branches from a voting snapshot height plus `Network` without
+  duplicating consensus activation logic.
+- Added `vote::VoteCommitStage` plus `VoteCommitStageReporter` and
+  `VoteCommitStageBridge` so wallet SDKs can consume library-owned cast-vote
+  lifecycle and proof-progress stages without defining local event enums.
+- Added `VotingDb::prepare_delegation_pir` so wallet SDKs can share the
+  delegation bundle validation, governance PCZT construction, and PIR precompute
+  sequence while still supplying wallet-specific notes, account metadata, typed
+  voting hotkey, consensus branch, and PIR transport at their own boundaries.
+  Callers that need a non-default bundle policy can use
+  `VotingDb::prepare_delegation_pir_with_policy`.
+- Added `zcash_voting::witness::generate_note_witnesses` for shielded note
+  witness generation from a stored voting round snapshot. The API selects the
+  shielded voting protocol from the snapshot height, validates the cached
+  lightwalletd `TreeState` height and selected tree root against the persisted
+  round parameters, asks the wallet DB for historical Merkle paths, then returns
+  `WitnessData` for each bundled note.
+- Added `zcash_voting::witness::store_tree_state_and_generate_note_witnesses`
+  so wallet SDKs can share the snapshot tree-state persistence, witness
+  generation, and bundle witness caching flow while keeping wallet DB opening at
+  each SDK boundary.
+- Added `VotingDb::has_witnesses` so wallet SDKs can detect already-cached
+  bundle witnesses and skip repeat witness generation during precompute resume.
+- Added `delegate::prepare_delegation_bundle` with
+  `PrepareDelegationBundleParams` and `PreparedDelegationBundle` so wallet SDKs
+  can resolve lightwalletd inputs before opening wallet DB handles, then reuse
+  plain bundle state across witness precompute, PIR warmup, signing, and
+  Keystone flows.
+- Added `PreparedDelegationBundle` lifecycle methods and `PreparedSigner` so
+  precompute, PCZT setup, proof generation, Keystone signing requests, and
+  submission assembly all consume the same prepared bundle state instead of
+  re-threading loose round IDs, bundle indexes, note lists, and keys. The
+  prepared lifecycle now also owns software-wallet delegation signing for
+  callers that choose to pass a seed to the crate, external signature byte
+  validation, witness-cache checks, and signed-payload metadata.
+- Added `vote::validate_draft_votes` so wallet SDKs can validate canonical
+  `DraftVote` inputs through the shared voting API before DB or proof work.
+- Added the stable `vote::*` cast-vote API with `DraftVote`, `VanWitness`,
+  `VoteCommit`, `VoteSigner`, `VoteSubmission`, and `VoteRecoveryBundle`.
+  `vote::commit` now builds ZKP #2, signs the cast-vote payload, persists the
+  canonical recovery bundle, and can reconstruct submission fields after a
+  process restart.
+- Added the stable `share::*` API for helper-share nullifier computation,
+  recovery payload reconstruction, share tracking persistence, confirmation,
+  sent-server updates, and `share::policy::*` scheduling re-exports.
+- Added `VotePhase` and `SharePhase` plus
+  `VotingDb::{vote_phase, vote_phases, share_phase, share_phases}` so wallets
+  can derive vote/share recovery state without querying SQLite tables directly.
+- Added `precompute::{sync_vote_tree, van_witness, reset_vote_tree}` as the
+  public vote commitment tree sync and VAN witness surface.
+- Added `precompute::reset_voting_session_state` and
+  `VotingDb::clear_unsigned_delegation_setup_fields` so wallet integrations can
+  recover from interrupted Keystone delegation setup after process restart.
+  Round-scoped reset drops process-local vote-tree cache and clears unsigned
+  delegation setup columns (`pczt_sighash`, padded-note secrets, and related
+  transient fields) while preserving bundles with Keystone signatures or a
+  stored `delegation_tx_hash`.
+- Added a `zcash_voting::config` voting-service config resolution API
+  (`resolve_static_voting_config`, `resolve_dynamic_voting_config`, and
+  `decide_config_switch`) so wallets can authenticate static/dynamic config
+  bytes with their own transport and classify the resulting config switch.
+  `resolve_static_voting_config(source, static_bytes)` authenticates the static
+  trust anchor and exposes the `dynamic_config_url` to fetch next;
+  `resolve_dynamic_voting_config(resolved_static, dynamic_bytes, options)` then
+  authenticates the dynamic config against it. A `wallet-example::example_config`
+  module pairs these with a direct-HTTPS `DirectHttpsFetcher` and persists the
+  resolved summary used for later switch decisions.
+- Added `examples/end_to_end_vote.rs` and README notes for moving from the
+  delegation-oriented V2 API to the new vote/share API.
+
+### Changed
+- Keystone delegation memo display (`delegate::display_memo`) now puts voting
+  power on its own `Amount:` line and truncates only the round name with
+  UTF-8-safe byte boundaries when the memo approaches the 512-byte signer limit,
+  so hardware-wallet displays no longer clip the trailing ZEC amount. Governance
+  PCZT memo bytes now reuse the same formatter.
+- `delegate::prepare_delegation_bundle` now takes a typed `VotingHotkey` and
+  owns wallet scanned-height lookup. Callers no longer pass hotkey seed bytes
+  through delegation preparation.
+- Consolidated delegation-bundle preparation into one public
+  `delegate::prepare_delegation_bundle` path. `PrepareDelegationBundleParams`
+  now carries `DelegationLwdInputs` (`lwd`) and `session_json` directly, while
+  `wallet_db` is an explicit function argument instead of being embedded in the
+  params struct.
+- The default feature set now enables both `pir` and `tree-sync`, so the
+  built-in network client surface is available without extra feature flags.
+- `zcash_voting::transport::HyperTransport` is now exported unconditionally.
+  Callers no longer need to enable `pir`, `tree-sync`, `client-pir`, or
+  `client-tree-sync` just to access the transport re-export.
+- Split wire DTO definitions from codec/conversion logic: `zcash_voting::wire`
+  now owns stable protocol structs only, while serde/base64 conversion helpers
+  and JSON-shaping tests moved into crate-private `wire_codec`.
+- Moved `VotingRoundParams` ownership to `zcash_voting::wire` as the canonical
+  vote-chain payload type, while re-exporting it from `types` for downstream
+  compatibility.
+- Consolidated wallet-facing recovery orchestration into crate-owned APIs:
+  added `phases::WorkflowPhase` with stable resume strings, exposed
+  `workflow_phase()` accessors on recovery records, and updated the wallet
+  recovery example to load snapshot + `resume_plan` together and recover
+  committed-vote payloads directly from planner steps.
+- Consolidated recovery snapshot assembly and pending commitment-bundle
+  semantics into `zcash_voting`, and reduced the wallet-side adapter boundary
+  to FFI shape/phase-string mapping. Added focused unit coverage for pending
+  commitment rows, sidecar reopen behavior, and recovery clearing invariants.
+- The wallet vote example now includes `commit_vote_bundle_batch`, showing the
+  canonical batch cast-vote flow with `vote::commit_batch` and crate-owned
+  cancellation/progress adapters.
+- Removed crate-side wallet seed APIs from voting hotkey derivation and
+  prepared delegation signing. Wallet SDKs now generate app-owned random hotkeys
+  and delegation signatures locally, then pass typed `VotingHotkey` values or
+  SpendAuth signatures into the crate.
+- Removed unused legacy APIs left behind by the wallet integration refactor:
+  direct share decomposition/encryption modules, the public share-tracking
+  nullifier module, legacy `VotingDb` hotkey helpers, confirmed-state writer
+  shims, legacy `Network` numeric converters, and the mainnet-only consensus
+  branch ID helper.
+- Delegation PIR warmup no longer constructs or caches a governance PCZT.
+  `PreparedDelegationBundle::precompute` now warms witnesses, padded-note
+  secrets, and PIR rows only; `delegate::setup` builds the PCZT later from the
+  persisted padded secrets and refuses to overwrite existing padded secrets or
+  `pczt_sighash`. The old loose `PrecomputeDelegationInputs` entry points were
+  removed in favor of the prepared-bundle lifecycle.
+- Removed the process-local prepared-PCZT cache and its prelude exports now that
+  precompute no longer builds PCZT setup material.
+- `DelegationKeys::with_hotkey_bytes` no longer accepts `consensus_branch_id`;
+  `delegate::setup` now resolves it through a caller-supplied
+  `BranchIdProvider`. Delegation proof progress is reported via
+  `DelegationStageReporter`, while generic vote proof progress uses
+  `ProgressReporter`.
+- Vote recovery state is now guarded by durable vote identity. Stale recovery
+  JSON, helper-share rows, tx hashes, and vote commitment tree positions cannot
+  be attached to a replacement vote after the voter changes intent.
+- Helper-share recording now rejects conflicting nullifiers for an existing
+  share key in the shared storage layer.
+- The raw nullifier-taking helper-share storage writer is now crate-internal.
+  Wallet integrations use `share::record`, which derives the nullifier from
+  persisted vote recovery state.
+- Removed the legacy `VotingDb::mark_vote_submitted`,
+  `VotingDb::store_vote_tx_hash`, and `VotingDb::store_commitment_bundle`
+  writers, and dropped the stale `votes.submitted` column. Integrations now use
+  `vote::commit`, `vote::recover_commit`, `vote::record_submission`, and
+  `vote::record_vc_position`.
+- `precompute::sync_vote_tree` now rebuilds a round's sparse vote-tree client
+  when recovery records a new historical VAN position after an earlier sync,
+  so wallets can resume interrupted multi-question votes without manually
+  resetting tree state.
+- Removed the old `note_bundling` JSON facade and duplicate note-plan schema.
+  Smart bundle planning now lives in the slim `note_bundling` module and is
+  exposed through the policy-aware `round` APIs. Lower-level public bundle setup
+  helpers were removed in favor of `round` module APIs.
+- `vote::serialize_recovery` / `vote::parse_recovery` now own the canonical
+  `zcash_voting_vote_recovery_v1` recovery JSON format, replacing wallet-owned
+  cast-vote recovery blobs.
+- `tree_sync::VanWitness` now uses the typed `vote::VanWitness` shape with a
+  fixed 24-element authentication path.
+- `VotingHotkey` now represents the actual stored hotkey secret plus raw Orchard
+  address. The old placeholder Pallas public key and `sv1...` address fields
+  were removed.
+- `VoteSigner` now accepts only a typed `VotingHotkey`, and
+  `vote_commitment::sign_cast_vote_for_account` was removed in favor of the
+  canonical voting hotkey account index.
+- Raw-byte `DelegationKeys` construction is no longer public. Wallet callers use
+  `DelegationKeys::with_voting_hotkey`, and the crate derives network-specific
+  metadata from the `VotingHotkey`.
+- Low-level ZKP2 and cast-vote signing helpers that take raw hotkey seed plus
+  `network_id` are now crate-internal. Wallet callers should use `vote::commit`
+  with `VoteSigner`.
+- The wallet delegation example now separates reusable bundle preparation from
+  PIR precompute, software signing, and Keystone request/submission helpers so resume
+  flows can share cached bundle state without repeating lightwalletd and wallet
+  note-selection work.
+- `delegate::redact_for_signer` is no longer exported as a generic wallet-facing
+  helper. Delegation Keystone requests still redact their PCZT internally;
+  generic wallet send PCZT redaction belongs in the wallet SDK boundary.
+
+# 0.11.0
+
+## Changed
+- Bumped `zcash_voting` to `0.11.0`, `vote-commitment-tree` to `0.3.2`,
+  and `vote-commitment-tree-client` to `0.5.2`.
+- Bumped the Orchard dependency line to `orchard 0.14`,
+  `halo2_gadgets =0.5.0`, `pczt 0.7`, `zcash_keys 0.14`,
+  `zcash_primitives 0.28`, and `zcash_protocol 0.9`.
+- Bumped the circuit and nullifier dependencies to published
+  `voting-circuits 0.8.0`, `imt-tree 0.2.0`, `pir-types 0.2.0`, and
+  `pir-client 0.3.0`.
+
+# 0.10.2
+
+## Security
+- Bumped `voting-circuits` to `0.7.0`, which rejects Halo2 proofs that verify
+  but leave trailing unread transcript bytes.
+
+# 0.10.1
+
+## Security
+- Exact-pinned the Valar-owned voting dependency surface and related PIR/tree
+  transitives used by the client features. `zcash_voting` now directly
+  constrains `pir-client`, `pir-types`, `valar-spiral-rs`, `valar-ypir`,
+  `imt-tree`, `voting-circuits`, `vote-commitment-tree`, and
+  `vote-commitment-tree-client`.
+- Bumped `vote-commitment-tree` to `0.3.1` and
+  `vote-commitment-tree-client` to `0.5.1` for publishable manifest-only pin
+  releases.
+
+## Notes
+- This is a supply-chain pin tightening release with no functional code
+  changes.
+- Scope is intentionally limited to the Valar-owned runtime voting dependency
+  surface and its PIR/tree transitives. Upstream and dev-only dependency
+  movement should be handled through lockfile review/CI policy rather than this
+  manifest-only pinning release.
+
+# 0.10.0
+
+## Changed
+- Bumped `voting-circuits` to `0.6.0` and removed the workspace patch override,
+  so the SDK uses the published circuit crate for delegation proof generation.
+- Updated wallet-side governance derivations to call the circuit crate's
+  canonical helpers for nullifier domains, governance nullifiers, VAN
+  commitments, and rho bindings. This is a breaking cryptographic derivation
+  change for delegation proof compatibility.
+
+# 0.9.2
+
+## Fixed
+- Matched wallet-side padded note commitments and nullifiers to the synthetic
+  padding points introduced by `voting-circuits 0.5.0`, so delegation PIR
+  precompute fetches the same padded IMT proofs that proof generation later
+  requests.
+
+# 0.9.1
+
+## Added
+- Added pure `share_policy`, `pir_snapshot`, and `note_bundling` APIs so wallet
+  SDKs can share helper-share timing, exact PIR snapshot selection, and note
+  bundle planning logic instead of reimplementing it in each app.
+
+# 0.9.0
+
+## Changed
+- Bumped `voting-circuits` to `0.5.0` and updated callers to use its public
+  re-exports and upstream circuit key caches.
+- Bumped `vote-commitment-tree` to `0.3.0` and
+  `vote-commitment-tree-client` to `0.5.0`.
+- Removed local wallet-side test/helpers that duplicated vote-commitment and
+  El Gamal internals now owned by `voting-circuits`.
+
+# 0.8.1
+
+## Fixed
+- Recovery store operations now fail when their target bundle or vote row is
+  missing instead of treating a zero-row SQLite update as success.
+
+# 0.8.0
+
+## Changed
+- Reset the pre-launch SQLite schema history. Voting databases from interim
+  schema versions are now recreated from the current `001_init.sql` baseline
+  and marked as schema version 9.
+
+# 0.7.1
+
+## Added
+- Added `NoteInfo::from_orchard_note` so SDK FFI layers can reuse the crate's
+  Orchard note conversion logic instead of reconstructing `NoteInfo` fields
+  themselves.
+
+# 0.7.0
+
+## Changed
+- Removed the unused `round_id` parameter from `VotingDb::generate_hotkey`.
+
+## Fixed
+- Share payload construction now errors when the requested share is missing its
+  blind instead of using empty bytes.
+- Recovery now rejects stored commitment bundles that are missing their vote
+  commitment tree position instead of assuming position 0.
+- Delegation proof generation now requires the randomness saved when the PCZT was
+  built instead of sampling fresh randomness when those fields are empty.
+
+# 0.6.0
+
+## Changed
+- Bumped `zcash_voting` to `0.6.0`, `vote-commitment-tree` to `0.2.0`, and
+  `vote-commitment-tree-client` to `0.4.0` for the breaking commitment leaf
+  pagination API.
+- Vote commitment tree sync now consumes paginated commitment leaf responses
+  with per-block roots instead of issuing one request per height window.
+
+# 0.5.12
+
+## Fixed
+- `zcash_voting::action::build_governance_pczt` now guarantees the returned
+  `GovernancePczt` describes a single Orchard action: the spend producing
+  `nf_signed`, `rk`, and `alpha` is the same action whose output produces
+  `cmx_new` and `rseed_output`. The Orchard PCZT builder pads to two actions
+  and shuffles spends and outputs independently, so previous calls could
+  return metadata mixing two different randomized actions, which later caused
+  `build_and_prove_delegation` to fail with `delegation proof result cmx_new
+  does not match stored PCZT data`. The construction tail now retries
+  `Builder::build_for_pczt` until `spend_idx == output_idx`, fails before
+  persistence if no paired layout appears, and re-validates the serialized
+  PCZT against the returned `action_index`.
+
+# 0.5.10
+
+## Changed
+- Bumped `zcash_voting` to `0.5.10` and updated `voting-circuits` to `0.4.2`.
+
+# 0.5.9
+
+## Added
+- Added `VotingDb::has_round` for checking round existence through the storage
+  API without downstream callers depending on SQLite schema details.
+
+# 0.5.8
+
+## Added
+- `VotingDb::setup_bundles` now persists bundle note identity hashes, and
+  `VotingDb::build_governance_pczt`, `VotingDb::precompute_delegation_pir`,
+  and `VotingDb::build_and_prove_delegation` reject same-position note
+  substitutions for bundles set up under 0.5.8 or later. Bundles persisted by
+  earlier releases retain the prior position-only check until they are
+  re-setup.
+
+## Fixed
+- Delegation proof storage now checks proof-derived public inputs against the
+  PCZT-derived values stored during `VotingDb::build_governance_pczt`, and
+  stores the proof, public inputs, and round phase atomically.
+- `VotingDb::setup_bundles` now persists all bundle rows in a single
+  transaction.
+- Avoided dropping the Hyper/Tokio transport runtime from inside an active Tokio
+  context.
+
+# 0.5.7
+
+## Fixed
+- `VotingDb::mark_vote_submitted` now returns an error when no persisted vote
+  row matches the requested round, wallet, bundle, and proposal instead of
+  treating a zero-row update as success.
+
+# 0.5.6
+
+## Added
+- Added a `test-fixtures` feature exposing `VotingDb::insert_vote_fixture`, so
+  downstream FFI tests can create vote rows through `VotingDb` instead of
+  depending on SQLite schema internals.
+
+# 0.5.5
+
+## Fixed
+- Keystone delegation submissions now reject a supplied sighash unless it matches
+  the PCZT sighash stored for the bundle.
+
+# 0.5.4
+
+## Fixed
+- Delegation submission signing now derives the sender spending key from the
+  caller's ZIP-32 `account_index` instead of always using account 0.
+
+# 0.5.3
+
+## Fixed
+- **`zcash_voting` `network_id` convention** now matches the wallet SDK everywhere
+  (`zkp1::build_and_prove_delegation`, PIR `precompute_delegation_pir` padded
+  nullifiers, `zkp2::derive_spending_key`, `vote_commitment::sign_cast_vote`, and
+  storage helpers that take `network_id`): **0 = testnet, 1 = mainnet**. The
+  padded-nullifier path had previously used the inverse mapping, so `NoteInfo`
+  from the SDK could disagree with PIR precompute vs proof generation.
+
+## Changed
+- Bumped the `zcash_voting` crate version to `0.5.3`. Direct callers who flipped
+  `network_id` to compensate for the old bug should pass the SDK value unchanged
+  after upgrading.
+
+# 0.5.2
+
+## Changed
+- Reissued the tree-sync transport release from the merged `main` history.
+- Confirmed the Hyper/Rustls tree-sync transport against production vote-chain
+  endpoints for non-empty rounds.
+
+# 0.5.1
+
+## Changed
+- Moved vote commitment tree sync onto the injected transport boundary and
+  provided a direct Hyper/Rustls transport from `zcash_voting`.
+- Removed `reqwest` from `vote-commitment-tree-client`'s library path.
+
+# 0.5.0
+
+## Changed
+- Made `client-pir` transport-agnostic. `zcash_voting` no longer pulls
+  `reqwest`; callers must provide a `pir_client::Transport`.
+- Added transport-aware PIR precompute/proving entry points so SDKs can provide
+  their own HTTP stack.
+- Consolidated PIR proof validation and client transport under the single
+  `client-pir` feature.
+- Added a direct Hyper/Rustls PIR transport under `client-pir` for consumers
+  that do not provide their own transport.
+
+# 0.4.1
+
+## Added
+- Split the `zcash_voting` network-facing `client` feature into granular
+  `client-pir` and `client-tree-sync` features. The existing `client` feature
+  remains as a backwards-compatible aggregate of both.
+- Made the PIR proof conversion/validation helper available to downstream
+  consumers so SDK FFI layers can validate PIR `ImtProofData` without
+  enabling vote-commitment-tree sync.
+
+## Changed
+- Bumped the `zcash_voting` crate version to `0.4.1` for the additive feature
+  split.

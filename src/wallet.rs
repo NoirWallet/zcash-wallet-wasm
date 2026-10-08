@@ -1,3 +1,4 @@
+use crate::compact_block_source::{CdnFallbackBlockSource, CompactBlockCdnConfig};
 use crate::*;
 
 use bip0039::{English, Mnemonic};
@@ -10,7 +11,7 @@ use sapling::ProofGenerationKey;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
@@ -25,15 +26,16 @@ use tonic::{
     codegen::{Body, Bytes, StdError},
 };
 use zcash_address::ZcashAddress;
+use zcash_client_backend::data_api::error::Error as WalletError;
 use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
 use zcash_client_backend::data_api::wallet::input_selection::{
     GreedyInputSelector, SpendPolicy, TransparentSpendPolicy,
 };
 use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, SpendingKeys, TargetHeight, create_pczt_from_proposal,
-    create_proposed_transactions, create_proposed_transactions_with_expiry_height,
-    extract_and_store_transaction_from_pczt, propose_send_max_transfer,
-    propose_send_max_transparent_transfer, propose_shielding, propose_transfer,
+    create_proposed_transactions, extract_and_store_transaction_from_pczt, ordinary,
+    propose_send_max_transfer, propose_send_max_transparent_transfer, propose_shielding,
+    propose_transfer,
 };
 use zcash_client_backend::data_api::{
     Account, AccountBirthday, AccountPurpose, CoinbaseFilter, MaxSpendMode, TransactionDataRequest,
@@ -43,7 +45,10 @@ use zcash_client_backend::fees::standard::MultiOutputChangeStrategy;
 use zcash_client_backend::fees::{
     DustOutputPolicy, SplitPolicy, StandardFeeRule, TransparentChangePolicy,
 };
-use zcash_client_backend::sync::{run, run_next_batch};
+use zcash_client_backend::sync::{
+    CompactBlockSource, run_next_batch_optimized_with_block_source,
+    run_next_batch_with_block_source, run_with_block_source,
+};
 use zcash_client_backend::wallet::OvkPolicy;
 use zcash_client_backend::zip321::{Payment, TransactionRequest};
 use zcash_client_backend::{
@@ -67,6 +72,9 @@ use zip32::fingerprint::SeedFingerprint;
 use zcash_client_backend::data_api::chain::BlockCache;
 use zcash_client_memory::{MemBlockCache, MemoryWalletDb};
 
+#[cfg(all(target_arch = "wasm32", debug_assertions))]
+mod browser_fixture;
+
 #[cfg(test)]
 mod confirmations_tests;
 const BATCH_SIZE: u32 = 10000;
@@ -81,6 +89,12 @@ fn consume_transparent_history_budget(remaining: &mut usize) -> Result<(), Error
 /// constant that signals what's the minimum transparent balance for proposing a
 /// shielding transaction
 const SHIELDING_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(100000);
+
+fn transaction_request_is_due(request_at: Option<std::time::SystemTime>) -> bool {
+    request_at.is_none_or(|request_at| {
+        time::OffsetDateTime::from(request_at) <= time::OffsetDateTime::now_utc()
+    })
+}
 
 fn transaction_status_from_raw_height(
     txid: TxId,
@@ -414,41 +428,23 @@ where
 {
     let prover = get_prover();
     let spending_keys = SpendingKeys::from_unified_spending_key(usk);
-    let result = match target_expiry_height {
-        Some(target_expiry_height) => create_proposed_transactions_with_expiry_height::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <FeeRuleT as FeeRule>::Error,
-            _,
-        >(
-            db,
-            network,
-            prover,
-            prover,
-            &spending_keys,
-            OvkPolicy::Sender,
-            proposal,
-            target_expiry_height,
-        ),
-        None => create_proposed_transactions::<
-            _,
-            _,
-            <MemoryWalletDb<Network> as InputSource>::Error,
-            _,
-            <FeeRuleT as FeeRule>::Error,
-            _,
-        >(
-            db,
-            network,
-            prover,
-            prover,
-            &spending_keys,
-            OvkPolicy::Sender,
-            proposal,
-        ),
-    };
+    let result = create_proposed_transactions::<
+        _,
+        _,
+        <MemoryWalletDb<Network> as InputSource>::Error,
+        _,
+        <FeeRuleT as FeeRule>::Error,
+        _,
+    >(
+        db,
+        network,
+        prover,
+        prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        proposal,
+        target_expiry_height,
+    );
 
     result.map_err(|error| {
         Error::Generic(format!("Failed to create transfer transactions: {error:?}"))
@@ -575,7 +571,10 @@ impl<P: Parameters> WalletChainRevision for MemoryWalletDb<P> {
     }
 }
 
-fn ensure_chain_revision<W: WalletChainRevision>(db: &W, expected: &W::Revision) -> Result<(), Error> {
+fn ensure_chain_revision<W: WalletChainRevision>(
+    db: &W,
+    expected: &W::Revision,
+) -> Result<(), Error> {
     if &db.chain_state_revision() == expected {
         Ok(())
     } else {
@@ -592,6 +591,7 @@ pub struct Wallet<W, T> {
     /// The policy used for balance and status queries. Input selection derives a symmetrical
     /// policy from its minimum confirmation count.
     confirmations_policy: ConfirmationsPolicy,
+    compact_block_cdn: Option<CompactBlockCdnConfig>,
     /// Note management: the number of notes to maintain in the wallet
     pub(crate) target_note_count: usize,
     /// Note management: the minimum allowed value for split change amounts
@@ -623,6 +623,7 @@ impl<W, T: Clone> Clone for Wallet<W, T> {
             client: self.client.clone(),
             network: self.network,
             confirmations_policy: self.confirmations_policy,
+            compact_block_cdn: self.compact_block_cdn.clone(),
             target_note_count: self.target_note_count,
             min_split_output_value: self.min_split_output_value,
         }
@@ -697,6 +698,30 @@ where
     T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
     <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
 {
+    fn transfer_confirmations_policy(
+        &self,
+        db: &W,
+        expiry_delta_blocks: Option<u32>,
+    ) -> Result<ConfirmationsPolicy, Error> {
+        expiry_delta_blocks
+            .map(validate_expiry_delta_blocks)
+            .transpose()?;
+        if expiry_delta_blocks.is_some() {
+            ordinary::confirmations_policy(
+                db,
+                &self.network,
+                self.selection_confirmations_policy(),
+            )?
+            .ok_or_else(|| {
+                Error::Generic(
+                    "Wallet must be synced to an ordinary anchor for custom expiry".into(),
+                )
+            })
+        } else {
+            Ok(self.selection_confirmations_policy())
+        }
+    }
+
     pub fn new(db: W, client: T, network: Network) -> Result<Self, Error> {
         Self::new_with_confirmations_policy(db, client, network, ConfirmationsPolicy::default())
     }
@@ -710,12 +735,23 @@ where
         network: Network,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Self, Error> {
+        Self::new_with_runtime_config(db, client, network, confirmations_policy, None)
+    }
+
+    pub(crate) fn new_with_runtime_config(
+        db: W,
+        client: T,
+        network: Network,
+        confirmations_policy: ConfirmationsPolicy,
+        compact_block_cdn: Option<CompactBlockCdnConfig>,
+    ) -> Result<Self, Error> {
         get_prover();
         Ok(Wallet {
             db: Arc::new(RwLock::new(db)),
             client: CompactTxStreamerClient::new(client),
             network,
             confirmations_policy,
+            compact_block_cdn,
             target_note_count: 4,
             min_split_output_value: 10000000,
         })
@@ -905,10 +941,13 @@ where
         let mut client = self.client.clone();
         // TODO: This should be held in the Wallet struct so we can download in parallel
         let db_cache = MemBlockCache::new();
+        let mut block_source =
+            CdnFallbackBlockSource::new(self.network, self.compact_block_cdn.clone());
 
         let mut db = self.db.write().await;
-        run(
+        run_with_block_source(
             &mut client,
+            &mut block_source,
             &self.network.clone(),
             &db_cache,
             &mut *db,
@@ -928,10 +967,13 @@ where
     {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();
+        let mut block_source =
+            CdnFallbackBlockSource::new(self.network, self.compact_block_cdn.clone());
 
         let mut db = self.db.write().await;
-        let did_work = run_next_batch(
+        let did_work = run_next_batch_with_block_source(
             &mut client,
+            &mut block_source,
             &self.network.clone(),
             &db_cache,
             &mut *db,
@@ -950,10 +992,13 @@ where
     {
         let mut client = self.client.clone();
         let db_cache = MemBlockCache::new();
+        let mut block_source =
+            CdnFallbackBlockSource::new(self.network, self.compact_block_cdn.clone());
 
         let mut db = self.db.write().await;
-        let did_work = zcash_client_backend::sync::run_next_batch_optimized(
+        let did_work = run_next_batch_optimized_with_block_source(
             &mut client,
+            &mut block_source,
             &self.network.clone(),
             &db_cache,
             &mut *db,
@@ -1092,10 +1137,7 @@ where
 
             let mut made_progress = false;
             for request in address_requests {
-                if request
-                    .request_at()
-                    .is_some_and(|request_at| request_at > std::time::SystemTime::now())
-                {
+                if !transaction_request_is_due(request.request_at()) {
                     continue;
                 }
 
@@ -1369,6 +1411,8 @@ where
 
         let batch_size = batch_size.unwrap_or(BATCH_SIZE);
         let mut client = self.client.clone();
+        let mut block_source =
+            CdnFallbackBlockSource::new(self.network, self.compact_block_cdn.clone());
 
         // We need a write lock for update_chain_tip, suggest_scan_ranges, etc.
         let mut db = self.db.write().await;
@@ -1422,11 +1466,17 @@ where
                     .map_err(|e| Error::Generic(format!("{e}")))?;
                 match scan_ranges.first() {
                     Some(scan_range) if scan_range.priority() == ScanPriority::Verify => {
-                        Self::download_and_insert_blocks(&mut client, &db_cache, scan_range)
-                            .await?;
                         let chain_state = Self::fetch_chain_state(
                             &mut client,
                             scan_range.block_range().start - 1,
+                        )
+                        .await?;
+                        Self::download_and_insert_blocks(
+                            &mut client,
+                            &mut block_source,
+                            &db_cache,
+                            scan_range,
+                            chain_state.block_hash(),
                         )
                         .await?;
                         let rewound = Self::scan_with_reorg_handling(
@@ -1487,29 +1537,8 @@ where
             }
         };
 
-        // 5. Download compact blocks for the range
-        let start_id = service::BlockId {
-            height: scan_range.block_range().start.into(),
-            ..Default::default()
-        };
-        let end_id = service::BlockId {
-            height: (scan_range.block_range().end - 1).into(),
-            ..Default::default()
-        };
-        let compact_blocks: Vec<CompactBlock> = client
-            .get_block_range(service::BlockRange {
-                start: Some(start_id),
-                end: Some(end_id),
-                pool_types: vec![],
-            })
-            .await
-            .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
-            .into_inner()
-            .try_collect()
-            .await
-            .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
-
-        // 6. Download tree state for range.start - 1
+        // 5. Download tree state for range.start - 1. This anchors CDN data to
+        // lightwalletd before the blocks are inserted or scanned.
         let tree_state_proto = client
             .get_tree_state(BlockId {
                 height: (scan_range.block_range().start - 1).into(),
@@ -1518,6 +1547,31 @@ where
             .await
             .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
             .into_inner();
+        let chain_state = tree_state_proto
+            .to_chain_state()
+            .map_err(|e| Error::Generic(format!("Failed to parse ChainState: {e}")))?;
+
+        // 6. Download compact blocks for the range.
+        let start_id = service::BlockId {
+            height: scan_range.block_range().start.into(),
+            ..Default::default()
+        };
+        let end_id = service::BlockId {
+            height: (scan_range.block_range().end - 1).into(),
+            ..Default::default()
+        };
+        let compact_blocks: Vec<CompactBlock> = block_source
+            .get_block_range(
+                &mut client,
+                service::BlockRange {
+                    start: Some(start_id),
+                    end: Some(end_id),
+                    pool_types: vec![],
+                },
+                Some(chain_state.block_hash()),
+            )
+            .await
+            .map_err(|e| Error::Generic(format!("Block download error: {e}")))?;
 
         // 7. Serialize into journal entry format:
         //    [range_start:u32 | range_end:u32 | tree_state_len:u32 | tree_state_bytes | (block_len:u32 + block_bytes)*]
@@ -1547,9 +1601,6 @@ where
         db_cache
             .insert(compact_blocks)
             .await
-            .map_err(|e| Error::Generic(format!("{e}")))?;
-        let chain_state = tree_state_proto
-            .to_chain_state()
             .map_err(|e| Error::Generic(format!("{e}")))?;
         let rewound = Self::scan_with_reorg_handling(
             &self.network,
@@ -1675,8 +1726,10 @@ where
     // Internal helper: download blocks and insert into cache
     async fn download_and_insert_blocks(
         client: &mut CompactTxStreamerClient<T>,
+        block_source: &mut CdnFallbackBlockSource,
         db_cache: &MemBlockCache,
         scan_range: &zcash_client_backend::data_api::scanning::ScanRange,
+        expected_prev_hash: zcash_primitives::block::BlockHash,
     ) -> Result<(), Error> {
         use zcash_client_backend::proto::service;
 
@@ -1689,15 +1742,10 @@ where
             end: Some(end),
             pool_types: vec![],
         };
-        let compact_blocks: Vec<zcash_client_backend::proto::compact_formats::CompactBlock> =
-            client
-                .get_block_range(range)
-                .await
-                .map_err(|e| Error::Generic(format!("gRPC error: {e}")))?
-                .into_inner()
-                .try_collect()
-                .await
-                .map_err(|e| Error::Generic(format!("Stream error: {e}")))?;
+        let compact_blocks = block_source
+            .get_block_range(client, range, Some(expected_prev_hash))
+            .await
+            .map_err(|e| Error::Generic(format!("Block download error: {e}")))?;
         db_cache
             .insert(compact_blocks)
             .await
@@ -1846,6 +1894,32 @@ where
             .read()
             .await
             .get_wallet_summary(self.query_confirmations_policy())?)
+    }
+
+    pub(crate) async fn get_wallet_summary_with_shieldable_balances(
+        &self,
+    ) -> Result<Option<(WalletSummary<AccountId>, HashMap<AccountId, Zatoshis>)>, Error> {
+        let db = self.db.read().await;
+        let Some(summary) = db.get_wallet_summary(self.query_confirmations_policy())? else {
+            return Ok(None);
+        };
+        let target_height = TargetHeight::from(summary.chain_tip_height() + 1);
+        let mut shieldable_balances = HashMap::new();
+        for account_id in summary.account_balances().keys() {
+            let balances = db.get_transparent_balances(
+                *account_id,
+                target_height,
+                self.selection_confirmations_policy(),
+            )?;
+            let value = balances
+                .values()
+                .try_fold(Zatoshis::ZERO, |total, (_, balance)| {
+                    (total + balance.spendable_value())
+                        .ok_or(zcash_protocol::value::BalanceError::Overflow)
+                })?;
+            shieldable_balances.insert(*account_id, value);
+        }
+        Ok(Some((summary, shieldable_balances)))
     }
 
     /// Get account ID by account name
@@ -2054,6 +2128,7 @@ where
         fee_rule: FeeRuleT,
         funding_source: TransferFundingSource,
         allow_send_max_fallback: bool,
+        expiry_delta_blocks: Option<u32>,
     ) -> Result<
         zcash_client_backend::proposal::Proposal<FeeRuleT, <W as InputSource>::NoteRef>,
         Error,
@@ -2091,15 +2166,22 @@ where
         let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
 
-        match propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+        let confirmations_policy = self.transfer_confirmations_policy(&*db, expiry_delta_blocks)?;
+        let propose = if expiry_delta_blocks.is_some() {
+            ordinary::propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>
+        } else {
+            propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>
+        };
+        match propose(
             &mut *db,
             &self.network,
             account_id,
             &input_selector,
             &change_strategy,
             request,
-            self.selection_confirmations_policy(),
+            confirmations_policy,
             &spend_policy,
+            None,
             None,
         ) {
             Ok(proposal) => Ok(proposal),
@@ -2119,7 +2201,9 @@ where
                             to_address,
                             memo,
                             MaxSpendMode::MaxSpendable,
-                            self.selection_confirmations_policy(),
+                            confirmations_policy,
+                            &Default::default(),
+                            None,
                         )
                         .ok();
 
@@ -2130,9 +2214,16 @@ where
                     }
                 }
 
-                Err(Error::Generic(format!(
+                let message = format!(
                     "Failed to propose transfer. Possibly insufficient permitted funds: {transfer_error:?}"
-                )))
+                );
+                Err(
+                    if matches!(transfer_error, WalletError::InsufficientFunds { .. }) {
+                        Error::InsufficientTransferFunds(message)
+                    } else {
+                        Error::Generic(message)
+                    },
+                )
             }
         }
     }
@@ -2163,6 +2254,7 @@ where
                         dynamic_zip317_fee_rule(marginal_fee_zats)?,
                         funding_source,
                         allow_exact_send_max_fallback(funding_source, true),
+                        expiry_delta_blocks,
                     )
                     .await?;
                 transfer_estimate_from_proposal(&proposal)
@@ -2177,6 +2269,7 @@ where
                         StandardFeeRule::Zip317,
                         funding_source,
                         false,
+                        expiry_delta_blocks,
                     )
                     .await?;
                 transfer_estimate_from_proposal(&proposal)
@@ -2225,6 +2318,7 @@ where
                         dynamic_zip317_fee_rule(marginal_fee_zats)?,
                         funding_source,
                         allow_exact_send_max_fallback(funding_source, true),
+                        expiry_delta_blocks,
                     )
                     .await?;
                 self.execute_unified_transfer(usk, proposal, expiry_delta_blocks)
@@ -2240,6 +2334,7 @@ where
                         StandardFeeRule::Zip317,
                         funding_source,
                         false,
+                        expiry_delta_blocks,
                     )
                     .await?;
                 self.execute_unified_transfer(usk, proposal, expiry_delta_blocks)
@@ -2299,6 +2394,7 @@ where
             account_id,
             self.selection_confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
+            None,
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
 
@@ -2316,7 +2412,7 @@ where
             OvkPolicy::Sender,
             &proposal,
             None,
-            orchard::builder::BundleType::DEFAULT,
+            zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
         )
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {e:?}")))?;
 
@@ -2405,11 +2501,17 @@ where
             self.selection_confirmations_policy(),
             &spend_policy,
             None,
+            None,
         )
-        .map_err(|e| {
-            Error::Generic(format!(
-                "Failed to propose transfer. Possibly insufficient permitted funds: {e:?}"
-            ))
+        .map_err(|error| {
+            let message = format!(
+                "Failed to propose transfer. Possibly insufficient permitted funds: {error:?}"
+            );
+            if matches!(error, WalletError::InsufficientFunds { .. }) {
+                Error::InsufficientTransferFunds(message)
+            } else {
+                Error::Generic(message)
+            }
         })?;
         let pczt = create_pczt_from_proposal::<
             _,
@@ -2425,7 +2527,7 @@ where
             OvkPolicy::Sender,
             &proposal,
             None,
-            orchard::builder::BundleType::DEFAULT,
+            zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
         )
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {e:?}")))?;
         Ok(pczt)
@@ -2512,6 +2614,7 @@ where
             account_id,
             self.selection_confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
+            None,
         )
         .map_err(|e| Error::Generic(format!("Error when shielding: {e:?}")))?;
 
@@ -2530,7 +2633,7 @@ where
                 OvkPolicy::Sender,
                 &proposal,
                 Some(BlockHeight::from(proposal.min_target_height()) + expiry_delta_blocks),
-                orchard::builder::BundleType::DEFAULT,
+                zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
             ),
             None => create_pczt_from_proposal::<
                 _,
@@ -2546,7 +2649,7 @@ where
                 OvkPolicy::Sender,
                 &proposal,
                 None,
-                orchard::builder::BundleType::DEFAULT,
+                zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
             ),
         }
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for shielding: {e:?}")))?;
@@ -2721,15 +2824,22 @@ where
         .map_err(|e| Error::Zip321(e.with_index(0)))?;
         let request = TransactionRequest::new(vec![payment])?;
         let mut db = self.db.write().await;
-        let proposal = match propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>(
+        let confirmations_policy = self.transfer_confirmations_policy(&*db, expiry_delta_blocks)?;
+        let propose = if expiry_delta_blocks.is_some() {
+            ordinary::propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>
+        } else {
+            propose_transfer::<_, _, _, _, <W as WalletCommitmentTrees>::Error>
+        };
+        let proposal = match propose(
             &mut *db,
             &self.network,
             account_id,
             &input_selector,
             &change_strategy,
             request,
-            self.selection_confirmations_policy(),
+            confirmations_policy,
             &spend_policy,
+            None,
             None,
         ) {
             Ok(proposal) => proposal,
@@ -2748,7 +2858,9 @@ where
                         to_address,
                         memo,
                         MaxSpendMode::MaxSpendable,
-                        self.selection_confirmations_policy(),
+                        confirmations_policy,
+                        &Default::default(),
+                        None,
                     )
                     .ok()
                 } else {
@@ -2758,9 +2870,16 @@ where
                 match max_proposal {
                     Some(proposal) if proposal_payment_amount_zats(&proposal)? == value => proposal,
                     _ => {
-                        return Err(Error::Generic(format!(
+                        let message = format!(
                             "Failed to propose transfer. Possibly insufficient permitted funds: {transfer_error:?}"
-                        )));
+                        );
+                        return Err(
+                            if matches!(transfer_error, WalletError::InsufficientFunds { .. }) {
+                                Error::InsufficientTransferFunds(message)
+                            } else {
+                                Error::Generic(message)
+                            },
+                        );
                     }
                 }
             }
@@ -2790,7 +2909,7 @@ where
                 ovk_policy.clone(),
                 &proposal,
                 Some(BlockHeight::from(proposal.min_target_height()) + expiry_delta_blocks),
-                orchard::builder::BundleType::DEFAULT,
+                zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
             ),
             None => create_pczt_from_proposal::<
                 _,
@@ -2806,7 +2925,7 @@ where
                 ovk_policy,
                 &proposal,
                 None,
-                orchard::builder::BundleType::DEFAULT,
+                zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
             ),
         }
         .map_err(|e| Error::Generic(format!("Failed to create PCZT for transfer: {e:?}")))?;
@@ -2862,6 +2981,7 @@ where
             )));
         }
 
+        let confirmations_policy = self.transfer_confirmations_policy(&*db, expiry_delta_blocks)?;
         let proposal = propose_send_max_transfer::<_, _, _, <W as WalletCommitmentTrees>::Error>(
             &mut *db,
             &self.network,
@@ -2871,7 +2991,9 @@ where
             to_address,
             memo,
             MaxSpendMode::MaxSpendable,
-            self.selection_confirmations_policy(),
+            confirmations_policy,
+            &Default::default(),
+            None,
         )
         .map_err(|e| Error::Generic(format!("Failed to propose Orchard migration: {e:?}")))?
         .with_proposed_version(Some(TxVersion::V6));
@@ -2891,7 +3013,7 @@ where
             &proposal,
             expiry_delta_blocks
                 .map(|delta| BlockHeight::from(proposal.min_target_height()) + delta),
-            orchard::builder::BundleType::DEFAULT,
+            zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
         )
         .map_err(|e| Error::Generic(format!("Failed to create migration PCZT: {e:?}")))
     }
@@ -2946,6 +3068,8 @@ where
             memo,
             MaxSpendMode::MaxSpendable,
             self.selection_confirmations_policy(),
+            &Default::default(),
+            None,
         )
         .map_err(|e| Error::Generic(format!("Failed to estimate Orchard migration: {e:?}")))?
         .with_proposed_version(Some(TxVersion::V6));
@@ -3007,6 +3131,7 @@ where
             account_id,
             self.selection_confirmations_policy(),
             CoinbaseFilter::AllTransparentOutputs,
+            None,
         )
         .map_err(|e| Error::Generic(format!("Error when estimating shielding fee: {e:?}")))?;
 
@@ -3102,8 +3227,16 @@ where
             self.selection_confirmations_policy(),
             &spend_policy,
             None,
+            None,
         )
-        .map_err(|e| Error::Generic(format!("Error when estimating transfer fee: {e:?}")))?;
+        .map_err(|error| {
+            let message = format!("Error when estimating transfer fee: {error:?}");
+            if matches!(error, WalletError::InsufficientFunds { .. }) {
+                Error::InsufficientTransferFunds(message)
+            } else {
+                Error::Generic(message)
+            }
+        })?;
 
         proposal_fee_required_zats(&proposal)
     }
@@ -3132,8 +3265,17 @@ where
             memo,
             MaxSpendMode::MaxSpendable,
             self.query_confirmations_policy(),
+            &Default::default(),
+            None,
         )
-        .map_err(|e| Error::Generic(format!("Error when estimating max transfer: {e:?}")))?;
+        .map_err(|error| {
+            let message = format!("Error when estimating max transfer: {error:?}");
+            if matches!(error, WalletError::InsufficientFunds { .. }) {
+                Error::InsufficientTransferFunds(message)
+            } else {
+                Error::Generic(message)
+            }
+        })?;
 
         Ok((
             proposal_payment_amount_zats(&proposal)?,
@@ -3340,8 +3482,8 @@ mod tests {
         OvkPolicy, TransferEstimate, TransferFundingSource, TransferOverallStatus,
         TransferSubmissionStatus, UnifiedSpendingKey, allow_exact_send_max_fallback,
         dynamic_zip317_fee_rule, hardware_orchard_ovk_policy, submit_transfer_transactions_with,
-        transaction_status_from_raw_height, transfer_expiry_height, transfer_policies,
-        usk_from_seed_str, validate_expiry_delta_blocks,
+        transaction_request_is_due, transaction_status_from_raw_height, transfer_expiry_height,
+        transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
     };
     use crate::Network;
     use nonempty::NonEmpty;
@@ -3418,6 +3560,7 @@ mod tests {
             network,
             confirmations_policy:
                 zcash_client_backend::data_api::wallet::ConfirmationsPolicy::default(),
+            compact_block_cdn: None,
             target_note_count: 4,
             min_split_output_value: 10_000_000,
         };
@@ -3448,6 +3591,16 @@ mod tests {
         super::consume_transparent_history_budget(&mut retry_budget).unwrap();
     }
 
+    #[test]
+    fn transparent_recovery_request_timing() {
+        let future = std::time::SystemTime::from(time::OffsetDateTime::now_utc())
+            + std::time::Duration::from_secs(60);
+        assert!(transaction_request_is_due(None));
+        assert!(transaction_request_is_due(Some(
+            std::time::SystemTime::UNIX_EPOCH
+        )));
+        assert!(!transaction_request_is_due(Some(future)));
+    }
     #[test]
     fn raw_transaction_height_maps_to_wallet_status() {
         let txid = txid(9);

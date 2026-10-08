@@ -78,6 +78,8 @@ pub(crate) fn orchard_send_max_routes_to_ironwood() {
         None,
         MaxSpendMode::MaxSpendable,
         ConfirmationsPolicy::MIN,
+        &zcash_client_backend::data_api::locking::LockedInputPolicy::Exclude,
+        None,
     )
     .expect("Orchard migration send-max proposal should succeed")
     .with_proposed_version(Some(TxVersion::V6));
@@ -156,6 +158,8 @@ pub(crate) fn shielded_send_max_routes_to_transparent() {
         None,
         MaxSpendMode::MaxSpendable,
         ConfirmationsPolicy::MIN,
+        &zcash_client_backend::data_api::locking::LockedInputPolicy::Exclude,
+        None,
     )
     .expect("shielded send-max proposal to a transparent recipient should succeed");
 
@@ -232,6 +236,8 @@ pub(crate) fn send_max_rejects_fee_only_transfer() {
         None,
         MaxSpendMode::MaxSpendable,
         ConfirmationsPolicy::MIN,
+        &zcash_client_backend::data_api::locking::LockedInputPolicy::Exclude,
+        None,
     );
 
     assert!(matches!(
@@ -350,6 +356,7 @@ pub(crate) fn incomplete_note_metadata_is_not_reported_as_spendable() {
             target_height,
             ConfirmationsPolicy::MIN,
             &[],
+            zcash_client_backend::data_api::locking::LockFilter::Unfiltered,
         )
         .expect("note selection succeeds");
     assert!(selected.orchard().is_empty());

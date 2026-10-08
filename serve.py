@@ -11,11 +11,11 @@ Default: 0.0.0.0:8000 (allows remote access)
 
 import http.server
 import socketserver
-import sys
 import mimetypes
 import os
 import gzip
 import io
+import argparse
 
 class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
     # Add custom MIME types
@@ -70,8 +70,8 @@ class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
         # Special case: when Worker requests /pkg/, serve the main module
         # This is needed because wasm-bindgen-rayon uses import('../../..')
         # which resolves to /pkg/ instead of /pkg/zcash_wallet_wasm.js
-        if self.path == '/pkg/' or self.path == '/pkg':
-            self.path = '/pkg/zcash_wallet_wasm.js'
+        if self.path.rstrip('/') in ('/pkg', '/pkg-sequential', '/pkg-proof', '/pkg-proof-sequential'):
+            self.path = self.path.rstrip('/') + '/zcash_wallet_wasm.js'
             print(f"    ↪ Redirecting to {self.path}")
 
         # Check if client accepts gzip encoding
@@ -112,8 +112,14 @@ class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
         return result
 
 if __name__ == '__main__':
-    PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-    HOST = sys.argv[2] if len(sys.argv) > 2 else ""  # Empty string = all interfaces
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('positional_port', nargs='?', type=int, default=8000)
+    parser.add_argument('positional_host', nargs='?', default='')
+    parser.add_argument('--port', type=int)
+    parser.add_argument('--host')
+    args = parser.parse_args()
+    PORT = args.port if args.port is not None else args.positional_port
+    HOST = args.host if args.host is not None else args.positional_host
 
     # Allow socket reuse
     socketserver.TCPServer.allow_reuse_address = True

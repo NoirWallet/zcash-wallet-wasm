@@ -1,8 +1,11 @@
 mod block_source;
 mod error;
 mod input_source;
+mod output_locks;
 pub mod proto;
 mod types;
+#[cfg(feature = "orchard")]
+pub mod voting;
 mod wallet_commitment_trees;
 mod wallet_read;
 mod wallet_write;
