@@ -8,7 +8,8 @@ use {
         testing::arb_tx, transparent, txid::TxIdDigester,
     },
     ::transparent::{
-        address::Script, sighash::SighashType, sighash::TransparentAuthorizingContext,
+        address::Script,
+        sighash::{SighashType, TransparentAuthorizingContext},
     },
     alloc::vec::Vec,
     blake2b_simd::Hash as Blake2bHash,
@@ -17,25 +18,23 @@ use {
     zcash_script::script,
 };
 
+#[cfg(all(test, zcash_unstable = "nutachyon"))]
+use zcash_protocol::constants::{V7_TX_VERSION, V7_VERSION_GROUP_ID};
+
 #[cfg(all(test, not(zcash_unstable = "nu7")))]
-use crate::transaction::{
-    TransactionDigest,
-    txid::{BlockTxCommitmentDigester, hash_sapling_spends},
+use {
+    crate::transaction::{
+        TransactionDigest,
+        sighash_v6::v6_signature_hash,
+        txid::{BlockTxCommitmentDigester, hash_sapling_spends},
+    },
+    blake2b_simd::Params,
+    ff::PrimeField,
+    zcash_protocol::value::ZatBalance,
 };
 
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
-use crate::transaction::sighash_v6::v6_signature_hash;
 #[cfg(all(test, zcash_unstable = "nu7", feature = "zip-233"))]
 use crate::transaction::sighash_v6::v6_signature_hash;
-
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
-use blake2b_simd::Params;
-
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
-use ff::PrimeField;
-
-#[cfg(all(test, not(zcash_unstable = "nu7")))]
-use zcash_protocol::value::ZatBalance;
 
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod data;
@@ -68,6 +67,47 @@ fn suggested_version_for_v5_branches_is_not_v6() {
         TxVersion::suggested_for_branch(BranchId::Nu6_1),
         TxVersion::V5
     );
+}
+
+#[test]
+#[cfg(zcash_unstable = "nutachyon")]
+fn v7_is_enabled_by_nu_tachyon_and_roundtrips() {
+    assert_eq!(
+        TxVersion::suggested_for_branch(BranchId::NuTachyon),
+        TxVersion::V7
+    );
+    assert!(TxVersion::V7.valid_in_branch(BranchId::NuTachyon));
+    assert!(!TxVersion::V7.valid_in_branch(BranchId::Nu6_3));
+
+    let tx = TransactionData::from_parts_v7(
+        BranchId::NuTachyon,
+        0,
+        0u32.into(),
+        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        Zatoshis::ZERO,
+        None,
+        None,
+        None,
+        None,
+    )
+    .freeze()
+    .unwrap();
+
+    let mut encoded = Vec::new();
+    tx.write(&mut encoded).unwrap();
+    assert_eq!(&encoded[..4], &(V7_TX_VERSION | (1 << 31)).to_le_bytes());
+    assert_eq!(&encoded[4..8], &V7_VERSION_GROUP_ID.to_le_bytes());
+    assert_eq!(
+        &encoded[8..12],
+        &u32::from(BranchId::NuTachyon).to_le_bytes()
+    );
+
+    let decoded = Transaction::read(&encoded[..], BranchId::Sprout).unwrap();
+    assert_eq!(decoded.version(), TxVersion::V7);
+    assert_eq!(decoded.consensus_branch_id(), BranchId::NuTachyon);
+    let mut reencoded = Vec::new();
+    decoded.write(&mut reencoded).unwrap();
+    assert_eq!(reencoded, encoded);
 }
 
 #[cfg(all(test, not(zcash_unstable = "nu7")))]
@@ -881,6 +921,15 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn tx_serialization_roundtrip_nu7(tx in arb_tx(BranchId::Nu7)) {
+        check_roundtrip(tx)?;
+    }
+}
+
+#[cfg(zcash_unstable = "nutachyon")]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
+    #[test]
+    fn tx_serialization_roundtrip_nu_tachyon(tx in arb_tx(BranchId::NuTachyon)) {
         check_roundtrip(tx)?;
     }
 }

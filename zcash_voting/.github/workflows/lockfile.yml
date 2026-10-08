@@ -1,0 +1,29 @@
+name: Lockfile guard
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  check-lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Cargo.lock is committed
+        run: |
+          if [ ! -f Cargo.lock ]; then
+            echo "ERROR: Cargo.lock must be committed for reproducible builds"
+            exit 1
+          fi
+
+  registry-dependency-readiness:
+    name: Registry dependency readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check Cargo manifests
+        run: python3 .github/scripts/check_no_git_dependencies.py

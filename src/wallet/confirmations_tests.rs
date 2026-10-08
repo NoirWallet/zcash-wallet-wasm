@@ -75,6 +75,91 @@ fn custom_policy() -> ConfirmationsPolicy {
 }
 
 #[tokio::test]
+async fn transfer_diagnostics_classify_only_input_selection_shortfalls() {
+    let (db, account_id) = funded_db_at_confirmations(10);
+    let wallet = TestWallet::new(db, client(), Network::TestNetwork).unwrap();
+    let address = zcash_client_backend::address::Address::Transparent(
+        transparent::address::TransparentAddress::PublicKeyHash([42; 20]),
+    );
+    let insufficient = wallet
+        .estimate_transfer(
+            account_id,
+            address.to_zcash_address(&Network::TestNetwork),
+            100_000,
+            TransferFundingSource::Shielded,
+            None,
+            Some(5_000),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(insufficient, Error::InsufficientTransferFunds(_)));
+    assert!(insufficient.to_string().contains("InsufficientFunds"));
+
+    let wrong_network = wallet
+        .estimate_transfer(
+            account_id,
+            address.to_zcash_address(&Network::MainNetwork),
+            100_000,
+            TransferFundingSource::Shielded,
+            None,
+            Some(5_000),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(!matches!(
+        wrong_network,
+        Error::InsufficientTransferFunds(_)
+    ));
+
+    let invalid_fee = wallet
+        .estimate_transfer(
+            account_id,
+            address.to_zcash_address(&Network::TestNetwork),
+            100_000,
+            TransferFundingSource::Shielded,
+            None,
+            Some(0),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(!matches!(invalid_fee, Error::InsufficientTransferFunds(_)));
+}
+
+#[tokio::test]
+async fn shielding_summary_uses_selection_policy_without_changing_query_or_max() {
+    for confirmations in [2, 3, 9, 10] {
+        let (db, account_id) = funded_db_at_confirmations(confirmations);
+        let wallet = TestWallet::new(db, client(), Network::TestNetwork).unwrap();
+        let (summary, shieldable) = wallet
+            .get_wallet_summary_with_shieldable_balances()
+            .await
+            .unwrap()
+            .unwrap();
+        let expected_query = if confirmations >= 10 { 200_000 } else { 0 };
+        let expected_selection = if confirmations >= 3 { 200_000 } else { 0 };
+        assert_eq!(
+            summary.account_balances()[&account_id]
+                .unshielded_balance()
+                .spendable_value(),
+            Zatoshis::from_u64(expected_query).unwrap()
+        );
+        assert_eq!(
+            shieldable[&account_id],
+            Zatoshis::from_u64(expected_selection).unwrap()
+        );
+        let proposal = wallet.pczt_shield(account_id).await;
+        if expected_selection > 0 {
+            assert_eq!(proposal.unwrap().transparent().inputs().len(), 1);
+        } else {
+            assert!(proposal.is_err());
+        }
+    }
+}
+
+#[tokio::test]
 async fn custom_policy_controls_estimates_and_unsigned_transparent_transfers() {
     let (db, account_id) = funded_db();
     let mut encoded = Vec::new();

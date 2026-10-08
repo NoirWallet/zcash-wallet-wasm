@@ -1,7 +1,11 @@
 use std::convert::Infallible;
 
 use incrementalmerkletree::Address;
-use shardtree::{ShardTree, error::ShardTreeError, store::memory::MemoryShardStore};
+use shardtree::{
+    ShardTree,
+    error::ShardTreeError,
+    store::{ShardStore, memory::MemoryShardStore},
+};
 #[cfg(feature = "orchard")]
 use zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT;
 use zcash_client_backend::data_api::{
@@ -14,6 +18,47 @@ use crate::MemoryWalletDb;
 impl<P: consensus::Parameters> WalletCommitmentTrees for MemoryWalletDb<P> {
     type Error = Infallible;
     type SaplingShardStore<'a> = MemoryShardStore<sapling::Node, BlockHeight>;
+
+    fn get_sapling_subtree_root(
+        &mut self,
+        index: u64,
+    ) -> Result<Option<sapling::Node>, ShardTreeError<Self::Error>> {
+        let address = Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index);
+        Ok(self
+            .sapling_tree
+            .store()
+            .get_shard(address)
+            .map_err(ShardTreeError::Storage)?
+            .and_then(|shard| shard.root_hash(address.position_range_end()).ok()))
+    }
+
+    #[cfg(feature = "orchard")]
+    fn get_orchard_subtree_root(
+        &mut self,
+        index: u64,
+    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
+        let address = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
+        Ok(self
+            .orchard_tree
+            .store()
+            .get_shard(address)
+            .map_err(ShardTreeError::Storage)?
+            .and_then(|shard| shard.root_hash(address.position_range_end()).ok()))
+    }
+
+    #[cfg(feature = "orchard")]
+    fn get_ironwood_subtree_root(
+        &mut self,
+        index: u64,
+    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
+        let address = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
+        Ok(self
+            .ironwood_tree
+            .store()
+            .get_shard(address)
+            .map_err(ShardTreeError::Storage)?
+            .and_then(|shard| shard.root_hash(address.position_range_end()).ok()))
+    }
 
     fn with_sapling_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<A, E>
     where

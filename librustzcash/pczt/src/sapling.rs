@@ -146,6 +146,7 @@ pub struct Spend {
     ///
     /// - This is set by the Updater.
     /// - This is required by the Prover.
+    #[getset(get = "pub")]
     pub(crate) witness: Option<(u32, [[u8; 32]; 32])>,
 
     /// The spend authorization randomizer.
@@ -735,7 +736,7 @@ impl From<sapling::pczt::ParseError> for ParseError {
 
 /// Errors that can occur while checking that a Sapling bundle's spend witnesses are
 /// consistent with its anchor.
-#[cfg(feature = "sapling")]
+#[cfg(all(feature = "sapling", feature = "prover"))]
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AnchorConsistencyError {
@@ -753,7 +754,7 @@ pub enum AnchorConsistencyError {
 /// circuit.
 ///
 /// [ZIP 374]: https://zips.z.cash/zip-0374#anchors-and-pre-authorization
-#[cfg(feature = "sapling")]
+#[cfg(all(feature = "sapling", feature = "prover"))]
 pub(crate) fn verify_witnesses_root_to_anchor(
     bundle: &sapling::pczt::Bundle,
     anchor: sapling::Anchor,

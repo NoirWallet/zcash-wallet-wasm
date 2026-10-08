@@ -466,6 +466,23 @@ pub struct MemoryWallet {
     /// the block heights corresponding to the last note commitment for each shard in the Ironwood tree
     #[prost(message, repeated, tag = "20")]
     pub ironwood_tree_shard_end_heights: ::prost::alloc::vec::Vec<TreeEndHeightsRecord>,
+    /// Owner-scoped output reservations. Absent in older version-1 wallets.
+    #[prost(message, repeated, tag = "21")]
+    pub output_locks: ::prost::alloc::vec::Vec<OutputLockRecord>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OutputLockRecord {
+    #[prost(bytes = "vec", tag = "1")]
+    pub tx_id: ::prost::alloc::vec::Vec<u8>,
+    /// 0 transparent, 2 Sapling, 3 Orchard, 4 Ironwood
+    #[prost(uint32, tag = "2")]
+    pub pool: u32,
+    #[prost(uint32, tag = "3")]
+    pub output_index: u32,
+    #[prost(bytes = "vec", tag = "4")]
+    pub owner: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "5")]
+    pub expiry_height: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Accounts {

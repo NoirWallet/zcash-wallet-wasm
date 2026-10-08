@@ -8,7 +8,7 @@ use std::{
 use zip32::Scope;
 
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::{PoolType, ShieldedPool, memo::Memo};
+use zcash_protocol::{PoolType, ShieldedPool, consensus::BlockHeight, memo::Memo};
 
 use zcash_client_backend::{
     data_api::{ReceivedNotes, SentTransactionOutput},
@@ -335,6 +335,7 @@ pub(crate) fn to_spendable_notes(
     sapling_received_notes: &[&ReceivedNote],
     #[cfg(feature = "orchard")] orchard_received_notes: &[&ReceivedNote],
     #[cfg(feature = "orchard")] ironwood_received_notes: &[&ReceivedNote],
+    transaction_heights: impl Fn(&ReceivedNote) -> (Option<BlockHeight>, Option<BlockHeight>),
 ) -> Result<ReceivedNotes<NoteId>, Error> {
     let sapling = sapling_received_notes
         .iter()
@@ -350,8 +351,8 @@ pub(crate) fn to_spendable_notes(
                         .ok_or(Error::Missing("recipient key scope".into()))?,
                     note.commitment_tree_position
                         .ok_or(Error::Missing("commitment tree position".into()))?,
-                    None,
-                    None,
+                    transaction_heights(note).0,
+                    transaction_heights(note).1,
                 ))
             } else {
                 Err(Error::Other("Note is not a sapling note".to_owned()))
@@ -377,8 +378,8 @@ pub(crate) fn to_spendable_notes(
                         .ok_or(Error::Missing("recipient key scope".into()))?,
                     note.commitment_tree_position
                         .ok_or(Error::Missing("commitment tree position".into()))?,
-                    None,
-                    None,
+                    transaction_heights(note).0,
+                    transaction_heights(note).1,
                 ))
             } else {
                 Err(Error::Other("Note is not an orchard note".to_owned()))
@@ -404,8 +405,8 @@ pub(crate) fn to_spendable_notes(
                         .ok_or(Error::Missing("recipient key scope".into()))?,
                     note.commitment_tree_position
                         .ok_or(Error::Missing("commitment tree position".into()))?,
-                    None,
-                    None,
+                    transaction_heights(note).0,
+                    transaction_heights(note).1,
                 ))
             } else {
                 Err(Error::Other("Note is not an Ironwood note".to_owned()))
