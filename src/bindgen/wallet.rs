@@ -3,7 +3,6 @@ use std::str::FromStr;
 
 use crate::bindgen::sign::pczt_sign_inner;
 use crate::bindgen::{Pczt as WasmPczt, ProofGenerationKey, SeedFingerprint};
-use crate::compact_block_source::CompactBlockCdnConfig;
 use crate::wallet::TransferFundingSource;
 use crate::{Error, Network, PRUNING_DEPTH, Wallet};
 
@@ -33,34 +32,12 @@ fn is_user_facing_shielded_address(
     let has_shielded_receiver = address.has_orchard() || address.has_sapling();
     has_shielded_receiver && (address == default_address || address.transparent().is_none())
 }
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfirmationsPolicyOptions {
     trusted: NonZeroU32,
     untrusted: NonZeroU32,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompactBlockCdnOptions {
-    base_url: String,
-    request_timeout_ms: Option<u32>,
-    max_chunk_bytes: Option<usize>,
-    max_concurrent_chunk_requests: Option<usize>,
-}
-
-impl TryFrom<CompactBlockCdnOptions> for CompactBlockCdnConfig {
-    type Error = Error;
-
-    fn try_from(options: CompactBlockCdnOptions) -> Result<Self, Self::Error> {
-        Self::new(
-            options.base_url,
-            options.request_timeout_ms,
-            options.max_chunk_bytes,
-            options.max_concurrent_chunk_requests,
-        )
-        .map_err(|error| Error::Generic(format!("Invalid compact block CDN config: {error}")))
-    }
 }
 
 impl TryFrom<ConfirmationsPolicyOptions> for ConfirmationsPolicy {
@@ -88,17 +65,6 @@ export interface ConfirmationsPolicy {
     trusted: number;
     /** Positive uint32. */
     untrusted: number;
-}
-
-export interface CompactBlockCdnOptions {
-    /** Root containing {network}/shielded-default/manifest.json. */
-    baseUrl: string;
-    /** Per-request timeout. Defaults to 30000. */
-    requestTimeoutMs?: number;
-    /** Maximum decompressed chunk size. Defaults to 128 MiB. */
-    maxChunkBytes?: number;
-    /** Maximum concurrent CDN chunk requests. Defaults to 4; valid range is 1 through 8. */
-    maxConcurrentChunkRequests?: number;
 }
 "#;
 
@@ -140,12 +106,6 @@ pub struct WebWallet {
 }
 
 impl WebWallet {
-    #[cfg(feature = "voting")]
-    #[allow(dead_code)]
-    pub(crate) fn shared_inner(&self) -> MemoryWallet<tonic_web_wasm_client::Client> {
-        self.inner.clone()
-    }
-
     pub fn client(&self) -> CompactTxStreamerClient<tonic_web_wasm_client::Client> {
         self.inner.client.clone()
     }
@@ -166,17 +126,6 @@ impl WebWallet {
             Ok(())
         }
     }
-
-    async fn diagnose_transfer_result<T>(
-        &self,
-        account_id: AccountId,
-        result: Result<T, Error>,
-    ) -> Result<T, Error> {
-        if matches!(&result, Err(Error::InsufficientTransferFunds(_))) {
-            self.ensure_spendability_consistent(account_id).await?;
-        }
-        result
-    }
 }
 
 #[wasm_bindgen]
@@ -192,8 +141,6 @@ impl WebWallet {
         >,
         #[wasm_bindgen(unchecked_optional_param_type = "ConfirmationsPolicy | null")]
         confirmations_policy: JsValue,
-        #[wasm_bindgen(unchecked_optional_param_type = "CompactBlockCdnOptions | null")]
-        compact_block_cdn: JsValue,
     ) -> Result<WebWallet, Error> {
         let network = Network::from_str(network)?;
         let confirmations_policy = if confirmations_policy.is_null_or_undefined() {
@@ -212,14 +159,6 @@ impl WebWallet {
             options.try_into()?
         };
         let client = Client::new(lightwalletd_url.to_string());
-        let compact_block_cdn = if compact_block_cdn.is_null_or_undefined() {
-            None
-        } else {
-            Some(
-                serde_wasm_bindgen::from_value::<CompactBlockCdnOptions>(compact_block_cdn)?
-                    .try_into()?,
-            )
-        };
 
         let db = match db_bytes {
             Some(bytes) => {
@@ -232,12 +171,11 @@ impl WebWallet {
         };
 
         Ok(Self {
-            inner: Wallet::new_with_runtime_config(
+            inner: Wallet::new_with_confirmations_policy(
                 db,
                 client,
                 network,
                 confirmations_policy,
-                compact_block_cdn,
             )?,
         })
     }
@@ -315,22 +253,11 @@ impl WebWallet {
     }
 
     pub async fn get_wallet_summary(&self) -> Result<Option<WalletSummary>, Error> {
-        let Some((summary, shieldable_balances)) = self
-            .inner
-            .get_wallet_summary_with_shieldable_balances()
+        self.inner
+            .get_wallet_summary()
             .await?
-        else {
-            return Ok(None);
-        };
-        let mut summary = WalletSummary::try_from(summary)?;
-        for (account_id, balance) in &mut summary.account_balances {
-            balance.unshielded_shieldable_balance = shieldable_balances
-                .get(&AccountId::from(*account_id))
-                .copied()
-                .unwrap_or(zcash_protocol::value::Zatoshis::ZERO)
-                .into();
-        }
-        Ok(Some(summary))
+            .map(WalletSummary::try_from)
+            .transpose()
     }
 
     /// Get the birthday height for a specific account
@@ -827,6 +754,9 @@ impl WebWallet {
     ) -> Result<JsValue, Error> {
         let account_id = AccountId::from(account_id);
         let funding_source = funding_source.parse::<TransferFundingSource>()?;
+        if funding_source == TransferFundingSource::Shielded {
+            self.ensure_spendability_consistent(account_id).await?;
+        }
         let result = self
             .inner
             .oneclick_transfer(
@@ -839,12 +769,7 @@ impl WebWallet {
                 marginal_fee_zats,
                 expiry_delta_blocks,
             )
-            .await;
-        let result = if funding_source == TransferFundingSource::Shielded {
-            self.diagnose_transfer_result(account_id, result).await?
-        } else {
-            result?
-        };
+            .await?;
         Ok(serde_wasm_bindgen::to_value(&result)?)
     }
 
@@ -935,12 +860,14 @@ impl WebWallet {
         marginal_fee_zats: u64,
     ) -> Result<WasmPczt, Error> {
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        let account_id = AccountId::from(account_id);
-        let result = self
-            .inner
-            .pczt_create_dynamic_fee(account_id, to_address, value, memo, marginal_fee_zats)
-            .await;
-        self.diagnose_transfer_result(account_id, result)
+        self.inner
+            .pczt_create_dynamic_fee(
+                AccountId::from(account_id),
+                to_address,
+                value,
+                memo,
+                marginal_fee_zats,
+            )
             .await
             .map(Into::into)
     }
@@ -1081,7 +1008,7 @@ impl WebWallet {
                         marginal_fee_zats,
                         expiry_delta_blocks,
                     )
-                    .await
+                    .await?
             }
             None => {
                 self.inner
@@ -1092,13 +1019,9 @@ impl WebWallet {
                         memo,
                         marginal_fee_zats,
                     )
-                    .await
+                    .await?
             }
         };
-
-        let pczt = self
-            .diagnose_transfer_result(AccountId::from(account_id), pczt)
-            .await?;
 
         self.sign_prove_and_send_pczt(pczt, usk, seed_fp, sapling_proof_gen_key)
             .await
@@ -1193,6 +1116,9 @@ impl WebWallet {
     ) -> Result<JsValue, Error> {
         let account_id = AccountId::from(account_id);
         let funding_source = funding_source.parse::<TransferFundingSource>()?;
+        if funding_source == TransferFundingSource::Shielded {
+            self.ensure_spendability_consistent(account_id).await?;
+        }
         let estimate = self
             .inner
             .estimate_transfer(
@@ -1204,12 +1130,7 @@ impl WebWallet {
                 marginal_fee_zats,
                 expiry_delta_blocks,
             )
-            .await;
-        let estimate = if funding_source == TransferFundingSource::Shielded {
-            self.diagnose_transfer_result(account_id, estimate).await?
-        } else {
-            estimate?
-        };
+            .await?;
         Ok(serde_wasm_bindgen::to_value(&estimate)?)
     }
 
@@ -1223,12 +1144,11 @@ impl WebWallet {
         marginal_fee_zats: u64,
     ) -> Result<u64, Error> {
         let account_id = AccountId::from(account_id);
+        self.ensure_spendability_consistent(account_id).await?;
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        let result = self
-            .inner
+        self.inner
             .estimate_pczt_transfer_fee(account_id, to_address, value, memo, marginal_fee_zats)
-            .await;
-        self.diagnose_transfer_result(account_id, result).await
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1267,12 +1187,13 @@ impl WebWallet {
         }
 
         let account_id = AccountId::from(account_id);
+        self.ensure_spendability_consistent(account_id).await?;
+
         let to_address = ZcashAddress::try_from_encoded(&to_address)?;
-        let result = self
+        let (max_amount_zats, fee_zats) = self
             .inner
             .estimate_pczt_max_transfer(account_id, to_address, memo, marginal_fee_zats)
-            .await;
-        let (max_amount_zats, fee_zats) = self.diagnose_transfer_result(account_id, result).await?;
+            .await?;
 
         serde_wasm_bindgen::to_value(&MaxTransferEstimate {
             max_amount_zats: max_amount_zats.to_string(),
@@ -1411,7 +1332,6 @@ pub struct AccountBalance {
     pub orchard_balance: u64,
     pub ironwood_balance: u64,
     pub unshielded_balance: u64,
-    pub unshielded_shieldable_balance: u64,
     pub sapling_pending_balance: u64,
     pub orchard_pending_balance: u64,
     pub ironwood_pending_balance: u64,
@@ -1442,7 +1362,7 @@ impl TryFrom<zcash_client_backend::data_api::AccountBalance> for AccountBalance 
         let sapling_pending_balance = pending_value(balance.sapling_balance())?;
         let orchard_pending_balance = pending_value(balance.orchard_balance())?;
         let ironwood_pending_balance = pending_value(balance.ironwood_balance())?;
-        let unshielded_pending_balance = pending_value(&balance.unshielded_balance())?;
+        let unshielded_pending_balance = pending_value(balance.unshielded_balance())?;
         let pending_balance = (balance.change_pending_confirmation()
             + balance.value_pending_spendability())
         .ok_or(zcash_protocol::value::BalanceError::Overflow)
@@ -1453,7 +1373,6 @@ impl TryFrom<zcash_client_backend::data_api::AccountBalance> for AccountBalance 
             orchard_balance: balance.orchard_balance().spendable_value().into(),
             ironwood_balance: balance.ironwood_balance().spendable_value().into(),
             unshielded_balance: balance.unshielded_balance().spendable_value().into(),
-            unshielded_shieldable_balance: balance.unshielded_balance().spendable_value().into(),
             sapling_pending_balance: sapling_pending_balance.into(),
             orchard_pending_balance: orchard_pending_balance.into(),
             ironwood_pending_balance: ironwood_pending_balance.into(),

@@ -5,8 +5,6 @@ updates:
   schedule:
     interval: daily
     timezone: Etc/UTC
-  cooldown:
-    default-days: 7
   open-pull-requests-limit: 10
   reviewers:
   - str4d

@@ -90,8 +90,6 @@ pub enum Error {
         note_count: usize,
         value_zats: u64,
     },
-    #[error("{0}")]
-    InsufficientTransferFunds(String),
     #[error("Failed to prove Pczt: {0}")]
     PcztProve(String),
     #[error("Failed to send Pczt: {0}")]
@@ -125,13 +123,5 @@ where
 {
     fn from(e: zcash_client_backend::sync::Error<A, B, C>) -> Self {
         Self::Sync(e.to_string())
-    }
-}
-#[cfg(all(feature = "voting", target_arch = "wasm32"))]
-impl From<crate::voting::types::VotingApiError> for wasm_bindgen::JsValue {
-    fn from(value: crate::voting::types::VotingApiError) -> Self {
-        let error = js_sys::Error::new(&value.message);
-        error.set_name(value.code.as_str());
-        error.into()
     }
 }

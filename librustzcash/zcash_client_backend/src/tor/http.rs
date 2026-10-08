@@ -1,6 +1,6 @@
 //! HTTP requests over Tor.
 
-use std::{fmt, future::Future, io, sync::Arc, time::Duration};
+use std::{fmt, future::Future, io, sync::Arc};
 
 use arti_client::TorClient;
 use futures_util::task::SpawnExt;
@@ -21,7 +21,7 @@ use tokio_rustls::{
 use tor_rtcompat::PreferredRuntime;
 use tracing::{debug, error};
 
-use super::{Client, Error, Timeouts};
+use super::{Client, Error};
 
 pub mod cryptex;
 
@@ -33,47 +33,8 @@ pub enum Retry {
     Isolated,
 }
 
-/// The stage of an HTTP request that exceeded its deadline.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TimeoutPhase {
-    /// Opening the Tor stream to the server, or completing the TLS handshake.
-    Connect,
-    /// Sending the request and receiving its response headers.
-    Request,
-    /// Receiving and parsing the response body.
-    ResponseBody,
-}
-
-impl fmt::Display for TimeoutPhase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TimeoutPhase::Connect => write!(f, "connecting to the server"),
-            TimeoutPhase::Request => write!(f, "awaiting the response headers"),
-            TimeoutPhase::ResponseBody => write!(f, "reading the response body"),
-        }
-    }
-}
-
-/// Runs `f`, failing with [`HttpError::Timeout`] if it does not finish within `limit`.
-async fn with_timeout<T>(
-    limit: Duration,
-    phase: TimeoutPhase,
-    f: impl Future<Output = Result<T, Error>>,
-) -> Result<T, Error> {
-    tokio::time::timeout(limit, f)
-        .await
-        .unwrap_or_else(|_| Err(HttpError::Timeout(phase).into()))
-}
-
 pub(super) fn url_is_https(url: &Uri) -> Result<bool, HttpError> {
-    // Only HTTP and HTTPS are supported. A missing scheme, or any other scheme (`ftp`,
-    // `ws`, `file`, ...), is rejected rather than silently treated as plaintext HTTP.
-    match url.scheme() {
-        Some(scheme) if scheme == &Scheme::HTTPS => Ok(true),
-        Some(scheme) if scheme == &Scheme::HTTP => Ok(false),
-        _ => Err(HttpError::NonHttpUrl),
-    }
+    Ok(url.scheme().ok_or_else(|| HttpError::NonHttpUrl)? == &Scheme::HTTPS)
 }
 
 pub(super) fn parse_url(url: &Uri) -> Result<(bool, String, u16), Error> {
@@ -112,11 +73,6 @@ impl Client {
     ///   to `|_| None`, and you can ensure the same circuit is reused by setting this to
     ///   `|res| res.is_err().then_some(Retry::Same)` (e.g. if you require a persistent
     ///   Tor client identity across queries).
-    ///
-    /// The [`Timeouts`] this client was created with are applied to each attempt
-    /// individually, so the total time this method can take is bounded by `retry_limit + 1`
-    /// times those deadlines. A request that exceeds one of them fails with
-    /// [`HttpError::Timeout`], which `retry_filter` sees like any other error.
     #[tracing::instrument(skip(self, request, parse_response, retry_filter))]
     pub async fn http_get<T, F: Future<Output = Result<T, Error>>>(
         &self,
@@ -158,11 +114,6 @@ impl Client {
     ///   to `|_| None`, and you can ensure the same circuit is reused by setting this to
     ///   `|res| res.is_err().then_some(Retry::Same)` (e.g. if you require a persistent
     ///   Tor client identity across queries).
-    ///
-    /// The [`Timeouts`] this client was created with are applied to each attempt
-    /// individually, so the total time this method can take is bounded by `retry_limit + 1`
-    /// times those deadlines. A request that exceeds one of them fails with
-    /// [`HttpError::Timeout`], which `retry_filter` sees like any other error.
     #[tracing::instrument(skip(self, request, body, parse_response, retry_filter))]
     pub async fn http_post<B, T, F>(
         &self,
@@ -200,11 +151,6 @@ impl Client {
     ///   to `|_| None`, and you can ensure the same circuit is reused by setting this to
     ///   `|res| res.is_err().then_some(Retry::Same)` (e.g. if you require a persistent
     ///   Tor client identity across queries).
-    ///
-    /// The [`Timeouts`] this client was created with are applied to each attempt
-    /// individually, so the total time this method can take is bounded by `retry_limit + 1`
-    /// times those deadlines. A request that exceeds one of them fails with
-    /// [`HttpError::Timeout`], which `retry_filter` sees like any other error.
     async fn http_request<B, T, F>(
         &self,
         url: Uri,
@@ -224,10 +170,8 @@ impl Client {
         let mut client = None;
 
         let (parts, body) = loop {
-            let active = client.as_ref().unwrap_or(self);
             let response = one_http_request(
-                &active.inner,
-                &active.timeouts,
+                &client.as_ref().unwrap_or(self).inner,
                 url.clone(),
                 &request,
                 body.clone(),
@@ -255,15 +199,7 @@ impl Client {
         }?
         .into_parts();
 
-        Ok(Response::from_parts(
-            parts,
-            with_timeout(
-                self.timeouts.response_body,
-                TimeoutPhase::ResponseBody,
-                parse_response(body),
-            )
-            .await?,
-        ))
+        Ok(Response::from_parts(parts, parse_response(body).await?))
     }
 
     /// Makes an HTTP GET request over Tor, parsing the response as JSON.
@@ -283,11 +219,6 @@ impl Client {
     ///   to `|_| None`, and you can ensure the same circuit is reused by setting this to
     ///   `|res| res.is_err().then_some(Retry::Same)` (e.g. if you require a persistent
     ///   Tor client identity across queries).
-    ///
-    /// The [`Timeouts`] this client was created with are applied to each attempt
-    /// individually, so the total time this method can take is bounded by `retry_limit + 1`
-    /// times those deadlines. A request that exceeds one of them fails with
-    /// [`HttpError::Timeout`], which `retry_filter` sees like any other error.
     pub async fn http_get_json<T: DeserializeOwned>(
         &self,
         url: Uri,
@@ -316,7 +247,6 @@ impl Client {
 
 async fn one_http_request<B>(
     tor_client: &TorClient<PreferredRuntime>,
-    timeouts: &Timeouts,
     url: Uri,
     request: impl FnOnce(Builder) -> Builder,
     body: B,
@@ -328,52 +258,30 @@ where
 {
     let (is_https, host, port) = parse_url(&url)?;
 
+    // Connect to the server.
     debug!("Connecting through Tor to {}:{}", host, port);
+    let stream = tor_client.connect((host.as_str(), port)).await?;
 
-    // The Tor stream and the TLS handshake are bounded together, so that
-    // `Timeouts::connect` means the same thing here as it does for the gRPC transport
-    // (where `tonic` applies it to the connector as a whole).
     if is_https {
-        let stream = with_timeout(timeouts.connect, TimeoutPhase::Connect, async {
-            let stream = tor_client.connect((host.as_str(), port)).await?;
-
-            // On apple-darwin targets there's an issue with the native TLS implementation
-            // when used over Tor circuits. We use Rustls instead.
-            //
-            // https://gitlab.torproject.org/tpo/core/arti/-/issues/715
-            let root_store = RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-            };
-            let config = ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-            let connector = TlsConnector::from(Arc::new(config));
-            let dnsname = ServerName::try_from(host).expect("Already checked");
-            Ok(connector
-                .connect(dnsname, stream)
-                .await
-                .map_err(HttpError::Tls)?)
-        })
-        .await?;
-
-        with_timeout(
-            timeouts.request,
-            TimeoutPhase::Request,
-            make_http_request(stream, url, request, body),
-        )
-        .await
+        // On apple-darwin targets there's an issue with the native TLS implementation
+        // when used over Tor circuits. We use Rustls instead.
+        //
+        // https://gitlab.torproject.org/tpo/core/arti/-/issues/715
+        let root_store = RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        let config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(config));
+        let dnsname = ServerName::try_from(host).expect("Already checked");
+        let stream = connector
+            .connect(dnsname, stream)
+            .await
+            .map_err(HttpError::Tls)?;
+        make_http_request(stream, url, request, body).await
     } else {
-        let stream = with_timeout(timeouts.connect, TimeoutPhase::Connect, async {
-            Ok(tor_client.connect((host.as_str(), port)).await?)
-        })
-        .await?;
-
-        with_timeout(
-            timeouts.request,
-            TimeoutPhase::Request,
-            make_http_request(stream, url, request, body),
-        )
-        .await
+        make_http_request(stream, url, request, body).await
     }
 }
 
@@ -421,7 +329,6 @@ where
 
 /// Errors that can occurr while using HTTP-over-Tor.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum HttpError {
     /// A non-HTTP URL was encountered.
     NonHttpUrl,
@@ -436,10 +343,6 @@ pub enum HttpError {
     Spawn(futures_util::task::SpawnError),
     /// A TLS-specific IO error.
     Tls(io::Error),
-    /// The request did not complete within the corresponding [`Timeouts`] deadline.
-    ///
-    /// [`Timeouts`]: super::Timeouts
-    Timeout(TimeoutPhase),
     /// The status code indicated that the request was unsuccessful.
     ///
     /// This is only returned by APIs that make specific queries, such as
@@ -457,7 +360,6 @@ impl fmt::Display for HttpError {
             HttpError::Json(e) => write!(f, "Failed to parse JSON: {e}"),
             HttpError::Spawn(e) => write!(f, "Failed to spawn task: {e}"),
             HttpError::Tls(e) => write!(f, "TLS error: {e}"),
-            HttpError::Timeout(phase) => write!(f, "Timed out while {phase}"),
             HttpError::Unsuccessful(status) => write!(f, "Request was unsuccessful ({status:?})"),
         }
     }
@@ -472,7 +374,6 @@ impl std::error::Error for HttpError {
             HttpError::Json(e) => Some(e),
             HttpError::Spawn(e) => Some(e),
             HttpError::Tls(e) => Some(e),
-            HttpError::Timeout(_) => None,
             HttpError::Unsuccessful(_) => None,
         }
     }
@@ -499,102 +400,6 @@ impl From<serde_json::Error> for HttpError {
 impl From<futures_util::task::SpawnError> for HttpError {
     fn from(e: futures_util::task::SpawnError) -> Self {
         HttpError::Spawn(e)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use http_body_util::Empty;
-    use hyper::{Uri, body::Bytes};
-
-    use super::{
-        HttpError, TimeoutPhase, make_http_request, parse_url, url_is_https, with_timeout,
-    };
-    use crate::tor::Error;
-
-    /// A server that accepts the connection and then never speaks must not be able to
-    /// hold a request pending forever.
-    #[tokio::test]
-    async fn silent_server_times_out() {
-        // The far end of this duplex stream is held open for the duration of the test but
-        // never read from or written to, modelling a peer that stalls after connecting.
-        let (stream, _silent_peer) = tokio::io::duplex(1024);
-
-        let res = with_timeout(
-            Duration::from_millis(100),
-            TimeoutPhase::Request,
-            make_http_request(
-                stream,
-                "http://example.com/".parse().unwrap(),
-                |builder| builder.method("GET"),
-                Empty::<Bytes>::new(),
-            ),
-        )
-        .await;
-
-        assert!(
-            matches!(
-                res,
-                Err(Error::Http(HttpError::Timeout(TimeoutPhase::Request)))
-            ),
-            "expected a request timeout, got {res:?}",
-        );
-    }
-
-    #[test]
-    fn parse_url_infers_default_ports() {
-        assert_eq!(
-            parse_url(&"https://example.com/".parse::<Uri>().unwrap()).unwrap(),
-            (true, "example.com".to_string(), 443),
-        );
-        assert_eq!(
-            parse_url(&"http://example.com/".parse::<Uri>().unwrap()).unwrap(),
-            (false, "example.com".to_string(), 80),
-        );
-    }
-
-    #[test]
-    fn parse_url_respects_explicit_port() {
-        assert_eq!(
-            parse_url(&"http://example.com:8080/".parse::<Uri>().unwrap()).unwrap(),
-            (false, "example.com".to_string(), 8080),
-        );
-    }
-
-    #[test]
-    fn non_http_schemes_are_rejected() {
-        // The bug this guards against: a URL with an explicit non-HTTP(S) scheme used to
-        // be accepted and treated as plaintext HTTP, contradicting `NonHttpUrl`'s "only
-        // HTTP or HTTPS" contract. A non-HTTP(S) URL must never yield a usable request,
-        // by either of two paths: it fails to parse as a URI at all (`file:///...` has an
-        // empty authority, which hyper rejects), or it parses and `url_is_https` /
-        // `parse_url` reject its scheme.
-        for url in [
-            "ftp://example.com/",
-            "ws://example.com/",
-            "wss://example.com/",
-            "file:///etc/passwd",
-        ] {
-            let Ok(uri) = url.parse::<Uri>() else {
-                continue; // rejected at the URI-parse boundary; nothing reaches the transport
-            };
-            assert!(
-                matches!(url_is_https(&uri), Err(HttpError::NonHttpUrl)),
-                "{url} should be rejected by url_is_https",
-            );
-            assert!(
-                matches!(parse_url(&uri), Err(Error::Http(HttpError::NonHttpUrl))),
-                "{url} should be rejected by parse_url",
-            );
-        }
-    }
-
-    #[test]
-    fn missing_scheme_is_rejected() {
-        let uri = "//example.com/".parse::<Uri>().unwrap();
-        assert!(matches!(url_is_https(&uri), Err(HttpError::NonHttpUrl)));
     }
 }
 

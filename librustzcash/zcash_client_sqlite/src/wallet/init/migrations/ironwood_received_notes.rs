@@ -20,10 +20,9 @@ use crate::wallet::init::WalletMigrationError;
 
 use super::orchard_note_version;
 
-/// Adds tables for storage of received Ironwood notes.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xdc0d6c91_b3db_429e_9a7b_d671cc19656e);
+pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0xdc0d6c91_b3db_429e_9a7b_d671cc19656e);
 
-pub(super) const DEPENDENCIES: &[Uuid] = &[orchard_note_version::MIGRATION_ID];
+const DEPENDENCIES: &[Uuid] = &[orchard_note_version::MIGRATION_ID];
 
 pub(super) struct Migration;
 

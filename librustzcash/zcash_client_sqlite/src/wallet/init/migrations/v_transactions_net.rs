@@ -11,11 +11,9 @@ use zcash_protocol::PoolType;
 use super::add_transaction_views;
 use crate::wallet::{init::WalletMigrationError, pool_code};
 
-/// Migration that fixes a bug in v_transactions that caused the change to be incorrectly ignored as
-/// received value.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x2aa4d24f_51aa_4a4c_8d9b_e5b8a762865f);
+pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0x2aa4d24f_51aa_4a4c_8d9b_e5b8a762865f);
 
-pub(super) const DEPENDENCIES: &[Uuid] = &[add_transaction_views::MIGRATION_ID];
+const DEPENDENCIES: &[Uuid] = &[add_transaction_views::MIGRATION_ID];
 
 pub(crate) struct Migration;
 

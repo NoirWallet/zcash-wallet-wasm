@@ -27,7 +27,7 @@ use zcash_client_backend::{
         scanning::{ScanPriority, ScanRange},
         wallet::{ConfirmationsPolicy, TargetHeight},
     },
-    wallet::{NoteId, OutputRef, WalletSaplingOutput},
+    wallet::{NoteId, WalletSaplingOutput},
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::transaction::{Transaction, fees::zip317};
@@ -142,7 +142,6 @@ pub struct MemoryWalletDb<P: consensus::Parameters> {
     pub(crate) transaction_data_request_queue: TransactionDataRequestQueue,
     /// Queue of block ranges that should be scanned along with their priority
     pub(crate) scan_queue: ScanQueue,
-    pub(crate) output_locks: BTreeMap<OutputRef, crate::output_locks::OutputLock>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,7 +200,6 @@ impl<P: consensus::Parameters + PartialEq> PartialEq for MemoryWalletDb<P> {
             && self.sent_notes == other.sent_notes
             && self.tx_locator == other.tx_locator
             && self.scan_queue == other.scan_queue
-            && self.output_locks == other.output_locks
             && self.sapling_tree_shard_end_heights == other.sapling_tree_shard_end_heights
             && orchard_comparisons
             && transparent_comparisons
@@ -277,7 +275,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             tx_locator: TxLocatorMap::new(),
             received_note_spends: ReceievedNoteSpends::new(),
             scan_queue: ScanQueue::new(),
-            output_locks: BTreeMap::new(),
             transparent_received_outputs: TransparentReceivedOutputs::new(),
             transparent_received_output_spends: TransparentReceivedOutputSpends::new(),
             transparent_spend_map: TransparentSpendCache::new(),
@@ -545,7 +542,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .next()
             .ok_or(Error::NoteNotFound)?;
         self.received_note_spends.insert_spend(note_id, txid);
-        self.output_locks.remove(&note_id.into());
         Ok(())
     }
 
@@ -669,17 +665,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .iter()
             .filter(|note| note.account_id() == account_id)
         {
-            let transaction = self
-                .tx_table
-                .get(&note.txid())
-                .ok_or_else(|| Error::TransactionNotFound(note.txid()))?;
-            if transaction.mined_height().is_none()
-                && transaction
-                    .expiry_height()
-                    .is_some_and(|expiry| expiry < BlockHeight::from(target_height))
-            {
-                continue;
-            }
             if note.note.value() <= zip317::MARGINAL_FEE
                 || self.note_is_spent(note, target_height)?
                 || self.note_is_pending(note, target_height, confirmations_policy)?
@@ -697,31 +682,17 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let account = self
                 .get_account(note.account_id())?
                 .ok_or(Error::AccountUnknown(note.account_id()))?;
-            let ufvk_present = account.ufvk().is_some();
-            let nullifier_present = note.nullifier().is_some();
-            let position_present = note.commitment_tree_position.is_some();
-            let mined_height_present = transaction.mined_height().is_some();
-            let key_scope_present = note.recipient_key_scope.is_some();
-            let metadata_incomplete = !ufvk_present
-                || !nullifier_present
-                || !position_present
-                || !mined_height_present
-                || !key_scope_present;
+            let transaction = self
+                .tx_table
+                .get(&note.txid())
+                .ok_or_else(|| Error::TransactionNotFound(note.txid()))?;
+            let metadata_incomplete = account.ufvk().is_none()
+                || note.nullifier().is_none()
+                || note.commitment_tree_position.is_none()
+                || transaction.mined_height().is_none()
+                || note.recipient_key_scope.is_none();
 
             if metadata_incomplete {
-                // Support logs omit note identifiers and amounts to avoid linking wallet activity.
-                tracing::warn!(
-                    account_id = *account_id,
-                    diagnostic_note_index = diagnostics.incomplete_note_count + 1,
-                    pool = %note.pool(),
-                    is_change = note.is_change,
-                    ufvk_present,
-                    nullifier_present,
-                    position_present,
-                    mined_height_present,
-                    key_scope_present,
-                    "WALLET_SPENDABILITY_INCONSISTENT note diagnosis"
-                );
                 diagnostics.incomplete_note_count += 1;
                 diagnostics.incomplete_value =
                     (diagnostics.incomplete_value + note.note.value())
@@ -792,7 +763,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .next()
             .ok_or(Error::NoteNotFound)?;
         self.received_note_spends.insert_spend(note_id, txid);
-        self.output_locks.remove(&note_id.into());
         Ok(())
     }
 
@@ -809,7 +779,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .map(|v| v.note_id())
             .ok_or(Error::NoteNotFound)?;
         self.received_note_spends.insert_spend(note_id, txid);
-        self.output_locks.remove(&note_id.into());
         Ok(())
     }
 
@@ -842,7 +811,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .insert_received_note(ReceivedNote::from_wallet_sapling_output(note_id, output));
         if let Some(spent_in) = spent_in {
             self.received_note_spends.insert_spend(note_id, spent_in);
-            self.output_locks.remove(&note_id.into());
         }
     }
     #[cfg(feature = "orchard")]
@@ -856,7 +824,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .insert_received_note(ReceivedNote::from_wallet_orchard_output(note_id, output));
         if let Some(spent_in) = spent_in {
             self.received_note_spends.insert_spend(note_id, spent_in);
-            self.output_locks.remove(&note_id.into());
         }
     }
     #[cfg(feature = "orchard")]
@@ -870,7 +837,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .insert_received_note(ReceivedNote::from_wallet_ironwood_output(note_id, output));
         if let Some(spent_in) = spent_in {
             self.received_note_spends.insert_spend(note_id, spent_in);
-            self.output_locks.remove(&note_id.into());
         }
     }
     pub(crate) fn insert_sapling_nullifier_map(
@@ -1528,11 +1494,6 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         let known_output = self.transparent_received_outputs.contains_key(outpoint);
 
         if known_output {
-            self.output_locks.remove(&OutputRef::new(
-                *outpoint.txid(),
-                zcash_protocol::PoolType::Transparent,
-                outpoint.n(),
-            ));
             self.transparent_received_output_spends
                 .insert(outpoint.clone(), *spent_in_tx);
             self.transparent_spend_map.remove(spent_in_tx, outpoint);
@@ -1816,114 +1777,6 @@ mod tests {
     use zcash_address::ZcashAddress;
     use zcash_client_backend::wallet::{Recipient, WalletTx};
     use zcash_protocol::{PoolType, memo::Memo, value::Zatoshis};
-
-    #[cfg(feature = "orchard")]
-    #[test]
-    fn spendability_diagnostics_exclude_expired_notes_but_never_select_incomplete_notes() {
-        use crate::{MemBlockCache, testing::TestMemDbFactory};
-        use zcash_client_backend::data_api::testing::{
-            TestBuilder, orchard::OrchardPoolTester, pool::dsl::TestDsl,
-        };
-        use zcash_primitives::block::BlockHash;
-
-        let mut state = TestDsl::from(
-            TestBuilder::new()
-                .with_data_store_factory(TestMemDbFactory)
-                .with_block_cache(MemBlockCache::new())
-                .with_account_from_sapling_activation(BlockHash([0; 32])),
-        )
-        .build::<OrchardPoolTester>();
-        for _ in 0..12 {
-            state.add_a_single_note_checking_balance(Zatoshis::const_from_u64(100_000));
-        }
-        let account_id = state.get_account().id();
-        let network = *state.wallet().params();
-        let mut bytes = Vec::new();
-        state.wallet().encode(&mut bytes).unwrap();
-        let mut wallet = MemoryWalletDb::decode_new(bytes.as_slice(), network, 100).unwrap();
-        let target_height = TargetHeight::from(wallet.chain_height().unwrap().unwrap() + 1);
-        let birthday_height = wallet.get_wallet_birthday().unwrap().unwrap();
-        let policy = ConfirmationsPolicy::default();
-        wallet.received_notes.0[0].commitment_tree_position = None;
-        assert_eq!(
-            wallet
-                .spendability_diagnostics(account_id, policy)
-                .unwrap()
-                .incomplete_note_count,
-            1
-        );
-        assert!(
-            !wallet
-                .note_is_spendable(
-                    &wallet.received_notes.0[0],
-                    birthday_height,
-                    target_height,
-                    policy,
-                    &[]
-                )
-                .unwrap()
-        );
-        assert!(
-            wallet
-                .note_is_spendable(
-                    &wallet.received_notes.0[1],
-                    birthday_height,
-                    target_height,
-                    policy,
-                    &[]
-                )
-                .unwrap()
-        );
-        let selected = wallet
-            .select_spendable_notes(
-                account_id,
-                zcash_client_backend::data_api::TargetValue::AtLeast(Zatoshis::const_from_u64(
-                    100_000,
-                )),
-                &[ShieldedPool::Orchard],
-                target_height,
-                policy,
-                &[],
-                zcash_client_backend::data_api::locking::LockFilter::Unfiltered,
-            )
-            .unwrap();
-        assert!(!selected.orchard().is_empty());
-        assert!(
-            selected
-                .orchard()
-                .iter()
-                .all(|note| *note.txid() != wallet.received_notes.0[0].txid())
-        );
-
-        let txid = wallet.received_notes.0[0].txid;
-        let mut transaction: crate::proto::memwallet::TransactionEntry =
-            wallet.tx_table.0[&txid].clone().into();
-        transaction.tx_status = crate::proto::memwallet::TransactionStatus::NotInMainChain as i32;
-        transaction.mined_height = None;
-        transaction.expiry_height = Some(u32::from(BlockHeight::from(target_height)) - 1);
-        wallet
-            .tx_table
-            .0
-            .insert(txid, transaction.try_into().unwrap());
-        assert_eq!(
-            wallet
-                .spendability_diagnostics(account_id, policy)
-                .unwrap()
-                .incomplete_note_count,
-            0
-        );
-        assert!(
-            !wallet
-                .note_is_spendable(
-                    &wallet.received_notes.0[0],
-                    birthday_height,
-                    target_height,
-                    policy,
-                    &[]
-                )
-                .unwrap()
-        );
-    }
 
     #[test]
     fn transaction_history_uses_outgoing_memo() {

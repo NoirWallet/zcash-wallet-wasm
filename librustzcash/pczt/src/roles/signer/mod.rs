@@ -19,7 +19,7 @@ use blake2b_simd::Hash as Blake2bHash;
 use orchard::primitives::redpallas;
 use rand_core::OsRng;
 
-use ::transparent::sighash::{SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE, SighashPolicy};
+use ::transparent::sighash::{SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE};
 use zcash_primitives::transaction::{
     TransactionData, TxDigests, sighash::SignableInput, txid::TxIdDigester,
 };
@@ -30,10 +30,10 @@ use crate::{
         FLAG_HAS_SIGHASH_SINGLE, FLAG_SHIELDED_MODIFIABLE, FLAG_TRANSPARENT_INPUTS_MODIFIABLE,
         FLAG_TRANSPARENT_OUTPUTS_MODIFIABLE, Global,
     },
-    sighash,
 };
 
 pub use crate::EffectsOnly;
+use crate::sighash;
 
 pub mod batch;
 
@@ -127,7 +127,6 @@ pub struct Signer {
     txid_parts: TxDigests<Blake2bHash>,
     shielded_sighash: [u8; 32],
     secp: secp256k1::Secp256k1<secp256k1::All>,
-    transparent_sighash_policy: SighashPolicy,
 }
 
 impl Signer {
@@ -172,18 +171,7 @@ impl Signer {
             txid_parts,
             shielded_sighash,
             secp: secp256k1::Secp256k1::new(),
-            transparent_sighash_policy: SighashPolicy::ALL_ONLY,
         })
-    }
-
-    /// Sets the sighash policy that this Signer applies to transparent inputs.
-    ///
-    /// The default is [`SighashPolicy::ALL_ONLY`]; see [`SighashPolicy`] for why the
-    /// sighash type a counterparty placed in the PCZT is only used if this Signer’s own
-    /// policy permits it.
-    pub fn with_transparent_sighash_policy(mut self, sighash_policy: SighashPolicy) -> Self {
-        self.transparent_sighash_policy = sighash_policy;
-        self
     }
 
     /// Calculates the signature digest that must be signed to authorize shielded spends.
@@ -200,10 +188,6 @@ impl Signer {
     /// This can be used to produce a signature externally suitable for passing to e.g.
     /// [`Self::append_transparent_signature`].}
     ///
-    /// Whoever signs the returned sighash is authorizing whatever it commits to, so the
-    /// consistency of the input and the acceptability of its sighash type are checked
-    /// here, exactly as they are when this Signer produces the signature itself.
-    ///
     /// Returns an error if `index` is invalid for this PCZT.
     pub fn transparent_sighash(&self, index: usize) -> Result<[u8; 32], Error> {
         let input = self
@@ -212,19 +196,13 @@ impl Signer {
             .get(index)
             .ok_or(Error::InvalidIndex)?;
 
-        input
-            .with_signable_input_with_sighash_policy(
-                index,
-                |signable_input| {
-                    sighash(
-                        &self.tx_data,
-                        &SignableInput::Transparent(signable_input),
-                        &self.txid_parts,
-                    )
-                },
-                self.transparent_sighash_policy,
-            )
-            .map_err(Error::TransparentSign)
+        input.with_signable_input(index, |signable_input| {
+            Ok(sighash(
+                &self.tx_data,
+                &SignableInput::Transparent(signable_input),
+                &self.txid_parts,
+            ))
+        })
     }
 
     /// Signs the transparent spend at the given index with the given spending key.
@@ -237,14 +215,12 @@ impl Signer {
         index: usize,
         sk: &secp256k1::SecretKey,
     ) -> Result<(), Error> {
-        let sighash_policy = self.transparent_sighash_policy;
         self.generate_or_append_transparent_signature(index, |input, tx_data, txid_parts, secp| {
-            input.sign_with_sighash_policy(
+            input.sign(
                 index,
                 |input| sighash(tx_data, &SignableInput::Transparent(input), txid_parts),
                 sk,
                 secp,
-                sighash_policy,
             )
         })
     }
@@ -259,14 +235,12 @@ impl Signer {
         index: usize,
         signature: secp256k1::ecdsa::Signature,
     ) -> Result<(), Error> {
-        let sighash_policy = self.transparent_sighash_policy;
         self.generate_or_append_transparent_signature(index, |input, tx_data, txid_parts, secp| {
-            input.append_signature_with_sighash_policy(
+            input.append_signature(
                 index,
                 |input| sighash(tx_data, &SignableInput::Transparent(input), txid_parts),
                 signature,
                 secp,
-                sighash_policy,
             )
         })
     }
@@ -290,10 +264,8 @@ impl Signer {
             .get_mut(index)
             .ok_or(Error::InvalidIndex)?;
 
-        // The consistency of the input being signed, and the acceptability of its sighash
-        // type, are checked by the `zcash_transparent` methods that `f` calls. They are
-        // enforced there rather than here because `crate::roles::low_level_signer` hands
-        // out the transparent bundle and calls those methods directly.
+        // Check consistency of the input being signed.
+        // TODO
 
         // Generate or apply the signature.
         f(input, &self.tx_data, &self.txid_parts, &self.secp).map_err(Error::TransparentSign)?;
@@ -561,7 +533,6 @@ impl Signer {
             txid_parts: _,
             shielded_sighash: _,
             secp: _,
-            transparent_sighash_policy: _,
         } = self;
 
         Pczt {
@@ -594,7 +565,7 @@ impl From<crate::ExtractError> for Error {
     }
 }
 
-#[cfg(all(test, feature = "io-finalizer", feature = "orchard"))]
+#[cfg(test)]
 mod tests {
     use ff::{Field, PrimeField};
     use pasta_curves::pallas;

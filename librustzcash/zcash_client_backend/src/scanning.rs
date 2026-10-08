@@ -1,16 +1,9 @@
 //! Tools for scanning a compact representation of the Zcash block chain.
 
-// The `ScanError` accessors below match on its variants bare.
-use ScanError::*;
-
-use core::{
-    convert::TryFrom,
-    fmt::{self, Debug},
-};
-use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
-};
+use core::convert::TryFrom;
+use core::fmt::{self, Debug};
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 use incrementalmerkletree::{Marking, Position, Retention};
 use sapling::{SaplingIvk, note_encryption::SaplingDomain};
@@ -344,8 +337,7 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
     /// Returns the Ironwood keys to be used for incoming note detection.
     ///
     /// Ironwood outputs are trial-decrypted with the account's Orchard viewing keys (see
-    /// [`orchard::note_encryption::IronwoodDomain`]), but are tracked as a separate pool from
-    /// Orchard.
+    /// [`IronwoodDomain`]), but are tracked as a separate pool from Orchard.
     #[cfg(feature = "orchard")]
     pub fn ironwood(
         &self,
@@ -617,7 +609,6 @@ impl<AccountId: Copy> Nullifiers<AccountId> {
 
 /// Errors that may occur in chain scanning
 #[derive(Clone, Debug)]
-#[non_exhaustive]
 pub enum ScanError {
     /// The encoding of a compact Sapling output or compact Orchard action was invalid.
     EncodingInvalid {
@@ -674,6 +665,7 @@ pub enum ScanError {
 impl ScanError {
     /// Returns whether this error is the result of a failed continuity check
     pub fn is_continuity_error(&self) -> bool {
+        use ScanError::*;
         match self {
             EncodingInvalid { .. } => false,
             PrevHashMismatch { .. } => true,
@@ -687,6 +679,7 @@ impl ScanError {
 
     /// Returns the block height at which the scan error occurred
     pub fn at_height(&self) -> BlockHeight {
+        use ScanError::*;
         match self {
             EncodingInvalid { at_height, .. } => *at_height,
             PrevHashMismatch { at_height } => *at_height,
@@ -701,6 +694,7 @@ impl ScanError {
 
 impl fmt::Display for ScanError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use ScanError::*;
         match &self {
             EncodingInvalid {
                 txid,
@@ -1160,7 +1154,8 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, thread::spawn};
+    use std::sync::Arc;
+    use std::thread::spawn;
 
     use super::ScanningKeys;
 

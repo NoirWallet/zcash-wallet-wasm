@@ -1,4 +1,5 @@
 /// Export test vectors for reuse by implementers of address parsing libraries.
+#[cfg(feature = "test-dependencies")]
 pub use crate::unified::address::test_vectors::TEST_VECTORS as UNIFIED;
 
 #[cfg(test)]

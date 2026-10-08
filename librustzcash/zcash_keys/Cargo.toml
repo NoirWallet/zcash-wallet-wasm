@@ -1,7 +1,7 @@
 [package]
 name = "zcash_keys"
 description = "Zcash key and address management"
-version = "0.16.1"
+version = "0.15.0"
 authors = [
     "Jack Grigg <jack@z.cash>",
     "Kris Nuttycombe <kris@electriccoin.co>"
@@ -82,14 +82,13 @@ proptest.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true
-sapling = { workspace = true, features = ["test-dependencies"] }
 secp256k1 = { workspace = true, features = ["rand"] }
 transparent = { workspace = true, features = ["test-dependencies"] }
 zcash_address = { workspace = true, features = ["test-dependencies"] }
 zcash_script.workspace = true
 
 [features]
-default = ["std", "orchard", "sapling"]
+default = ["std"]
 std = [
     "dep:document-features",
     "orchard?/std",

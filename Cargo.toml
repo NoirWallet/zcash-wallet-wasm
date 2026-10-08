@@ -13,19 +13,8 @@ wasm-opt = ["-O4", "-O4", "--enable-threads", "--enable-bulk-memory", "--enable-
 default = ["wasm-parallel"]
 multicore = ["zcash_proofs/multicore", "zcash_primitives/multicore", "zcash_client_memory/multicore", "orchard/multicore"]
 wasm-parallel = ["wasm-bindgen-rayon", "multicore"]
-voting = ["dep:zcash_voting", "dep:futures-channel", "dep:web-sys", "dep:base64", "dep:rand_core"]
-voting-test-fixtures = ["voting", "zcash_voting/test-fixtures"]
-
-[dependencies.zcash_voting]
-path = "./zcash_voting/zcash_voting"
-default-features = false
-features = ["lrz", "browser"]
-optional = true
 
 [dependencies]
-rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
-serde_json = "1"
-base64 = { version = "0.22", optional = true }
 wasm-bindgen = { version = "0.2" }
 js-sys = "0.3.77"
 
@@ -55,7 +44,7 @@ zip321 = { path = "./librustzcash/components/zip321" }
 zip32 = { version = "0.2" }
 
 sapling = { package = "sapling-crypto", version = "0.7", default-features = false }
-orchard = { version = "=0.15.5", default-features = false, features = ["circuit", "multicore"] }
+orchard = { version = "=0.15.0", default-features = false, features = ["circuit", "multicore"] }
 
 getrandom = { version = "0.2", features = ["js"] }
 
@@ -77,6 +66,7 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 tracing = "0.1.40"
 
 serde = { version = "1", features = ["derive"], default-features = false }
+serde_json = "1"
 subtle = "2.6.1"
 tokio = { version = "1.0", features = ["rt", "macros"] }
 
@@ -88,21 +78,9 @@ tonic = { version = "0.14", default-features = false, features = [
 
 prost = "0.14"
 futures-util = "0.3"
-async-trait = "0.1"
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-futures-channel = { version = "0.3", optional = true }
-web-sys = { version = "0.3", optional = true, features = [
-    "AbortController", "AbortSignal", "Headers", "Request", "RequestInit",
-    "RequestCredentials", "RequestMode", "RequestRedirect", "Response", "Window",
-] }
 
 [dev-dependencies]
 rand_core = "0.6"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-zcash_voting = { path = "./zcash_voting/zcash_voting", default-features = false, features = ["lrz", "browser", "test-fixtures"] }
-rusqlite = { version = "=0.37.0", features = ["bundled", "serialize"] }
 
 [profile.release]
 opt-level = 3
@@ -110,12 +88,3 @@ lto = "fat"
 codegen-units = 1
 panic = 'abort'
 strip = true
-
-[patch.crates-io]
-pczt = { path = "./librustzcash/pczt" }
-zcash_client_backend = { path = "./librustzcash/zcash_client_backend" }
-zcash_client_sqlite = { path = "./librustzcash/zcash_client_sqlite" }
-zcash_keys = { path = "./librustzcash/zcash_keys" }
-zcash_primitives = { path = "./librustzcash/zcash_primitives" }
-zcash_protocol = { path = "./librustzcash/components/zcash_protocol" }
-zcash_transparent = { path = "./librustzcash/zcash_transparent" }

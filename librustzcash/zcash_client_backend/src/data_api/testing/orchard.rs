@@ -5,7 +5,7 @@ use ::orchard::{
     note_encryption::OrchardDomain,
     tree::MerkleHashOrchard,
 };
-use incrementalmerkletree::{Address as TreeAddress, Hashable, Level, Position};
+use incrementalmerkletree::{Hashable, Level};
 use shardtree::error::ShardTreeError;
 
 use zcash_keys::{
@@ -27,10 +27,7 @@ use crate::{
         WalletTest,
         chain::{CommitmentTreeRoot, ScanSummary},
         testing::{TestState, pool::ShieldedPoolTester},
-        wallet::{
-            ConfirmationsPolicy, TargetHeight,
-            input_selection::{LockFilter, LockedInputPolicy},
-        },
+        wallet::{ConfirmationsPolicy, TargetHeight},
     },
     wallet::{Note, ReceivedNote},
 };
@@ -109,8 +106,9 @@ impl ShieldedPoolTester for OrchardPoolTester {
         st: &mut TestState<Cache, DbT, P>,
         shard_index: u64,
     ) -> Result<Self::MerkleTreeHash, ShardTreeError<<DbT as WalletCommitmentTrees>::Error>> {
+        use incrementalmerkletree::{Address, Position};
         let shard_height = crate::data_api::ORCHARD_SHARD_HEIGHT;
-        let addr = TreeAddress::from_parts(Level::from(shard_height), shard_index);
+        let addr = Address::from_parts(Level::from(shard_height), shard_index);
         let end_position = Position::from((shard_index + 1) << shard_height);
         st.wallet_mut()
             .with_orchard_tree_mut(|tree| tree.root(addr, end_position))
@@ -140,7 +138,6 @@ impl ShieldedPoolTester for OrchardPoolTester {
                 target_height,
                 confirmations_policy,
                 exclude,
-                LockFilter::Policy(&LockedInputPolicy::Exclude),
             )
             .map(|n| n.take_orchard())
     }
@@ -152,13 +149,7 @@ impl ShieldedPoolTester for OrchardPoolTester {
         exclude: &[DbT::NoteRef],
     ) -> Result<Vec<ReceivedNote<DbT::NoteRef, Self::Note>>, <DbT as InputSource>::Error> {
         st.wallet()
-            .select_unspent_notes(
-                account,
-                &[ShieldedPool::Orchard],
-                target_height,
-                exclude,
-                LockFilter::Policy(&LockedInputPolicy::Exclude),
-            )
+            .select_unspent_notes(account, &[ShieldedPool::Orchard], target_height, exclude)
             .map(|n| n.take_orchard())
     }
 

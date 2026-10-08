@@ -15,15 +15,6 @@ pub(crate) async fn pczt_sign_inner(
     usk: zcash_keys::keys::UnifiedSpendingKey,
     seed_fp: zip32::fingerprint::SeedFingerprint,
 ) -> Result<pczt::Pczt, Error> {
-    pczt_sign_owned(network, pczt, usk, seed_fp)
-}
-
-fn pczt_sign_owned(
-    network: Network,
-    pczt: pczt::Pczt,
-    usk: zcash_keys::keys::UnifiedSpendingKey,
-    seed_fp: zip32::fingerprint::SeedFingerprint,
-) -> Result<pczt::Pczt, Error> {
     // Find the spends this one-click signer should authorize.
     #[derive(Debug)]
     enum KeyRef {
@@ -243,54 +234,6 @@ fn pczt_sign_owned(
     Ok(signer.finish())
 }
 
-/// TX1 is only a signing artifact; this helper has no transaction extraction or submission path.
-#[cfg(feature = "voting")]
-pub(crate) fn sign_delegation_owned(
-    pczt: pczt::Pczt,
-    usk: zcash_keys::keys::UnifiedSpendingKey,
-    expected: zcash_voting::delegate::DelegationAccountKeys,
-    fingerprint: zip32::fingerprint::SeedFingerprint,
-    action_index: usize,
-) -> Result<Vec<u8>, crate::voting::types::VotingApiError> {
-    use crate::voting::types::{VotingApiError, VotingErrorCode};
-    let invalid = || VotingApiError::new(VotingErrorCode::RecoveryConflict);
-    if expected.seed_fingerprint != fingerprint.to_bytes()
-        || expected.orchard_fvk_bytes
-            != orchard::keys::FullViewingKey::from(usk.orchard()).to_bytes()
-        || !pczt.orchard().actions().is_empty()
-        || !pczt.sapling().spends().is_empty()
-        || !pczt.sapling().outputs().is_empty()
-        || !pczt.transparent().inputs().is_empty()
-        || !pczt.transparent().outputs().is_empty()
-        || pczt.ironwood().actions().len() != 1
-        || action_index != 0
-    {
-        return Err(invalid());
-    }
-    let pczt = Verifier::new(pczt)
-        .with_ironwood::<(), _>(|bundle| {
-            let spend = bundle.actions()[action_index].spend();
-            let index = spend.zip32_derivation().as_ref().and_then(|path| {
-                path.extract_account_index(&fingerprint, zip32::ChildIndex::hardened(1))
-            });
-            if index.map(u32::from) != Some(expected.account_index)
-                || spend.spend_auth_sig().is_some()
-            {
-                return Err(pczt::roles::verifier::OrchardError::Custom(()));
-            }
-            Ok(())
-        })
-        .map_err(|_| invalid())?
-        .finish();
-    pczt_sign_owned(Network::TestNetwork, pczt, usk, fingerprint)
-        .and_then(|signed| {
-            signed
-                .serialize()
-                .map_err(|_| Error::PcztSign("invalid signed artifact".into()))
-        })
-        .map_err(|_| invalid())
-}
-
 fn encode_compact_size(size: usize) -> Vec<u8> {
     let mut result = Vec::new();
     match size {
@@ -466,111 +409,6 @@ pub(crate) mod tests {
         Ironwood,
     }
 
-    #[cfg(feature = "voting")]
-    #[test]
-    fn delegation_tx1_signing_enforces_account_fingerprint_and_single_ironwood_action() {
-        let network = Network::TestNetwork;
-        let usk =
-            UnifiedSpendingKey::from_seed(&network, &[7; 32], zip32::AccountId::ZERO).unwrap();
-        let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(&[7; 32]).unwrap();
-        let ufvk = usk.to_unified_full_viewing_key();
-        let fvk = ufvk.orchard().unwrap();
-        let rho = orchard::note::Rho::from_bytes(&[1; 32]).unwrap();
-        let seed = (0..=255)
-            .find_map(|b| orchard::note::RandomSeed::from_bytes([b; 32], &rho).into_option())
-            .unwrap();
-        let note = orchard::Note::from_parts(
-            fvk.address_at(0u32, zip32::Scope::External),
-            orchard::value::NoteValue::from_raw(100_000_000),
-            rho,
-            seed,
-            orchard::NoteVersion::V3,
-        )
-        .unwrap();
-        let note = zcash_voting::NoteInfo::from_orchard_note(
-            &note,
-            0,
-            zip32::Scope::External,
-            &ufvk,
-            &network,
-        )
-        .unwrap();
-        let db = zcash_voting::storage::VotingDb::open_browser(
-            "fixture",
-            zcash_voting::Network::Testnet,
-            None,
-        )
-        .unwrap();
-        let id = "01".repeat(32);
-        let height = u64::from(u32::from(
-            network.activation_height(NetworkUpgrade::Nu6_3).unwrap(),
-        ));
-        db.init_round(
-            zcash_voting::Network::Testnet,
-            &zcash_voting::VotingRoundParams {
-                vote_round_id: id.clone(),
-                snapshot_height: height,
-                ea_pk: vec![7; 32],
-                nc_root: vec![0; 32],
-                nullifier_imt_root: vec![0; 32],
-            },
-            None,
-        )
-        .unwrap();
-        let hotkey = db.ensure_voting_hotkey(&id).unwrap();
-        let keys = zcash_voting::delegate::DelegationKeys::with_voting_hotkey(
-            fvk.to_bytes().to_vec(),
-            &hotkey,
-            fingerprint.to_bytes(),
-            0,
-            "fixture".into(),
-        )
-        .unwrap();
-        db.ensure_bundles(&id, std::slice::from_ref(&note)).unwrap();
-        let setup = db
-            .build_governance_pczt(
-                &id,
-                0,
-                &[note],
-                &keys,
-                zcash_voting::delegate::branch_id_for_height(
-                    zcash_voting::Network::Testnet,
-                    height,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        let metadata = |account_index| zcash_voting::delegate::DelegationAccountKeys {
-            account_index,
-            orchard_fvk_bytes: fvk.to_bytes(),
-            seed_fingerprint: fingerprint.to_bytes(),
-        };
-        let pczt = pczt::Pczt::parse(&setup.pczt_bytes).unwrap();
-        assert!(
-            super::sign_delegation_owned(pczt.clone(), usk.clone(), metadata(1), fingerprint, 0)
-                .is_err()
-        );
-        let wrong = zip32::fingerprint::SeedFingerprint::from_seed(&[8; 32]).unwrap();
-        assert!(
-            super::sign_delegation_owned(pczt.clone(), usk.clone(), metadata(0), wrong, 0).is_err()
-        );
-        assert!(
-            super::sign_delegation_owned(pczt.clone(), usk.clone(), metadata(0), fingerprint, 1)
-                .is_err()
-        );
-        let bytes = super::sign_delegation_owned(pczt, usk, metadata(0), fingerprint, 0).unwrap();
-        assert_eq!(
-            zcash_voting::delegate::pczt_sighash(&bytes)
-                .unwrap()
-                .to_vec(),
-            setup.pczt_sighash
-        );
-        assert!(zcash_voting::delegate::spend_auth_signature(&bytes, 0).is_ok());
-        let signed = pczt::Pczt::parse(&bytes).unwrap();
-        assert!(signed.orchard().actions().is_empty());
-        assert_eq!(signed.ironwood().actions().len(), 1);
-    }
-
     pub(crate) fn orchard_pczt(
         pool: OrchardPool,
         include_derivation: bool,
@@ -617,8 +455,7 @@ pub(crate) mod tests {
                 sapling_anchor: None,
                 orchard_anchor: matches!(pool, OrchardPool::Orchard).then_some(anchor),
                 ironwood_anchor: Some(anchor),
-                orchard_padding: zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
-                ironwood_padding: zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         match pool {

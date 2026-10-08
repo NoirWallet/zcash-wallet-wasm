@@ -4,7 +4,6 @@ use std::ops::{Not, Range};
 use zcash_protocol::consensus::BlockHeight;
 
 use super::{ScanPriority, ScanRange};
-use RangeOrdering::*;
 
 #[derive(Debug, Clone, Copy)]
 enum InsertOn {
@@ -101,19 +100,16 @@ enum RangeOrdering {
 
 impl RangeOrdering {
     fn cmp<A: Ord>(a: &Range<A>, b: &Range<A>) -> Self {
+        use Ordering::*;
         assert!(a.start <= a.end && b.start <= b.end);
         match (a.start.cmp(&b.start), a.end.cmp(&b.end)) {
             _ if a.end <= b.start => RangeOrdering::LeftFirstDisjoint,
             _ if b.end <= a.start => RangeOrdering::RightFirstDisjoint,
-            (Ordering::Less, Ordering::Less) => RangeOrdering::LeftFirstOverlap,
-            (Ordering::Equal, Ordering::Less)
-            | (Ordering::Greater, Ordering::Less)
-            | (Ordering::Greater, Ordering::Equal) => RangeOrdering::LeftContained,
-            (Ordering::Equal, Ordering::Equal) => RangeOrdering::Equal,
-            (Ordering::Equal, Ordering::Greater)
-            | (Ordering::Less, Ordering::Greater)
-            | (Ordering::Less, Ordering::Equal) => RangeOrdering::RightContained,
-            (Ordering::Greater, Ordering::Greater) => RangeOrdering::RightFirstOverlap,
+            (Less, Less) => RangeOrdering::LeftFirstOverlap,
+            (Equal, Less) | (Greater, Less) | (Greater, Equal) => RangeOrdering::LeftContained,
+            (Equal, Equal) => RangeOrdering::Equal,
+            (Equal, Greater) | (Less, Greater) | (Less, Equal) => RangeOrdering::RightContained,
+            (Greater, Greater) => RangeOrdering::RightFirstOverlap,
         }
     }
 }
@@ -193,6 +189,7 @@ fn insert(current: ScanRange, to_insert: ScanRange, force_rescans: bool) -> Join
         }
     }
 
+    use RangeOrdering::*;
     match RangeOrdering::cmp(to_insert.block_range(), current.block_range()) {
         LeftFirstDisjoint => join_nonoverlapping(to_insert, current),
         LeftFirstOverlap | RightContained => {
@@ -301,6 +298,7 @@ impl SpanningTree {
                 // because `into_vec` performs such unification, and the tree being unbalanced
                 // should be fine given the relatively small number of ranges we should ordinarily
                 // be concerned with.
+                use RangeOrdering::*;
                 match RangeOrdering::cmp(&span, to_insert.block_range()) {
                     LeftFirstDisjoint => {
                         // extend the right-hand branch
@@ -417,9 +415,7 @@ mod tests {
 
     use zcash_protocol::consensus::BlockHeight;
 
-    use super::RangeOrdering::*;
     use super::{Joined, RangeOrdering, SpanningTree, join_nonoverlapping, testing::scan_range};
-    use crate::data_api::scanning::ScanPriority::*;
     use crate::data_api::scanning::{ScanPriority, ScanRange};
 
     #[test]
@@ -525,6 +521,7 @@ mod tests {
 
     #[test]
     fn range_ordering() {
+        use super::RangeOrdering::*;
         // Equal
         assert_eq!(RangeOrdering::cmp(&(0..1), &(0..1)), Equal);
 
@@ -563,6 +560,8 @@ mod tests {
 
     #[test]
     fn spanning_tree_insert_adjacent() {
+        use ScanPriority::*;
+
         let t = spanning_tree(&[
             (0..3, Historic),
             (3..6, Scanned),
@@ -583,6 +582,8 @@ mod tests {
 
     #[test]
     fn spanning_tree_insert_overlaps() {
+        use ScanPriority::*;
+
         let t = spanning_tree(&[
             (0..3, Historic),
             (2..5, Scanned),
@@ -605,6 +606,8 @@ mod tests {
 
     #[test]
     fn spanning_tree_insert_empty() {
+        use ScanPriority::*;
+
         let t = spanning_tree(&[
             (0..3, Historic),
             (3..6, Scanned),
@@ -626,6 +629,8 @@ mod tests {
 
     #[test]
     fn spanning_tree_insert_gaps() {
+        use ScanPriority::*;
+
         let t = spanning_tree(&[(0..3, Historic), (6..8, ChainTip)]).unwrap();
 
         assert_eq!(
@@ -648,6 +653,8 @@ mod tests {
 
     #[test]
     fn spanning_tree_insert_rfd_span() {
+        use ScanPriority::*;
+
         // This sequence of insertions causes a RightFirstDisjoint on the last insertion,
         // which originally had a bug that caused the parent's span to only cover its left
         // child. The bug was otherwise unobservable as the insertion logic was able to
@@ -680,6 +687,8 @@ mod tests {
 
     #[test]
     fn spanning_tree_dominance() {
+        use ScanPriority::*;
+
         let t = spanning_tree(&[(0..3, Verify), (2..8, Scanned), (6..10, Verify)]).unwrap();
         assert_eq!(
             t.into_vec(),
@@ -754,6 +763,8 @@ mod tests {
 
     #[test]
     fn spanning_tree_insert_coalesce_scanned() {
+        use ScanPriority::*;
+
         let mut t = spanning_tree(&[
             (0..3, Historic),
             (2..5, Scanned),
@@ -770,6 +781,8 @@ mod tests {
 
     #[test]
     fn spanning_tree_force_rescans() {
+        use ScanPriority::*;
+
         let mut t = spanning_tree(&[
             (0..3, Historic),
             (3..5, Scanned),

@@ -246,7 +246,6 @@ pub fn generate_address_list(
 }
 
 /// Errors that can occur when generating transparent gap addresses.
-#[derive(Debug)]
 pub enum GapAddressesError<SE> {
     /// An error occurred in the underlying wallet storage backend.
     Storage(SE),

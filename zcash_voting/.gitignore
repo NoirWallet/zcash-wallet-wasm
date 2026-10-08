@@ -1,8 +1,0 @@
-/target
-.vscode/
-
-# zcash-voting-ffi build artifacts
-zcash-voting-ffi/target
-zcash-voting-ffi/products
-zcash-voting-ffi/releases
-zcash-voting-ffi/Sources
