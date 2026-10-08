@@ -74,7 +74,7 @@ bytes = "1.9.0"
 ciborium = "0.2.2"
 serde_json.workspace = true
 postcard.workspace = true
-zcash_client_backend = { workspace = true, features = ["test-dependencies", "pczt"] }
+zcash_client_backend = { workspace = true, features = ["test-dependencies"] }
 
 [[example]]
 name = "repro_transparent_balance"

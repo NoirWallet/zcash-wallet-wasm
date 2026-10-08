@@ -1,4 +1,5 @@
-use std::{convert::Infallible, num::NonZeroU8, sync::OnceLock};
+use std::num::NonZeroU8;
+use std::sync::OnceLock;
 
 use ::transparent::{
     address::{Script, TransparentAddress},
@@ -7,10 +8,7 @@ use ::transparent::{
     sighash::SighashType,
     zip48,
 };
-use orchard::{
-    primitives::redpallas::{self, SpendAuth},
-    tree::MerkleHashOrchard,
-};
+use orchard::tree::MerkleHashOrchard;
 use pczt::{
     Pczt,
     roles::{
@@ -33,7 +31,7 @@ use rand_core::{OsRng, SeedableRng};
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
 use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::{
-    builder::{BuildConfig, Builder, BundlePadding, DeferredPcztBuilder, PcztResult},
+    builder::{BuildConfig, Builder, PcztResult},
     fees::zip317,
     sighash::SignableInput,
     sighash_v5::v5_signature_hash,
@@ -41,7 +39,6 @@ use zcash_primitives::transaction::{
 };
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
-    consensus::BlockHeight,
     memo::{Memo, MemoBytes},
     value::Zatoshis,
 };
@@ -63,18 +60,19 @@ fn post_nu6_3_orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
 }
 
 fn check_round_trip(pczt: &Pczt) {
-    // The v1 and v2 encodings both remain available explicitly.
+    // The v1 encoding remains available explicitly.
     v1::Pczt::try_from(pczt.clone())
         .expect("v1 encoding succeeds")
         .serialize();
-    v2::Pczt::try_from(pczt.clone())
+
+    // The default encoding is the latest (v2) encoding.
+    let v2_encoded = v2::Pczt::try_from(pczt.clone())
         .expect("v2 encoding succeeds")
         .serialize();
 
-    // The default encoding is the minimal encoding capable of representing the
-    // PCZT's content (v1 or v2), and round-trips losslessly through parsing and
-    // re-serialization.
     let encoded = pczt.clone().serialize().expect("serialization succeeds");
+    assert_eq!(encoded, v2_encoded);
+
     let reencoded = Pczt::parse(&encoded)
         .expect("can parse encoded PCZT")
         .serialize()
@@ -158,8 +156,7 @@ fn transparent_to_orchard() {
             sapling_anchor: None,
             orchard_anchor: Some(orchard::Anchor::empty_tree()),
             ironwood_anchor: None,
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -350,8 +347,7 @@ fn transparent_p2sh_multisig_to_orchard() {
             sapling_anchor: None,
             orchard_anchor: Some(orchard::Anchor::empty_tree()),
             ironwood_anchor: None,
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -561,8 +557,7 @@ fn sapling_to_orchard() {
             sapling_anchor: Some(anchor),
             orchard_anchor: Some(orchard::Anchor::empty_tree()),
             ironwood_anchor: None,
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -726,8 +721,7 @@ fn orchard_to_orchard() {
             sapling_anchor: None,
             orchard_anchor: Some(anchor),
             ironwood_anchor: None,
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -797,6 +791,8 @@ fn orchard_to_orchard() {
 /// Extracts each action's wire `fvk` bytes from the Orchard or Ironwood pool of the
 /// PCZT, via the Verifier role's full (FVK-deriving) parse.
 fn wire_spend_fvks(pczt: &Pczt, ironwood: bool) -> Vec<Option<[u8; 96]>> {
+    use std::convert::Infallible;
+
     fn collect(bundle: &orchard::pczt::Bundle) -> Vec<Option<[u8; 96]>> {
         bundle
             .actions()
@@ -839,6 +835,8 @@ fn expected_spend_auth_sig(
     sighash: [u8; 32],
     seed: [u8; 32],
 ) -> [u8; 64] {
+    use std::convert::Infallible;
+
     let mut sig = None;
     let mut compute = |bundle: &orchard::pczt::Bundle| {
         let spend = bundle.actions()[index].spend();
@@ -875,6 +873,8 @@ fn expected_spend_auth_sig(
 /// spend (matching what [`orchard::pczt::Action::apply_signature`] checks), not just
 /// that it is byte-equal to the reference.
 fn assert_valid_spend_auth_sig(rk: &[u8; 32], sighash: [u8; 32], sig: [u8; 64]) {
+    use orchard::primitives::redpallas::{self, SpendAuth};
+
     let rk = redpallas::VerificationKey::<SpendAuth>::try_from(*rk).expect("`rk` is a valid key");
     let sig = redpallas::Signature::<SpendAuth>::from(sig);
     rk.verify(&sighash, &sig)
@@ -942,8 +942,7 @@ fn orchard_low_level_signer_uses_preverified_signing_parse() {
             sapling_anchor: None,
             orchard_anchor: Some(anchor),
             ironwood_anchor: None,
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -1046,20 +1045,16 @@ fn orchard_low_level_signer_uses_preverified_signing_parse() {
     assert_eq!(u32::from(tx.expiry_height()), 10_000_040);
 }
 
-/// Checks that the PCZT round-trips through the v2 encoding, forced explicitly.
+/// Checks that the PCZT round-trips through the default (v2) encoding.
 ///
 /// This is [`check_round_trip`] minus the v1 encoding check: v6 PCZTs (which carry
-/// an Ironwood bundle) are not representable in the legacy v1 encoding. The v2
-/// encoding is forced explicitly (rather than using the default [`Pczt::serialize`])
-/// because some content that is v1-representable would otherwise take the minimal
-/// (v1) encoding, silently discarding v2-only information such as an absent anchor.
+/// an Ironwood bundle) are not representable in the legacy v1 encoding.
 fn check_v2_round_trip(pczt: &Pczt) {
-    let encoded = v2::Pczt::try_from(pczt.clone())
-        .expect("v2 encoding succeeds")
-        .serialize();
-    let reencoded = v2::Pczt::try_from(Pczt::parse(&encoded).expect("can parse encoded PCZT"))
-        .expect("v2 encoding succeeds")
-        .serialize();
+    let encoded = pczt.clone().serialize().expect("serialization succeeds");
+    let reencoded = Pczt::parse(&encoded)
+        .expect("can parse encoded PCZT")
+        .serialize()
+        .expect("serialization succeeds");
     assert_eq!(encoded, reencoded);
 }
 
@@ -1123,8 +1118,7 @@ fn pczt_with_anchor(pool: ShieldedPool) -> Pczt {
             orchard_anchor: matches!(pool, ShieldedPool::Orchard).then(orchard::Anchor::empty_tree),
             ironwood_anchor: matches!(pool, ShieldedPool::Ironwood)
                 .then(orchard::Anchor::empty_tree),
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -1183,14 +1177,7 @@ fn assert_redacted_anchor_v2_round_trip(pczt: Pczt, pool: ShieldedPool) {
     assert_anchor_redacted(&redacted, pool);
     check_v2_round_trip(&redacted);
 
-    // Force the v2 encoding explicitly here too: for an output-only Sapling
-    // bundle, an absent anchor is also v1-representable (v1 substitutes a
-    // placeholder), but this assertion is specifically checking the v2
-    // encoding's ability to preserve an absent anchor losslessly.
-    let v2_encoded = v2::Pczt::try_from(redacted)
-        .expect("v2 encoding succeeds")
-        .serialize();
-    let reparsed = Pczt::parse(&v2_encoded).unwrap();
+    let reparsed = Pczt::parse(&redacted.serialize().unwrap()).unwrap();
     assert_anchor_redacted(&reparsed, pool);
 }
 
@@ -1269,8 +1256,7 @@ fn redacted_sapling_anchor_can_be_restored_after_signing() {
             sapling_anchor: Some(anchor),
             orchard_anchor: Some(orchard::Anchor::empty_tree()),
             ironwood_anchor: None,
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -1430,8 +1416,7 @@ fn wallet_can_set_sapling_witness_after_signing() {
             sapling_anchor: Some(anchor),
             orchard_anchor: Some(orchard::Anchor::empty_tree()),
             ironwood_anchor: None,
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -1524,6 +1509,8 @@ fn wallet_can_set_sapling_witness_after_signing() {
 /// pre-Ironwood (V5 transaction) flows independently of the mainnet NU6.3 activation
 /// height.
 fn pre_nu6_3_test_network() -> zcash_protocol::local_consensus::LocalNetwork {
+    use zcash_protocol::consensus::BlockHeight;
+
     zcash_protocol::local_consensus::LocalNetwork {
         overwinter: Some(BlockHeight::from_u32(1)),
         sapling: Some(BlockHeight::from_u32(2)),
@@ -1537,13 +1524,13 @@ fn pre_nu6_3_test_network() -> zcash_protocol::local_consensus::LocalNetwork {
         nu6_3: None,
         #[cfg(zcash_unstable = "nu7")]
         nu7: None,
-        #[cfg(zcash_unstable = "nutachyon")]
-        nu_tachyon: None,
     }
 }
 
 /// A regtest network with NU6.3 activated, for exercising the Ironwood pool.
 fn nu6_3_test_network() -> zcash_protocol::local_consensus::LocalNetwork {
+    use zcash_protocol::consensus::BlockHeight;
+
     zcash_protocol::local_consensus::LocalNetwork {
         overwinter: Some(BlockHeight::from_u32(1)),
         sapling: Some(BlockHeight::from_u32(2)),
@@ -1557,8 +1544,6 @@ fn nu6_3_test_network() -> zcash_protocol::local_consensus::LocalNetwork {
         nu6_3: Some(BlockHeight::from_u32(10)),
         #[cfg(zcash_unstable = "nu7")]
         nu7: None,
-        #[cfg(zcash_unstable = "nutachyon")]
-        nu_tachyon: None,
     }
 }
 
@@ -1629,8 +1614,7 @@ fn redacted_orchard_anchor_can_be_restored_after_signing() {
             sapling_anchor: None,
             orchard_anchor: Some(anchor),
             ironwood_anchor: Some(orchard::Anchor::empty_tree()),
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -1781,8 +1765,7 @@ fn wallet_can_set_orchard_witness_after_signing() {
             sapling_anchor: None,
             orchard_anchor: Some(anchor),
             ironwood_anchor: None,
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -1954,8 +1937,7 @@ fn wallet_can_set_ironwood_witness_after_signing() {
             sapling_anchor: None,
             orchard_anchor: None,
             ironwood_anchor: Some(anchor),
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -2128,8 +2110,7 @@ fn ironwood_low_level_signer_uses_preverified_signing_parse() {
             sapling_anchor: None,
             orchard_anchor: None,
             ironwood_anchor: Some(anchor),
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         },
     );
     builder
@@ -2182,7 +2163,9 @@ fn ironwood_low_level_signer_uses_preverified_signing_parse() {
     let redacted = Redactor::new(pczt.clone())
         .redact_ironwood_with(|mut r| {
             r.clear_anchor();
-            r.compact_resolvable_fields();
+            r.redact_actions(|mut a| {
+                a.clear_cv_net();
+            });
         })
         .finish();
     assert!(redacted.ironwood().anchor().is_none());
@@ -2193,66 +2176,53 @@ fn ironwood_low_level_signer_uses_preverified_signing_parse() {
             .iter()
             .all(|action| action.cv_net().is_none())
     );
-    assert!(
-        redacted
-            .ironwood()
-            .actions()
-            .iter()
-            .all(|action| action.output().cmx().is_none())
-    );
-    assert!(redacted.ironwood().actions().iter().any(|action| {
-        matches!(
-            action.output().enc_ciphertext(),
-            pczt::orchard::EncCiphertext::MemoPlaintext(_)
-        )
-    }));
-    let transported = Pczt::parse(&redacted.clone().serialize().unwrap()).unwrap();
-    let verified = Verifier::new(transported.clone())
+    let verified = Verifier::new(redacted.clone())
         .with_ironwood::<std::convert::Infallible, _>(|_| {
             Ok::<(), pczt::roles::verifier::OrchardError<std::convert::Infallible>>(())
         })
         .unwrap()
         .finish();
     assert!(verified.ironwood().anchor().is_none());
-    let updated = Updater::new(transported.clone())
+    let updated = Updater::new(redacted.clone())
         .update_ironwood_with(|_| Ok(()))
         .unwrap()
         .finish();
     assert!(updated.ironwood().anchor().is_none());
 
-    let mut resolved = transported.clone();
+    let mut resolved = redacted.clone();
     resolved.resolve_fields().unwrap();
     assert!(resolved.ironwood().anchor().is_none());
     assert_eq!(
         resolved.ironwood().actions()[index].cv_net(),
         pczt.ironwood().actions()[index].cv_net()
     );
-    for (resolved, original) in resolved
-        .ironwood()
-        .actions()
-        .iter()
-        .zip(pczt.ironwood().actions())
-    {
-        assert_eq!(resolved.cv_net(), original.cv_net());
-        assert_eq!(resolved.output().cmx(), original.output().cmx());
-        assert_eq!(
-            resolved.output().enc_ciphertext(),
-            original.output().enc_ciphertext()
-        );
-    }
-    let finalized = IoFinalizer::new(transported.clone()).finalize_io().unwrap();
+    let finalized = IoFinalizer::new(redacted.clone()).finalize_io().unwrap();
     assert!(finalized.ironwood().anchor().is_none());
     assert!(
-        Prover::new(transported.clone())
+        Prover::new(redacted.clone())
             .create_ironwood_proof(orchard_proving_key())
             .is_err()
     );
     assert_eq!(
-        Signer::new(transported.clone()).unwrap().shielded_sighash(),
+        Signer::new(redacted.clone()).unwrap().shielded_sighash(),
         sighash
     );
 
-    let signed_redacted = low_level_signer::Signer::new(transported)
+    let cv_net_redacted = Redactor::new(pczt.clone())
+        .redact_ironwood_with(|mut r| {
+            r.redact_actions(|mut a| {
+                a.clear_cv_net();
+            });
+        })
+        .finish();
+    assert_eq!(
+        Signer::new(cv_net_redacted.clone())
+            .unwrap()
+            .shielded_sighash(),
+        sighash
+    );
+
+    let signed_redacted = low_level_signer::Signer::new(cv_net_redacted)
         .sign_ironwood_with::<low_level_signer::OrchardParseError, _>(|_, bundle, _| {
             bundle.actions_mut()[index]
                 .sign(sighash, &orchard_ask, ChaCha20Rng::from_seed(seed))
@@ -2269,31 +2239,6 @@ fn ironwood_low_level_signer_uses_preverified_signing_parse() {
         expected_sig
     );
     check_v2_round_trip(&signed_redacted);
-
-    let combined = Combiner::new(vec![pczt.clone(), signed_redacted])
-        .combine()
-        .unwrap();
-    assert_eq!(combined.ironwood().anchor(), pczt.ironwood().anchor());
-    for (combined, original) in combined
-        .ironwood()
-        .actions()
-        .iter()
-        .zip(pczt.ironwood().actions())
-    {
-        assert_eq!(combined.cv_net(), original.cv_net());
-        assert_eq!(combined.output().cmx(), original.output().cmx());
-        assert_eq!(
-            combined.output().enc_ciphertext(),
-            original.output().enc_ciphertext()
-        );
-    }
-    assert_eq!(
-        combined.ironwood().actions()[index]
-            .spend()
-            .spend_auth_sig()
-            .expect("combined action carries the Signer's contribution"),
-        expected_sig
-    );
 
     // Sign through the low-level Signer's preverified path with the same seed.
     let signed = low_level_signer::Signer::new(pczt.clone())
@@ -2349,169 +2294,4 @@ fn redacted_anchor_is_not_resolved() {
 
     redacted.resolve_fields().unwrap();
     assert!(redacted.orchard().anchor().is_none());
-}
-
-#[test]
-fn builder_can_defer_anchors_until_proving() {
-    let mut rng = OsRng;
-
-    let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
-    let orchard_ask = orchard::keys::SpendAuthorizingKey::from(&orchard_sk);
-    let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
-    let orchard_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::External);
-    let orchard_ovk = orchard_fvk.to_ovk(orchard::keys::Scope::External);
-    let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
-
-    // Pretend we already received an Orchard note.
-    let value = orchard::value::NoteValue::from_raw(1_000_000);
-    let note = {
-        let orchard_bundle_version = orchard::bundle::BundleVersion::orchard_v2();
-        let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::builder::BundleType::DEFAULT,
-            orchard_bundle_version,
-            orchard_bundle_version.default_flags(),
-            orchard::Anchor::empty_tree(),
-        )
-        .unwrap();
-        orchard_builder
-            .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
-            .unwrap();
-        let (bundle, meta) = orchard_builder.build::<i64>(&mut rng).unwrap().unwrap();
-        let action = bundle
-            .actions()
-            .get(meta.output_action_index(0).unwrap())
-            .unwrap();
-        let domain = orchard::note_encryption::OrchardDomain::for_action(action);
-        let (note, _, _) = try_note_decryption(&domain, &orchard_ivk.prepare(), action).unwrap();
-        note
-    };
-
-    // The REAL tree state, available only at "proving time": the builder below never sees
-    // it, and neither does the signer.
-    let (anchor, merkle_path): (orchard::Anchor, orchard::tree::MerklePath) = {
-        let cmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
-        let leaf = MerkleHashOrchard::from_cmx(&cmx);
-        let mut tree =
-            ShardTree::<_, 32, 16>::new(MemoryShardStore::<MerkleHashOrchard, u32>::empty(), 100);
-        tree.append(leaf, incrementalmerkletree::Retention::Marked)
-            .unwrap();
-        tree.checkpoint(9_999_999).unwrap();
-        let position = 0.into();
-        let merkle_path = tree
-            .witness_at_checkpoint_depth(position, 0)
-            .unwrap()
-            .unwrap();
-        let anchor = merkle_path.root(leaf);
-        (anchor.into(), merkle_path.into())
-    };
-
-    // Build the transaction with BOTH shielded anchors deferred to proving time (ZIP 374):
-    // no anchor and no witness is supplied at build time.
-    let mut builder = DeferredPcztBuilder::new::<zip317::FeeRule>(
-        nu6_3_test_network(),
-        10_000_000.into(),
-        BundlePadding::DEFAULT,
-        BundlePadding::DEFAULT,
-    )
-    .unwrap();
-    builder
-        .add_orchard_spend::<zip317::FeeRule>(orchard_fvk.clone(), note)
-        .unwrap();
-    builder
-        .add_ironwood_output::<zip317::FeeRule>(
-            Some(orchard_ovk),
-            recipient,
-            Zatoshis::const_from_u64(980_000),
-            MemoBytes::empty(),
-        )
-        .unwrap();
-    let PcztResult {
-        pczt_parts,
-        orchard_meta,
-        ..
-    } = builder
-        .build_for_pczt(OsRng, &zip317::FeeRule::standard())
-        .unwrap();
-    // The Creator strips the builder's internal placeholders: both anchors and the real
-    // spend's witness are ABSENT. The fabricated dummy spends keep their (dummy) witnesses:
-    // the prover needs a path for every spend, and any path is valid for a zero-valued
-    // note.
-    let pczt = Creator::build_from_parts(pczt_parts).unwrap();
-    assert!(pczt.orchard().anchor().is_none());
-    assert!(pczt.ironwood().anchor().is_none());
-    let index = orchard_meta.spend_action_index(0).unwrap();
-    for (i, action) in pczt.orchard().actions().iter().enumerate() {
-        if i == index {
-            assert!(action.spend().witness().is_none());
-        } else {
-            assert!(action.spend().witness().is_some());
-        }
-    }
-    check_v2_round_trip(&pczt);
-
-    // I/O finalization and signing need neither anchors nor witnesses under V6.
-    let pczt = IoFinalizer::new(pczt).finalize_io().unwrap();
-    let mut signer = Signer::new(pczt).unwrap();
-    let sighash = signer.shielded_sighash();
-    signer.sign_orchard(index, &orchard_ask).unwrap();
-    let signed = signer.finish();
-
-    // Proving without the real anchor fails: the deferral cannot be silently ignored.
-    assert!(
-        Prover::new(signed.clone())
-            .create_orchard_proof(post_nu6_3_orchard_proving_key())
-            .is_err()
-    );
-
-    // At proving time, install the real anchor and witness. The sighash is unchanged and
-    // the pre-made signature still verifies, because V6 signatures commit to neither
-    // shielded anchors nor witnesses.
-    let updated = Updater::new(signed)
-        .set_orchard_anchor(anchor)
-        .unwrap()
-        .set_orchard_spend_witnesses([(index, merkle_path)])
-        .unwrap()
-        .set_ironwood_anchor(orchard::Anchor::empty_tree())
-        .unwrap()
-        .finish();
-    assert_eq!(updated.orchard().anchor(), &Some(anchor.to_bytes()));
-    assert_eq!(
-        Signer::new(updated.clone()).unwrap().shielded_sighash(),
-        sighash
-    );
-    let produced_sig = updated.orchard().actions()[index]
-        .spend()
-        .spend_auth_sig()
-        .expect("action was signed");
-    assert_valid_spend_auth_sig(
-        updated.orchard().actions()[index].spend().rk(),
-        sighash,
-        produced_sig,
-    );
-
-    let proved = Prover::new(updated)
-        .create_orchard_proof(post_nu6_3_orchard_proving_key())
-        .unwrap()
-        .create_ironwood_proof(post_nu6_3_orchard_proving_key())
-        .unwrap()
-        .finish();
-    check_v2_round_trip(&proved);
-
-    let tx = TransactionExtractor::new(proved).extract().unwrap();
-    assert_eq!(u32::from(tx.expiry_height()), 10_000_040);
-}
-
-#[test]
-fn deferred_anchors_require_v6() {
-    // Under a pre-NU6.3 branch the transaction version (V5) commits its signatures to the
-    // shielded anchors, so anchor deferral is refused at construction.
-    assert!(matches!(
-        DeferredPcztBuilder::new::<zip317::FeeRule>(
-            pre_nu6_3_test_network(),
-            10_000_000.into(),
-            BundlePadding::DEFAULT,
-            BundlePadding::DEFAULT,
-        ),
-        Err(zcash_primitives::transaction::builder::Error::AnchorDeferralUnsupported(_))
-    ));
 }

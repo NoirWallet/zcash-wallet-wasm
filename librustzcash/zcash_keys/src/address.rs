@@ -1,22 +1,18 @@
 //! Structs for handling supported address types.
 
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use transparent::address::TransparentAddress;
 use zcash_address::{
     ConversionError, ToAddress, TryFromAddress, ZcashAddress,
     unified::{self, Container, Encoding, Typecode},
 };
-use zcash_protocol::{
-    PoolType, ShieldedPool,
-    consensus::{self, NetworkType},
-};
+use zcash_protocol::consensus::{self, NetworkType};
 
 #[cfg(feature = "sapling")]
 use sapling::PaymentAddress;
+use zcash_protocol::{PoolType, ShieldedPool};
 
 /// A Unified Address.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -543,11 +539,11 @@ pub mod testing {
 
     #[cfg(not(feature = "sapling"))]
     pub fn arb_addr(request: UnifiedAddressRequest) -> impl Strategy<Value = Address> {
-        prop_oneof![
+        return prop_oneof![
             arb_transparent_addr().prop_map(Address::Transparent),
             arb_unified_addr(Network::TestNetwork, request).prop_map(Address::Unified),
             proptest::array::uniform20(any::<u8>()).prop_map(Address::Tex),
-        ]
+        ];
     }
 }
 

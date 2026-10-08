@@ -14,10 +14,9 @@ use zcash_protocol::{
 use super::{add_utxo_account, sent_notes_to_internal};
 use crate::wallet::init::WalletMigrationError;
 
-/// Migration that adds transaction summary views & add fee information to transactions.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x282fad2e_8372_4ca0_8bed_71821320909f);
+pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0x282fad2e_8372_4ca0_8bed_71821320909f);
 
-pub(super) const DEPENDENCIES: &[Uuid] = &[
+const DEPENDENCIES: &[Uuid] = &[
     add_utxo_account::MIGRATION_ID,
     sent_notes_to_internal::MIGRATION_ID,
 ];
@@ -281,21 +280,16 @@ mod tests {
 
     #[cfg(feature = "transparent-inputs")]
     use {
-        crate::{
-            UA_TRANSPARENT,
-            wallet::init::migrations::{ufvk_support, utxos_table},
-        },
+        crate::wallet::init::migrations::{ufvk_support, utxos_table},
         ::transparent::{
-            address::Script,
             bundle::{self as transparent, Authorized, OutPoint, TxIn, TxOut},
-            keys::{IncomingViewingKey, NonHardenedChildIndex},
+            keys::IncomingViewingKey,
         },
-        zcash_client_backend::keys::UnifiedAddressRequest,
-        zcash_keys::{encoding::AddressCodec, keys::ReceiverRequirement::*},
+        zcash_keys::encoding::AddressCodec,
         zcash_primitives::transaction::{TransactionData, TxVersion},
         zcash_protocol::{
             consensus::{BlockHeight, BranchId},
-            value::{ZatBalance, Zatoshis},
+            value::ZatBalance,
         },
     };
 
@@ -399,6 +393,13 @@ mod tests {
     #[test]
     #[cfg(feature = "transparent-inputs")]
     fn migrate_from_wm2() {
+        use ::transparent::{address::Script, keys::NonHardenedChildIndex};
+        use zcash_client_backend::keys::UnifiedAddressRequest;
+        use zcash_keys::keys::ReceiverRequirement::*;
+        use zcash_protocol::value::Zatoshis;
+
+        use crate::UA_TRANSPARENT;
+
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
         let mut db_data =

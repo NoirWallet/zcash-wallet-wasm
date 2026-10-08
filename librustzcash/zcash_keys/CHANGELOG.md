@@ -9,27 +9,6 @@ workspace.
 
 ## [Unreleased]
 
-### Changed
-- The `orchard` and `sapling` features are now enabled by default. Consumers
-  that require a smaller feature set should disable default features and enable
-  only the features they need.
-
-### Fixed
-- `zcash_keys::keys::zcashd::ZcashdHdDerivation::parse_hd_path` no longer
-  panics when the `regex` crate is built without the `unicode-perl` feature,
-  which this crate does not require. This affected consumers whose dependency
-  graphs enabled no `regex` Unicode features.
-
-## [0.16.1] - 2026-07-28
-
-### Added
-- `impl Debug for zcash_keys::keys::transparent::gap_limits::GapAddressesError`
-
-## [0.16.0] - 2026-07-24
-
-### Changed
-- Migrated to `zcash_transparent 0.10.0`.
-
 ## [0.15.0] - 2026-07-09
 
 ### Changed

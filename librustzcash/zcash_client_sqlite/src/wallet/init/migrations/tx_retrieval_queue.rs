@@ -15,9 +15,7 @@ use super::{
     spend_key_available,
 };
 
-/// Adds tables for tracking transactions to be downloaded for transparent output and/or memo
-/// retrieval.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xfec02b61_3988_4b4f_9699_98977fac9e7f);
+pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0xfec02b61_3988_4b4f_9699_98977fac9e7f);
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -38,7 +36,7 @@ use {
     },
 };
 
-pub(super) const DEPENDENCIES: &[Uuid] = &[
+const DEPENDENCIES: &[Uuid] = &[
     orchard_shardtree::MIGRATION_ID,
     ensure_orchard_ua_receiver::MIGRATION_ID,
     ephemeral_addresses::MIGRATION_ID,

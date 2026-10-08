@@ -8,8 +8,6 @@ use uuid::Uuid;
 use zcash_client_backend::data_api::WalletCommitmentTrees;
 use zcash_protocol::consensus::{self, BlockHeight, NetworkUpgrade};
 
-use zcash_client_backend::data_api::anchor_retention::AnchorRetentionInterval;
-
 use crate::{
     error::SqliteClientError,
     wallet::{
@@ -22,11 +20,9 @@ use crate::{
 #[cfg(feature = "transparent-inputs")]
 use crate::GapLimits;
 
-/// Truncates away bad note commitment tree state for users whose wallets were broken by incorrect
-/// reorg handling.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x9fa43ce0_a387_45d1_be03_57a3edc76d01);
+pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0x9fa43ce0_a387_45d1_be03_57a3edc76d01);
 
-pub(super) const DEPENDENCIES: &[Uuid] = &[support_legacy_sqlite::MIGRATION_ID];
+const DEPENDENCIES: &[Uuid] = &[support_legacy_sqlite::MIGRATION_ID];
 
 pub(super) struct Migration<P> {
     pub(super) params: P,
@@ -211,9 +207,6 @@ fn truncate_to_height<P: consensus::Parameters>(
             params: params.clone(),
             clock: (),
             rng: (),
-            // Truncation removes checkpoints; it never establishes them, so no anchor retention
-            // decision is made through this handle and the interval is immaterial.
-            anchor_retention_interval: AnchorRetentionInterval::default(),
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
         };

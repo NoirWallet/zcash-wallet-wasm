@@ -144,7 +144,7 @@ mod convert;
 mod encoding;
 mod kind;
 
-#[cfg(feature = "test-dependencies")]
+#[cfg(any(test, feature = "test-dependencies"))]
 pub mod test_vectors;
 
 pub use convert::{ConversionError, Converter, ToAddress, TryFromAddress, UnsupportedAddress};

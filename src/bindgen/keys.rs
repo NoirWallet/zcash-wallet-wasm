@@ -65,12 +65,6 @@ impl From<sapling::ProofGenerationKey> for ProofGenerationKey {
 #[wasm_bindgen]
 pub struct UnifiedSpendingKey {
     inner: zcash_keys::keys::UnifiedSpendingKey,
-    #[cfg(feature = "voting")]
-    voting_derivation: (
-        Network,
-        AccountId,
-        Option<zip32::fingerprint::SeedFingerprint>,
-    ),
 }
 
 #[wasm_bindgen]
@@ -91,18 +85,8 @@ impl UnifiedSpendingKey {
     ) -> Result<UnifiedSpendingKey, Error> {
         let network = Network::from_str(network)?;
         let account_id = AccountId::try_from(hd_index)?;
-        #[cfg(feature = "voting")]
-        let voting_derivation = (
-            network,
-            account_id,
-            zip32::fingerprint::SeedFingerprint::from_seed(&seed),
-        );
         let result = zcash_keys::keys::UnifiedSpendingKey::from_seed(&network, &seed, account_id)
-            .map(|inner| Self {
-                inner,
-                #[cfg(feature = "voting")]
-                voting_derivation,
-            })
+            .map(|inner| Self { inner })
             .map_err(Error::from);
         seed.zeroize();
         result
@@ -206,37 +190,6 @@ impl UnifiedSpendingKey {
 impl From<UnifiedSpendingKey> for zcash_keys::keys::UnifiedSpendingKey {
     fn from(value: UnifiedSpendingKey) -> Self {
         value.inner
-    }
-}
-
-#[cfg(feature = "voting")]
-impl UnifiedSpendingKey {
-    pub(crate) fn into_voting_parts(
-        self,
-    ) -> (
-        zcash_keys::keys::UnifiedSpendingKey,
-        Network,
-        AccountId,
-        Option<zip32::fingerprint::SeedFingerprint>,
-    ) {
-        let (network, index, fingerprint) = self.voting_derivation;
-        (self.inner, network, index, fingerprint)
-    }
-}
-
-#[cfg(all(test, feature = "voting"))]
-mod voting_tests {
-    #[test]
-    fn delegation_key_wrapper_retains_constructor_derivation_without_seed() {
-        let key =
-            super::UnifiedSpendingKey::new("test", vec![17; 32].into_boxed_slice(), 1).unwrap();
-        let (_, network, index, fingerprint) = key.into_voting_parts();
-        assert!(matches!(network, crate::Network::TestNetwork));
-        assert_eq!(u32::from(index), 1);
-        assert_eq!(
-            fingerprint,
-            zip32::fingerprint::SeedFingerprint::from_seed(&[17; 32])
-        );
     }
 }
 

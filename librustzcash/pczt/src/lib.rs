@@ -20,22 +20,13 @@
 
 #[macro_use]
 extern crate alloc;
-// The crate itself needs only `alloc`; the unit tests lean on `proptest`, which is a `std` crate.
-#[cfg(test)]
-extern crate std;
 
 use alloc::vec::Vec;
 
 use getset::Getters;
 
-use zcash_protocol::PoolType;
 #[cfg(any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"))]
 use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
-#[cfg(all(
-    any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"),
-    zcash_unstable = "nutachyon"
-))]
-use zcash_protocol::constants::{V7_TX_VERSION, V7_VERSION_GROUP_ID};
 #[cfg(all(
     any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"),
     zcash_unstable = "nu7",
@@ -160,13 +151,9 @@ pub mod v1 {
         type Error = super::EncodingError;
 
         fn try_from(pczt: super::Pczt) -> Result<Self, Self::Error> {
-            // The v1 encoding cannot represent V6 or V7 transactions.
-            if match pczt.global.tx_version {
-                zcash_protocol::constants::V6_TX_VERSION => true,
-                #[cfg(zcash_unstable = "nutachyon")]
-                zcash_protocol::constants::V7_TX_VERSION => true,
-                _ => false,
-            } {
+            // The v1 format predates the v6 transaction format; a parser of the v1
+            // encoding could parse a v6 PCZT but never extract a transaction from it.
+            if pczt.global.tx_version == zcash_protocol::constants::V6_TX_VERSION {
                 return Err(super::EncodingError::UnsupportedTxVersion);
             }
 
@@ -421,23 +408,6 @@ pub enum EncodingError {
 }
 
 impl Pczt {
-    /// Whether this PCZT carries any inputs or outputs in the given pool.
-    ///
-    /// Every bundle is always present as a value, so its existence says nothing; this asks whether
-    /// it holds anything.
-    pub fn has_data_in_pool(&self, pool: PoolType) -> bool {
-        match pool {
-            PoolType::TRANSPARENT => {
-                !self.transparent.inputs().is_empty() || !self.transparent.outputs().is_empty()
-            }
-            PoolType::SAPLING => {
-                !self.sapling.spends().is_empty() || !self.sapling.outputs().is_empty()
-            }
-            PoolType::ORCHARD => !self.orchard.actions().is_empty(),
-            PoolType::IRONWOOD => !self.ironwood.actions().is_empty(),
-        }
-    }
-
     /// Parses a PCZT from its encoding.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         let (version, body) = parse_header(bytes, MAGIC_BYTES).map_err(|e| match e {
@@ -455,30 +425,10 @@ impl Pczt {
         }
     }
 
-    /// Serializes this PCZT in the minimal encoding version capable of
-    /// representing its content: the v1 encoding whenever the PCZT is
-    /// representable in it (maximizing compatibility with receivers that
-    /// predate the v2 encoding), and the v2 encoding otherwise.
+    /// Serializes this PCZT as the latest PCZT version.
     ///
-    /// To force a specific PCZT version, use [`v1::Pczt`] or [`v2::Pczt`]
-    /// directly.
+    /// To serialize a specific PCZT version, e.g. v1, use [`v1::Pczt::serialize`].
     pub fn serialize(self) -> Result<Vec<u8>, EncodingError> {
-        // Fast pre-checks for the conditions that most commonly rule out the
-        // v1 encoding, avoiding the speculative clone below.
-        let requires_v2 = match self.global.tx_version {
-            zcash_protocol::constants::V6_TX_VERSION => true,
-            #[cfg(zcash_unstable = "nutachyon")]
-            zcash_protocol::constants::V7_TX_VERSION => true,
-            _ => false,
-        };
-        if !requires_v2 && self.ironwood == orchard::EMPTY_IRONWOOD {
-            // The full v1-representability conditions live in the bundle
-            // conversions; attempting the conversion is the single source of
-            // truth for them.
-            if let Ok(v1) = v1::Pczt::try_from(self.clone()) {
-                return Ok(v1.serialize());
-            }
-        }
         Ok(v2::Pczt::try_from(self)?.serialize())
     }
 
@@ -544,15 +494,13 @@ impl Pczt {
             .map_err(|_| ExtractError::UnknownConsensusBranchId)?;
         let orchard_protocol_revision = consensus_branch_id
             .orchard_protocol_revision()
-            // The supported transaction formats do not exist prior to NU5, so no
+            // The v5 and v6 transaction formats do not exist prior to NU5, so no
             // transaction could be extracted under such a branch in any case.
             .ok_or(ExtractError::UnsupportedConsensusBranchId)?;
 
         let version = match (global.tx_version, global.version_group_id) {
             (V5_TX_VERSION, V5_VERSION_GROUP_ID) => Ok(TxVersion::V5),
             (V6_TX_VERSION, V6_VERSION_GROUP_ID) => Ok(TxVersion::V6),
-            #[cfg(zcash_unstable = "nutachyon")]
-            (V7_TX_VERSION, V7_VERSION_GROUP_ID) => Ok(TxVersion::V7),
             (version, version_group_id) => Err(ExtractError::UnsupportedTxVersion {
                 version,
                 version_group_id,
@@ -560,21 +508,15 @@ impl Pczt {
         }?;
 
         match version {
-            // Only V6 and later transaction formats carry an Ironwood bundle.
+            // Only the v6 transaction format carries an Ironwood bundle.
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 | TxVersion::V5 => {
                 if ironwood != crate::orchard::EMPTY_IRONWOOD {
                     return Err(ExtractError::IronwoodNotSupported.into());
                 }
             }
-            // V6 and later transaction formats do not exist prior to NU6.3 (the first
+            // The v6 transaction format does not exist prior to NU6.3 (the first
             // upgrade under which the Orchard protocol is at revision V3).
             TxVersion::V6 => {
-                if orchard_protocol_revision < OrchardProtocolRevision::V3 {
-                    return Err(ExtractError::UnsupportedConsensusBranchId.into());
-                }
-            }
-            #[cfg(zcash_unstable = "nutachyon")]
-            TxVersion::V7 => {
                 if orchard_protocol_revision < OrchardProtocolRevision::V3 {
                     return Err(ExtractError::UnsupportedConsensusBranchId.into());
                 }
@@ -609,18 +551,6 @@ impl Pczt {
 
         let tx_data = match version {
             TxVersion::V6 => TransactionData::from_parts_v6(
-                consensus_branch_id,
-                lock_time,
-                global.expiry_height.into(),
-                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-                Zatoshis::ZERO,
-                transparent_bundle,
-                sapling_bundle,
-                orchard_bundle,
-                ironwood_bundle,
-            ),
-            #[cfg(zcash_unstable = "nutachyon")]
-            TxVersion::V7 => TransactionData::from_parts_v7(
                 consensus_branch_id,
                 lock_time,
                 global.expiry_height.into(),
@@ -710,9 +640,7 @@ pub(crate) fn sighash(
     match tx_data.version() {
         TxVersion::V5 => v5_signature_hash(tx_data, signable_input, txid_parts),
         TxVersion::V6 => v6_signature_hash(tx_data, signable_input, txid_parts),
-        #[cfg(zcash_unstable = "nutachyon")]
-        TxVersion::V7 => v6_signature_hash(tx_data, signable_input, txid_parts),
-        _ => unreachable!("PCZT only supports V5 and later transaction data"),
+        _ => unreachable!("PCZT only supports v5 and v6 transaction data"),
     }
     .as_ref()
     .try_into()
@@ -756,57 +684,6 @@ pub enum ExtractError {
     UnsupportedTxVersion { version: u32, version_group_id: u32 },
 }
 
-#[cfg(any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"))]
-impl core::fmt::Display for ExtractError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            ExtractError::IncompatibleLockTimes => {
-                write!(f, "the transparent inputs have incompatible lock times")
-            }
-            ExtractError::IronwoodExtract(e) => {
-                write!(f, "could not extract the Ironwood bundle: {e}")
-            }
-            ExtractError::IronwoodNotSupported => write!(
-                f,
-                "the PCZT carries Ironwood bundle data, but its transaction version has no \
-                 Ironwood bundle"
-            ),
-            ExtractError::IronwoodParse(e) => {
-                write!(f, "could not parse the Ironwood bundle: {e:?}")
-            }
-            ExtractError::OrchardExtract(e) => {
-                write!(f, "could not extract the Orchard bundle: {e}")
-            }
-            ExtractError::OrchardParse(e) => write!(f, "could not parse the Orchard bundle: {e:?}"),
-            ExtractError::SaplingExtract(e) => {
-                write!(f, "could not extract the Sapling bundle: {e}")
-            }
-            ExtractError::SaplingParse(e) => write!(f, "could not parse the Sapling bundle: {e:?}"),
-            ExtractError::TransparentExtract(e) => {
-                write!(f, "could not extract the transparent bundle: {e:?}")
-            }
-            ExtractError::TransparentParse(e) => {
-                write!(f, "could not parse the transparent bundle: {e:?}")
-            }
-            ExtractError::UnknownConsensusBranchId => write!(f, "unknown consensus branch ID"),
-            ExtractError::UnsupportedConsensusBranchId => write!(
-                f,
-                "the consensus branch ID predates the v5 transaction format"
-            ),
-            ExtractError::UnsupportedTxVersion {
-                version,
-                version_group_id,
-            } => write!(
-                f,
-                "unsupported transaction version {version} (version group ID {version_group_id})"
-            ),
-        }
-    }
-}
-
-#[cfg(any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"))]
-impl core::error::Error for ExtractError {}
-
 /// Errors that can occur while parsing a PCZT.
 #[derive(Debug)]
 pub enum ParseError {
@@ -823,26 +700,8 @@ pub enum ParseError {
     UnknownVersion(u32),
 }
 
-impl core::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            ParseError::NotPczt => write!(f, "the bytes do not contain a PCZT"),
-            ParseError::Invalid(e) => write!(f, "invalid PCZT encoding: {e}"),
-            ParseError::MissingRequiredField(field) => {
-                write!(f, "the PCZT encoding omitted the required field {field}")
-            }
-            ParseError::TooShort => write!(f, "the bytes are too short to contain a PCZT"),
-            ParseError::UnknownVersion(v) => write!(f, "unknown PCZT version {v}"),
-        }
-    }
-}
-
-impl core::error::Error for ParseError {}
-
 #[cfg(all(test, any(feature = "io-finalizer", feature = "signer")))]
 mod extraction_tests {
-    #[cfg(zcash_unstable = "nutachyon")]
-    use zcash_primitives::transaction::TxVersion;
     use zcash_protocol::consensus::BranchId;
 
     use crate::{ExtractError, roles::creator::Creator};
@@ -883,88 +742,5 @@ mod extraction_tests {
             pczt.into_effects(),
             Err(ExtractError::UnsupportedConsensusBranchId)
         ));
-    }
-
-    #[test]
-    #[cfg(zcash_unstable = "nutachyon")]
-    fn nu_tachyon_pczt_extracts_as_v7() {
-        let pczt = Creator::new(
-            BranchId::NuTachyon.into(),
-            10_000_000,
-            133,
-            Some([0; 32]),
-            Some([0; 32]),
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-
-        let tx_data = pczt.into_effects().unwrap();
-        assert_eq!(tx_data.version(), TxVersion::V7);
-        assert_eq!(tx_data.consensus_branch_id(), BranchId::NuTachyon);
-    }
-}
-
-#[cfg(test)]
-mod serialize_tests {
-    use zcash_protocol::consensus::BranchId;
-
-    use crate::roles::creator::Creator;
-
-    fn encoding_version(bytes: &[u8]) -> u32 {
-        assert_eq!(&bytes[..4], crate::MAGIC_BYTES);
-        u32::from_le_bytes(bytes[4..8].try_into().unwrap())
-    }
-
-    #[test]
-    fn serialize_emits_minimal_encoding() {
-        // A v1-representable (v5, canonical-empty Ironwood) PCZT serializes as v1.
-        let pczt = Creator::new(
-            BranchId::Nu6.into(),
-            10_000_000,
-            133,
-            Some([0; 32]),
-            Some([0; 32]),
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-        let bytes = pczt.clone().serialize().unwrap();
-        assert_eq!(encoding_version(&bytes), crate::PCZT_VERSION_1);
-        // The minimal encoding still round-trips through the ordinary parser.
-        assert!(crate::Pczt::parse(&bytes).is_ok());
-
-        // Non-canonical Ironwood data forces the v2 encoding.
-        let mut with_ironwood = pczt.clone();
-        with_ironwood.ironwood.bsk = Some([1; 32]);
-        assert_eq!(
-            encoding_version(&with_ironwood.serialize().unwrap()),
-            crate::PCZT_VERSION_2,
-        );
-
-        // An Orchard note-plaintext version the v1 encoding cannot carry
-        // forces the v2 encoding.
-        let mut with_note_v3 = pczt;
-        with_note_v3.orchard.note_version = crate::orchard::NoteVersion::V3;
-        assert_eq!(
-            encoding_version(&with_note_v3.serialize().unwrap()),
-            crate::PCZT_VERSION_2,
-        );
-
-        // A v6 transaction forces the v2 encoding.
-        let v6 = Creator::new(
-            BranchId::Nu6_3.into(),
-            10_000_000,
-            133,
-            Some([0; 32]),
-            Some([0; 32]),
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-        assert_eq!(
-            encoding_version(&v6.serialize().unwrap()),
-            crate::PCZT_VERSION_2,
-        );
     }
 }

@@ -1,3 +1,5 @@
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+
 use crate::{EntryKind, EntryLink, Error, MAX_NODE_DATA_SIZE, Version};
 
 /// Max serialized length of entry data.
@@ -38,17 +40,8 @@ impl<V: Version> Entry<V> {
     }
 
     /// Number of leaves under this node.
-    ///
-    /// # Panics
-    ///
-    /// Panics if this entry was constructed with a descending height range or
-    /// a range containing more leaves than can be represented by a `u64`.
-    /// Entries produced by [`Self::read`] are validated against these cases.
     pub fn leaf_count(&self) -> u64 {
-        V::end_height(&self.data)
-            .checked_sub(V::start_height(&self.data))
-            .and_then(|height_diff| height_diff.checked_add(1))
-            .expect("entry height range must contain a representable number of leaves")
+        V::end_height(&self.data) - (V::start_height(&self.data) - 1)
     }
 
     /// Is this node a leaf.
@@ -73,24 +66,16 @@ impl<V: Version> Entry<V> {
     }
 
     /// Read from byte representation.
-    pub fn read<R: corez::io::Read>(
-        consensus_branch_id: u32,
-        r: &mut R,
-    ) -> corez::io::Result<Self> {
+    pub fn read<R: std::io::Read>(consensus_branch_id: u32, r: &mut R) -> std::io::Result<Self> {
         let kind = {
-            let mut byte = [0u8; 1];
-            r.read_exact(&mut byte)?;
-            match byte[0] {
+            match r.read_u8()? {
                 0 => {
-                    let mut buf = [0u8; 4];
-                    r.read_exact(&mut buf)?;
-                    let left = u32::from_le_bytes(buf);
-                    r.read_exact(&mut buf)?;
-                    let right = u32::from_le_bytes(buf);
+                    let left = r.read_u32::<LittleEndian>()?;
+                    let right = r.read_u32::<LittleEndian>()?;
                     EntryKind::Node(EntryLink::Stored(left), EntryLink::Stored(right))
                 }
                 1 => EntryKind::Leaf,
-                _ => return Err(corez::io::Error::from(corez::io::ErrorKind::InvalidData)),
+                _ => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
             }
         };
 
@@ -100,18 +85,18 @@ impl<V: Version> Entry<V> {
     }
 
     /// Write to byte representation.
-    pub fn write<W: corez::io::Write>(&self, w: &mut W) -> corez::io::Result<()> {
+    pub fn write<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         match self.kind {
             EntryKind::Node(EntryLink::Stored(left), EntryLink::Stored(right)) => {
-                w.write_all(&[0])?;
-                w.write_all(&left.to_le_bytes())?;
-                w.write_all(&right.to_le_bytes())?;
+                w.write_u8(0)?;
+                w.write_u32::<LittleEndian>(left)?;
+                w.write_u32::<LittleEndian>(right)?;
             }
             EntryKind::Leaf => {
-                w.write_all(&[1])?;
+                w.write_u8(1)?;
             }
             _ => {
-                return Err(corez::io::Error::from(corez::io::ErrorKind::InvalidData));
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
             }
         }
 
@@ -121,14 +106,14 @@ impl<V: Version> Entry<V> {
     }
 
     /// Convert from byte representation.
-    pub fn from_bytes<T: AsRef<[u8]>>(consensus_branch_id: u32, buf: T) -> corez::io::Result<Self> {
-        let mut cursor = corez::io::Cursor::new(buf);
+    pub fn from_bytes<T: AsRef<[u8]>>(consensus_branch_id: u32, buf: T) -> std::io::Result<Self> {
+        let mut cursor = std::io::Cursor::new(buf);
         Self::read(consensus_branch_id, &mut cursor)
     }
 }
 
-impl<V: Version> core::fmt::Display for Entry<V> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl<V: Version> std::fmt::Display for Entry<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.kind {
             EntryKind::Node(l, r) => write!(f, "node({l}, {r}, ..)"),
             EntryKind::Leaf => write!(f, "leaf(..)"),

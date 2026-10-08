@@ -10,11 +10,9 @@ use crate::wallet::init::WalletMigrationError;
 
 use super::add_account_uuids;
 
-/// This migration adds `total_spent` and `total_received` columns to the `v_transactions` view to
-/// aid wallets in distinguishing shielding transactions.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x7f2fd1b3_1872_4b90_88ba_7d02b470090f);
+pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0x7f2fd1b3_1872_4b90_88ba_7d02b470090f);
 
-pub(super) const DEPENDENCIES: &[Uuid] = &[add_account_uuids::MIGRATION_ID];
+const DEPENDENCIES: &[Uuid] = &[add_account_uuids::MIGRATION_ID];
 
 pub(super) struct Migration;
 

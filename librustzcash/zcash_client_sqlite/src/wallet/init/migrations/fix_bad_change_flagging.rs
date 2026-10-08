@@ -17,11 +17,9 @@ use crate::{
 #[cfg(feature = "orchard")]
 use crate::ORCHARD_TABLES_PREFIX;
 
-/// Sets the `is_change` flag on output notes received by an internal key when input value was
-/// provided from the account corresponding to that key.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x6d36656d_533b_4b65_ae91_dcb95c4ad289);
+pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0x6d36656d_533b_4b65_ae91_dcb95c4ad289);
 
-pub(super) const DEPENDENCIES: &[Uuid] = &[fix_broken_commitment_trees::MIGRATION_ID];
+const DEPENDENCIES: &[Uuid] = &[fix_broken_commitment_trees::MIGRATION_ID];
 
 pub(super) struct Migration;
 

@@ -28,12 +28,9 @@ use crate::{
     },
 };
 
-/// This migration adds tables to the wallet database that are needed to persist Sapling note
-/// commitment tree data using the `shardtree` crate, and migrates existing witness data into these
-/// data structures.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x7da6489d_e835_4657_8be5_f512bcce6cbf);
+pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0x7da6489d_e835_4657_8be5_f512bcce6cbf);
 
-pub(super) const DEPENDENCIES: &[Uuid] = &[received_notes_nullable_nf::MIGRATION_ID];
+const DEPENDENCIES: &[Uuid] = &[received_notes_nullable_nf::MIGRATION_ID];
 
 pub(super) struct Migration<P> {
     pub(super) params: P,

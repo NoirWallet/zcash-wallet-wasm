@@ -1,6 +1,6 @@
 use std::hash::Hash;
 
-use incrementalmerkletree::{Address as TreeAddress, Hashable, Level, Position};
+use incrementalmerkletree::{Hashable, Level};
 use sapling::{
     note_encryption::try_sapling_output_recovery,
     zip32::{DiversifiableFullViewingKey, ExtendedSpendingKey},
@@ -21,10 +21,7 @@ use crate::{
         DecryptedTransaction, InputSource, TargetValue, WalletCommitmentTrees, WalletSummary,
         WalletTest,
         chain::{CommitmentTreeRoot, ScanSummary},
-        wallet::{
-            ConfirmationsPolicy, TargetHeight,
-            input_selection::{LockFilter, LockedInputPolicy},
-        },
+        wallet::{ConfirmationsPolicy, TargetHeight},
     },
     wallet::{Note, ReceivedNote},
 };
@@ -93,8 +90,9 @@ impl ShieldedPoolTester for SaplingPoolTester {
         st: &mut TestState<Cache, DbT, P>,
         shard_index: u64,
     ) -> Result<Self::MerkleTreeHash, ShardTreeError<<DbT as WalletCommitmentTrees>::Error>> {
+        use incrementalmerkletree::{Address, Position};
         let shard_height = crate::data_api::SAPLING_SHARD_HEIGHT;
-        let addr = TreeAddress::from_parts(Level::from(shard_height), shard_index);
+        let addr = Address::from_parts(Level::from(shard_height), shard_index);
         let end_position = Position::from((shard_index + 1) << shard_height);
         st.wallet_mut()
             .with_sapling_tree_mut(|tree| tree.root(addr, end_position))
@@ -124,7 +122,6 @@ impl ShieldedPoolTester for SaplingPoolTester {
                 target_height,
                 confirmations_policy,
                 exclude,
-                LockFilter::Policy(&LockedInputPolicy::Exclude),
             )
             .map(|n| n.take_sapling())
     }
@@ -136,13 +133,7 @@ impl ShieldedPoolTester for SaplingPoolTester {
         exclude: &[DbT::NoteRef],
     ) -> Result<Vec<ReceivedNote<DbT::NoteRef, Self::Note>>, <DbT as InputSource>::Error> {
         st.wallet()
-            .select_unspent_notes(
-                account,
-                &[ShieldedPool::Sapling],
-                target_height,
-                exclude,
-                LockFilter::Policy(&LockedInputPolicy::Exclude),
-            )
+            .select_unspent_notes(account, &[ShieldedPool::Sapling], target_height, exclude)
             .map(|n| n.take_sapling())
     }
 

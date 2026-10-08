@@ -34,8 +34,8 @@ use zcash_protocol::{
 use zip32::{DiversifierIndex, fingerprint::SeedFingerprint};
 
 use crate::{
-    AccountId, MemoryWalletBlock, MemoryWalletDb, Nullifier, PRUNING_DEPTH, ReceivedNote,
-    VERIFY_LOOKAHEAD, error::Error,
+    MemoryWalletBlock, MemoryWalletDb, Nullifier, PRUNING_DEPTH, ReceivedNote, VERIFY_LOOKAHEAD,
+    error::Error,
 };
 
 #[cfg(feature = "orchard")]
@@ -61,18 +61,18 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         seed: &SecretVec<u8>,
         birthday: &AccountBirthday,
         key_source: Option<&str>,
-    ) -> Result<(AccountId, UnifiedSpendingKey), Error> {
+    ) -> Result<(Self::AccountId, UnifiedSpendingKey), Self::Error> {
         if cfg!(not(test)) {
             unimplemented!(
-                "Memwallet does not support adding accounts from seed phrases.
+                "Memwallet does not support adding accounts from seed phrases. 
     Instead derive the ufvk in the calling code and import it using `import_account_ufvk`"
             )
         } else {
-            let seed_fingerprint =
-                SeedFingerprint::from_seed(seed.expose_secret()).ok_or(Error::InvalidSeedLength)?;
+            let seed_fingerprint = SeedFingerprint::from_seed(seed.expose_secret())
+                .ok_or(Self::Error::InvalidSeedLength)?;
             let account_index = self
                 .max_zip32_account_index(&seed_fingerprint)?
-                .map(|a| a.next().ok_or(Error::AccountOutOfRange))
+                .map(|a| a.next().ok_or(Self::Error::AccountOutOfRange))
                 .transpose()?
                 .unwrap_or(zip32::AccountId::ZERO);
 
@@ -99,16 +99,16 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         }
     }
 
-    fn delete_account(&mut self, account: AccountId) -> Result<(), Error> {
+    fn delete_account(&mut self, account: Self::AccountId) -> Result<(), Self::Error> {
         self.accounts.accounts.remove(&account);
         todo!("remove all transactions associated with the account")
     }
 
     fn get_next_available_address(
         &mut self,
-        account: AccountId,
+        account: Self::AccountId,
         request: UnifiedAddressRequest,
-    ) -> Result<Option<(UnifiedAddress, DiversifierIndex)>, Error> {
+    ) -> Result<Option<(UnifiedAddress, DiversifierIndex)>, Self::Error> {
         tracing::debug!("get_next_available_address");
         self.accounts
             .get_mut(account)
@@ -117,7 +117,7 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
             .map(|a| a.flatten())
     }
 
-    fn update_chain_tip(&mut self, tip_height: BlockHeight) -> Result<(), Error> {
+    fn update_chain_tip(&mut self, tip_height: BlockHeight) -> Result<(), Self::Error> {
         tracing::debug!("update_chain_tip");
         // If the caller provided a chain tip that is before Sapling activation, do nothing.
         let sapling_activation = match self.params.activation_height(NetworkUpgrade::Sapling) {
@@ -272,64 +272,14 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         Ok(())
     }
 
-    fn prune_scan_queue_below(
-        &mut self,
-        height: BlockHeight,
-        retain_with_priority: Option<ScanPriority>,
-    ) -> Result<u64, Error> {
-        let is_retained = |priority| {
-            retain_with_priority
-                .is_some_and(|retain| priority <= ScanPriority::Scanned || priority >= retain)
-        };
-        let (existing, untouched): (Vec<_>, Vec<_>) = self
-            .scan_queue
-            .iter()
-            .copied()
-            .partition(|(start, _, _)| *start < height);
-        let fill_from = existing
-            .iter()
-            .find(|(_, _, priority)| is_retained(*priority))
-            .map(|(start, _, _)| *start);
-        let mut ranges: Vec<(BlockHeight, BlockHeight, ScanPriority)> = Vec::new();
-        for &(start, end, priority) in &existing {
-            let replacements = if is_retained(priority) {
-                vec![(start, end, priority)]
-            } else {
-                let mut replacements = Vec::new();
-                if fill_from.is_some_and(|floor| end.min(height) > floor) {
-                    replacements.push((start, end.min(height), ScanPriority::Ignored));
-                }
-                if height < end {
-                    replacements.push((height, end, priority));
-                }
-                replacements
-            };
-            for range in replacements {
-                match ranges.last_mut() {
-                    Some(previous) if previous.1 == range.0 && previous.2 == range.2 => {
-                        previous.1 = range.1;
-                    }
-                    _ => ranges.push(range),
-                }
-            }
-        }
-        let changed = existing
-            .iter()
-            .filter(|entry| !ranges.contains(entry))
-            .count() as u64;
-        ranges.extend(untouched);
-        self.scan_queue.0 = ranges;
-        Ok(changed)
-    }
-
     /// Adds a sequence of blocks to the data store.
     ///
     /// Assumes blocks will be here in order.
     fn put_blocks(
         &mut self,
         from_state: &ChainState,
-        blocks: Vec<ScannedBlock<AccountId>>,
-    ) -> Result<(), Error> {
+        blocks: Vec<ScannedBlock<Self::AccountId>>,
+    ) -> Result<(), Self::Error> {
         tracing::debug!("put_blocks");
         let mut last_scanned_height = None;
         struct BlockPositions {
@@ -646,7 +596,7 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
             // Update the Sapling note commitment tree with all newly read note commitments
             {
                 let mut sapling_subtrees_iter = sapling_subtrees.into_iter();
-                self.with_sapling_tree_mut::<_, _, Error>(|sapling_tree| {
+                self.with_sapling_tree_mut::<_, _, Self::Error>(|sapling_tree| {
                     sapling_tree.insert_frontier(
                         from_state.final_sapling_tree().clone(),
                         Retention::Checkpoint {
@@ -688,7 +638,7 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
             #[cfg(feature = "orchard")]
             {
                 let mut ironwood_subtrees = ironwood_subtrees.into_iter();
-                self.with_ironwood_tree_mut::<_, _, Error>(|ironwood_tree| {
+                self.with_ironwood_tree_mut::<_, _, Self::Error>(|ironwood_tree| {
                     ironwood_tree.insert_frontier(
                         from_state.final_ironwood_tree().clone(),
                         Retention::Checkpoint {
@@ -722,7 +672,7 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
             #[cfg(feature = "orchard")]
             {
                 let mut orchard_subtrees = orchard_subtrees.into_iter();
-                self.with_orchard_tree_mut::<_, _, Error>(|orchard_tree| {
+                self.with_orchard_tree_mut::<_, _, Self::Error>(|orchard_tree| {
                     orchard_tree.insert_frontier(
                         from_state.final_orchard_tree().clone(),
                         Retention::Checkpoint {
@@ -773,8 +723,8 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
     /// Adds a transparent UTXO received by the wallet to the data store.
     fn put_received_transparent_utxo(
         &mut self,
-        _output: &WalletTransparentOutput<AccountId>,
-    ) -> Result<Self::UtxoRef, Error> {
+        _output: &WalletTransparentOutput<Self::AccountId>,
+    ) -> Result<Self::UtxoRef, Self::Error> {
         tracing::debug!("put_received_transparent_utxo");
         #[cfg(feature = "transparent-inputs")]
         {
@@ -793,8 +743,8 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
 
     fn store_decrypted_tx(
         &mut self,
-        d_tx: DecryptedTransaction<Transaction, AccountId>,
-    ) -> Result<(), Error> {
+        d_tx: DecryptedTransaction<Transaction, Self::AccountId>,
+    ) -> Result<(), Self::Error> {
         tracing::debug!("store_decrypted_tx");
         let fee = d_tx.tx().fee_paid(|outpoint| {
             Ok::<_, Error>(
@@ -1171,7 +1121,7 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         Ok(())
     }
 
-    fn set_tx_trust(&mut self, _txid: TxId, _trusted: bool) -> Result<(), Error> {
+    fn set_tx_trust(&mut self, _txid: TxId, _trusted: bool) -> Result<(), Self::Error> {
         todo!()
     }
 
@@ -1181,7 +1131,7 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
     /// block, this function does nothing.
     ///
     /// This should only be executed inside a transactional context.
-    fn truncate_to_height(&mut self, max_height: BlockHeight) -> Result<BlockHeight, Error> {
+    fn truncate_to_height(&mut self, max_height: BlockHeight) -> Result<BlockHeight, Self::Error> {
         let truncation_height = {
             // This is the intersection of all the checkpoint heights from the sapling and orchard tree.
             let mut checkpoint_heights = BTreeSet::new();
@@ -1324,15 +1274,15 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         Ok(truncation_height)
     }
 
-    fn truncate_to_chain_state(&mut self, _chain_state: ChainState) -> Result<(), Error> {
+    fn truncate_to_chain_state(&mut self, _chain_state: ChainState) -> Result<(), Self::Error> {
         todo!()
     }
 
     fn rewind_to_chain_state(
         &mut self,
         _chain_state: ChainState,
-        _reset_account_birthdays: HashSet<AccountId>,
-    ) -> Result<(), RewindError<AccountId, Error>> {
+        _reset_account_birthdays: HashSet<Self::AccountId>,
+    ) -> Result<(), RewindError<Self::AccountId, Self::Error>> {
         todo!()
     }
 
@@ -1343,9 +1293,9 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         _account_index: zip32::AccountId,
         _birthday: &AccountBirthday,
         _key_source: Option<&str>,
-    ) -> Result<(Self::Account, UnifiedSpendingKey), Error> {
+    ) -> Result<(Self::Account, UnifiedSpendingKey), Self::Error> {
         unimplemented!(
-            "Memwallet does not support adding accounts from seed phrases.
+            "Memwallet does not support adding accounts from seed phrases. 
 Instead derive the ufvk in the calling code and import it using `import_account_ufvk`"
         )
     }
@@ -1357,7 +1307,7 @@ Instead derive the ufvk in the calling code and import it using `import_account_
         birthday: &AccountBirthday,
         purpose: AccountPurpose,
         key_source: Option<&str>,
-    ) -> Result<Self::Account, Error> {
+    ) -> Result<Self::Account, Self::Error> {
         tracing::debug!("import_account_ufvk");
         let (_id, account) = self.add_account(
             account_name,
@@ -1373,8 +1323,8 @@ Instead derive the ufvk in the calling code and import it using `import_account_
 
     fn store_transactions_to_be_sent(
         &mut self,
-        transactions: &[SentTransaction<AccountId>],
-    ) -> Result<(), Error> {
+        transactions: &[SentTransaction<Self::AccountId>],
+    ) -> Result<(), Self::Error> {
         tracing::debug!("store_transactions_to_be_sent");
         for sent_tx in transactions {
             self.tx_table.put_tx_data(
@@ -1506,7 +1456,7 @@ Instead derive the ufvk in the calling code and import it using `import_account_
         &mut self,
         txid: TxId,
         status: TransactionStatus,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Self::Error> {
         tracing::debug!("set_transaction_status");
         self.tx_table.set_transaction_status(&txid, status)?;
         #[cfg(feature = "transparent-inputs")]
@@ -1533,9 +1483,9 @@ Instead derive the ufvk in the calling code and import it using `import_account_
     #[cfg(feature = "transparent-inputs")]
     fn reserve_next_n_ephemeral_addresses(
         &mut self,
-        account_id: AccountId,
+        account_id: Self::AccountId,
         n: usize,
-    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Error> {
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Self::Error> {
         use zcash_keys::keys::AddressGenerationError;
         // TODO: We need to implement first_unsafe_index to make sure we dont violate gap invarient
 
@@ -1564,16 +1514,16 @@ Instead derive the ufvk in the calling code and import it using `import_account_
                 ),
             )
         } else {
-            Err(Error::AccountUnknown(account_id))
+            Err(Self::Error::AccountUnknown(account_id))
         }
     }
 
     #[cfg(feature = "transparent-inputs")]
     fn reserve_next_n_internal_addresses(
         &mut self,
-        account_id: AccountId,
+        account_id: Self::AccountId,
         n: usize,
-    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Error> {
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Self::Error> {
         use zcash_keys::keys::AddressGenerationError;
 
         if n == 0 {
@@ -1605,10 +1555,10 @@ Instead derive the ufvk in the calling code and import it using `import_account_
 
     fn get_address_for_index(
         &mut self,
-        account: AccountId,
+        account: Self::AccountId,
         diversifier_index: DiversifierIndex,
         request: UnifiedAddressRequest,
-    ) -> Result<Option<UnifiedAddress>, Error> {
+    ) -> Result<Option<UnifiedAddress>, Self::Error> {
         if let Some(account) = self.accounts.get_mut(account) {
             Ok(Some(account.address_at(diversifier_index, request)?))
         } else {
@@ -1621,7 +1571,7 @@ Instead derive the ufvk in the calling code and import it using `import_account_
         &mut self,
         request: TransactionsInvolvingAddress,
         as_of_height: BlockHeight,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Self::Error> {
         use zcash_client_backend::data_api::{OutputStatusFilter, TransactionStatusFilter};
 
         // Only complete mined history proves the absence of historical uses or
@@ -1667,18 +1617,18 @@ Instead derive the ufvk in the calling code and import it using `import_account_
     #[cfg(feature = "transparent-key-import")]
     fn import_standalone_transparent_pubkey(
         &mut self,
-        _account: AccountId,
+        _account: Self::AccountId,
         _pubkey: secp256k1::PublicKey,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Self::Error> {
         todo!()
     }
 
     #[cfg(feature = "transparent-key-import")]
     fn import_standalone_transparent_script(
         &mut self,
-        _account: AccountId,
+        _account: Self::AccountId,
         _script: zcash_script::script::Redeem,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Self::Error> {
         todo!()
     }
 }
@@ -1745,80 +1695,6 @@ mod tests {
     use zcash_protocol::consensus::{Parameters, TxIndex};
 
     use super::*;
-
-    #[test]
-    fn prune_scan_queue_preserves_bookkeeping_and_counts_ranges() {
-        let mut wallet = MemoryWalletDb::new(consensus::Network::TestNetwork, 100);
-        let range = |start: u32, end: u32, priority| (start.into(), end.into(), priority);
-        wallet.scan_queue.0 = vec![
-            range(1, 10, ScanPriority::Ignored),
-            range(10, 20, ScanPriority::FoundNote),
-            range(20, 30, ScanPriority::Scanned),
-            range(30, 50, ScanPriority::Historic),
-            range(50, 60, ScanPriority::ChainTip),
-        ];
-        assert_eq!(
-            wallet
-                .prune_scan_queue_below(40.into(), Some(ScanPriority::OpenAdjacent))
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            wallet.scan_queue.0,
-            vec![
-                range(1, 10, ScanPriority::Ignored),
-                range(10, 20, ScanPriority::FoundNote),
-                range(20, 30, ScanPriority::Scanned),
-                range(30, 40, ScanPriority::Ignored),
-                range(40, 50, ScanPriority::Historic),
-                range(50, 60, ScanPriority::ChainTip),
-            ]
-        );
-        assert_eq!(
-            wallet
-                .prune_scan_queue_below(40.into(), Some(ScanPriority::OpenAdjacent))
-                .unwrap(),
-            0
-        );
-        assert_eq!(wallet.prune_scan_queue_below(40.into(), None).unwrap(), 4);
-        assert_eq!(
-            wallet.scan_queue.0,
-            vec![
-                range(40, 50, ScanPriority::Historic),
-                range(50, 60, ScanPriority::ChainTip),
-            ]
-        );
-    }
-
-    #[test]
-    fn prune_scan_queue_coalesces_ignored_ranges_and_raises_unretained_floor() {
-        let mut wallet = MemoryWalletDb::new(consensus::Network::TestNetwork, 100);
-        wallet.scan_queue.0 = vec![
-            (1.into(), 10.into(), ScanPriority::Ignored),
-            (10.into(), 30.into(), ScanPriority::Historic),
-        ];
-        assert_eq!(
-            wallet
-                .prune_scan_queue_below(20.into(), Some(ScanPriority::OpenAdjacent))
-                .unwrap(),
-            2
-        );
-        assert_eq!(
-            wallet.scan_queue.0,
-            vec![
-                (1.into(), 20.into(), ScanPriority::Ignored),
-                (20.into(), 30.into(), ScanPriority::Historic),
-            ]
-        );
-        assert_eq!(wallet.prune_scan_queue_below(20.into(), None).unwrap(), 1);
-        assert_eq!(
-            wallet
-                .prune_scan_queue_below(30.into(), Some(ScanPriority::OpenAdjacent))
-                .unwrap(),
-            1
-        );
-        assert!(wallet.scan_queue.0.is_empty());
-    }
 
     fn empty_block(height: BlockHeight) -> MemoryWalletBlock {
         MemoryWalletBlock {
