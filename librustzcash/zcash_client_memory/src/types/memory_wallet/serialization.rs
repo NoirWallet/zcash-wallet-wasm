@@ -167,6 +167,9 @@ impl<P: Parameters> MemoryWalletDb<P> {
             }
         }
 
+        for record in self.proto_output_locks() {
+            len += message::encoded_len(21, &record);
+        }
         Ok(len)
     }
 
@@ -333,7 +336,27 @@ impl<P: Parameters> MemoryWalletDb<P> {
             }
         }
 
+        for record in self.proto_output_locks() {
+            message::encode(21, &record, buf);
+        }
         Ok(())
+    }
+
+    fn proto_output_locks(&self) -> impl Iterator<Item = proto::OutputLockRecord> + '_ {
+        self.output_locks
+            .iter()
+            .map(|(output, lock)| proto::OutputLockRecord {
+                tx_id: output.txid().as_ref().to_vec(),
+                pool: match output.pool() {
+                    zcash_protocol::PoolType::Transparent => 0,
+                    zcash_protocol::PoolType::Shielded(ShieldedPool::Sapling) => 2,
+                    zcash_protocol::PoolType::Shielded(ShieldedPool::Orchard) => 3,
+                    zcash_protocol::PoolType::Shielded(ShieldedPool::Ironwood) => 4,
+                },
+                output_index: output.output_index(),
+                owner: lock.owner.as_bytes().to_vec(),
+                expiry_height: lock.expiry_height.into(),
+            })
     }
 
     pub fn encode_chunked<F: FnMut(&[u8])>(&self, flush_fn: F) -> Result<()> {
@@ -634,6 +657,34 @@ impl<P: Parameters> MemoryWalletDb<P> {
                 .collect::<Result<_>>()?,
         );
 
+        for record in proto_wallet.output_locks {
+            let pool = match record.pool {
+                0 => zcash_protocol::PoolType::Transparent,
+                2 => zcash_protocol::PoolType::SAPLING,
+                3 => zcash_protocol::PoolType::ORCHARD,
+                4 => zcash_protocol::PoolType::IRONWOOD,
+                _ => return Err(Error::CorruptedData("invalid output lock pool".into())),
+            };
+            let output = OutputRef::new(
+                TxId::from_bytes(record.tx_id.try_into()?),
+                pool,
+                record.output_index,
+            );
+            if wallet.output_account(&output).is_none() || wallet.output_locks.contains_key(&output)
+            {
+                return Err(Error::CorruptedData(
+                    "unknown or duplicated locked output".into(),
+                ));
+            }
+            wallet.output_locks.insert(
+                output,
+                crate::output_locks::OutputLock {
+                    owner: zcash_client_backend::wallet::LockOwner::new(record.owner.try_into()?),
+                    expiry_height: record.expiry_height.into(),
+                },
+            );
+        }
+
         #[cfg(feature = "transparent-inputs")]
         wallet.ensure_internal_address_gaps()?;
         Ok(wallet)
@@ -911,6 +962,7 @@ impl<P: Parameters> From<&MemoryWalletDb<P>> for proto::MemoryWallet {
     fn from(wallet: &MemoryWalletDb<P>) -> Self {
         Self {
             version: 1,
+            output_locks: wallet.proto_output_locks().collect(),
             accounts: Some(proto::Accounts {
                 accounts: wallet
                     .accounts

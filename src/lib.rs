@@ -1,15 +1,24 @@
 use wasm_bindgen::prelude::*;
 
 pub mod bindgen;
+mod compact_block_source;
 mod error;
 mod init;
 mod ledger_pczt;
 mod network;
 mod wallet;
 
+#[cfg(all(feature = "voting", target_arch = "wasm32"))]
+pub use bindgen::voting::WebVotingSession;
 pub use error::*;
 pub use network::*;
 pub use wallet::*;
+
+#[cfg(feature = "voting")]
+pub use zcash_voting;
+
+#[cfg(feature = "voting")]
+pub mod voting;
 
 /// The maximum number of checkpoints to store in each shard-tree
 pub const PRUNING_DEPTH: usize = 100;
