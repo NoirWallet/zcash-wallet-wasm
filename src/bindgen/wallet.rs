@@ -1,10 +1,11 @@
 use std::num::NonZeroU32;
 use std::str::FromStr;
+use std::time::Duration;
 
 use crate::bindgen::sign::pczt_sign_inner;
 use crate::bindgen::{Pczt as WasmPczt, ProofGenerationKey, SeedFingerprint};
 use crate::compact_block_source::CompactBlockCdnConfig;
-use crate::wallet::TransferFundingSource;
+use crate::wallet::{DEFAULT_ZERO_INDEXER_SEND_TIMEOUT, TransferFundingSource};
 use crate::{Error, Network, PRUNING_DEPTH, Wallet};
 
 use nonempty::NonEmpty;
@@ -47,6 +48,13 @@ struct CompactBlockCdnOptions {
     request_timeout_ms: Option<u32>,
     max_chunk_bytes: Option<usize>,
     max_concurrent_chunk_requests: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ZeroIndexerOptions {
+    urls: Vec<String>,
+    send_timeout_ms: Option<NonZeroU32>,
 }
 
 impl TryFrom<CompactBlockCdnOptions> for CompactBlockCdnConfig {
@@ -100,11 +108,19 @@ export interface CompactBlockCdnOptions {
     /** Maximum concurrent CDN chunk requests. Defaults to 4; valid range is 1 through 8. */
     maxConcurrentChunkRequests?: number;
 }
+
+/** Runtime broadcast endpoints; supply again when restoring wallet bytes. */
+export interface ZeroIndexerOptions {
+    /** Ordered endpoints used only for transactions containing an Orchard bundle. */
+    urls: string[];
+    /** Positive per-endpoint timeout in milliseconds. Defaults to 30000. */
+    sendTimeoutMs?: number;
+}
 "#;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TRANSFER_TYPES: &str = r#"
-export type TransferOverallStatus = "success" | "partial" | "failed";
+export type TransferOverallStatus = "success" | "partial" | "unknown" | "failed";
 export type TransferSubmissionStatus =
     | "submitted"
     | "rejected"
@@ -140,6 +156,36 @@ pub struct WebWallet {
 }
 
 impl WebWallet {
+    fn parse_zero_indexer_options(value: JsValue) -> Result<(Vec<Client>, Duration), Error> {
+        if value.is_null_or_undefined() {
+            return Ok((vec![], DEFAULT_ZERO_INDEXER_SEND_TIMEOUT));
+        }
+        // serde-wasm-bindgen does not reject unknown object keys on its own.
+        for key in js_sys::Reflect::own_keys(&value).map_err(Error::Js)? {
+            if !matches!(key.as_string().as_deref(), Some("urls" | "sendTimeoutMs")) {
+                return Err(Error::Generic(
+                    "Zero-indexer options contain an unsupported key".into(),
+                ));
+            }
+        }
+        let options: ZeroIndexerOptions = serde_wasm_bindgen::from_value(value)?;
+        let mut urls = Vec::with_capacity(options.urls.len());
+        for url in options.urls {
+            let url = url.trim();
+            if url.is_empty() {
+                return Err(Error::Generic("Zero-indexer URL must not be empty".into()));
+            }
+            if !urls.iter().any(|existing| existing == url) {
+                urls.push(url.to_string());
+            }
+        }
+        let timeout = options
+            .send_timeout_ms
+            .map(|value| Duration::from_millis(u64::from(value.get())))
+            .unwrap_or(DEFAULT_ZERO_INDEXER_SEND_TIMEOUT);
+        Ok((urls.into_iter().map(Client::new).collect(), timeout))
+    }
+
     #[cfg(feature = "voting")]
     #[allow(dead_code)]
     pub(crate) fn shared_inner(&self) -> MemoryWallet<tonic_web_wasm_client::Client> {
@@ -194,6 +240,8 @@ impl WebWallet {
         confirmations_policy: JsValue,
         #[wasm_bindgen(unchecked_optional_param_type = "CompactBlockCdnOptions | null")]
         compact_block_cdn: JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "ZeroIndexerOptions | null")]
+        zero_indexer_options: JsValue,
     ) -> Result<WebWallet, Error> {
         let network = Network::from_str(network)?;
         let confirmations_policy = if confirmations_policy.is_null_or_undefined() {
@@ -220,6 +268,8 @@ impl WebWallet {
                     .try_into()?,
             )
         };
+        let (zero_indexer_clients, zero_indexer_send_timeout) =
+            Self::parse_zero_indexer_options(zero_indexer_options)?;
 
         let db = match db_bytes {
             Some(bytes) => {
@@ -235,11 +285,22 @@ impl WebWallet {
             inner: Wallet::new_with_runtime_config(
                 db,
                 client,
+                zero_indexer_clients,
                 network,
                 confirmations_policy,
                 compact_block_cdn,
+                zero_indexer_send_timeout,
             )?,
         })
+    }
+
+    pub fn set_zero_indexer_options(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "ZeroIndexerOptions | null")] options: JsValue,
+    ) -> Result<(), Error> {
+        let (clients, timeout) = Self::parse_zero_indexer_options(options)?;
+        self.inner.set_zero_indexer_options(clients, timeout);
+        Ok(())
     }
 
     pub async fn create_account(
@@ -578,7 +639,8 @@ impl WebWallet {
         Ok(())
     }
 
-    pub async fn send_authorized_transactions(&self, txids: Vec<u8>) -> Result<(), Error> {
+    #[wasm_bindgen(unchecked_return_type = "TransferResult")]
+    pub async fn send_authorized_transactions(&self, txids: Vec<u8>) -> Result<JsValue, Error> {
         let txids = txids
             .chunks(32)
             .map(|txid| {
@@ -587,7 +649,8 @@ impl WebWallet {
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let txids = NonEmpty::from_vec(txids).ok_or(Error::TxIdParse)?;
-        self.inner.send_authorized_transactions(&txids).await
+        let result = self.inner.send_authorized_transactions(&txids).await?;
+        Ok(serde_wasm_bindgen::to_value(&result)?)
     }
 
     /// Get account ID by account name
