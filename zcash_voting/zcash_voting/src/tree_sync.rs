@@ -591,9 +591,17 @@ impl PlatformMonotonicClock {
 #[cfg(target_arch = "wasm32")]
 impl MonotonicClock for PlatformMonotonicClock {
     fn now(&self) -> Duration {
-        web_sys::window()
-            .and_then(|window| window.performance())
-            .map(|performance| Duration::from_secs_f64(performance.now().max(0.0) / 1_000.0))
+        use js_sys::wasm_bindgen::JsCast;
+
+        let global = js_sys::global();
+        js_sys::Reflect::get(&global, &"performance".into())
+            .ok()
+            .and_then(|performance| {
+                let now = js_sys::Reflect::get(&performance, &"now".into()).ok()?;
+                let now: js_sys::Function = now.dyn_into().ok()?;
+                now.call0(&performance).ok()?.as_f64()
+            })
+            .map(|now| Duration::from_secs_f64(now.max(0.0) / 1_000.0))
             .unwrap_or(Duration::ZERO)
     }
 }
