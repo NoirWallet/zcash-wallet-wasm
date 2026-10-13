@@ -1,0 +1,15 @@
+.git
+.agents
+.aws
+.codex
+.superpowers
+local-docs
+target
+**/target
+pkg*
+**/pkg*
+node_modules
+**/node_modules
+wasm-dist
+test-results
+playwright-report

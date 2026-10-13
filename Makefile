@@ -7,7 +7,7 @@ build-wasm:
 	wasm-pack build --target web --release --out-dir pkg --features wasm-parallel -Z build-std=panic_abort,std
 
 build-voting-wasm:
-	wasm-pack build --target web --release --out-dir pkg --features wasm-parallel,voting -Z build-std=panic_abort,std
+	wasm-pack build --target web --release --out-dir pkg --features wasm-parallel,voting -Z build-std=panic_abort,std --locked
 	node tests/check_wasm_imports.mjs pkg/zcash_wallet_wasm_bg.wasm
 
 build-voting-sequential:
