@@ -48,6 +48,9 @@ RUN ! command -v protoc
 RUN cargo fetch --locked
 RUN CARGO_NET_OFFLINE=true make build-voting-wasm
 RUN node tests/check_wasm_release.mjs pkg
+RUN bash -o pipefail -c 'find pkg -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS' \
+    && sha256sum --check SHA256SUMS
 
 FROM scratch AS wasm-package
 COPY --from=build /src/pkg /pkg
+COPY --from=build /src/SHA256SUMS /SHA256SUMS
