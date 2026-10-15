@@ -1,0 +1,39 @@
+# Zcash wallet WASM
+
+This repository contains the Rust/WebAssembly wallet core used by the Noir
+Wallet browser extension. It exposes wallet and voting APIs to a JavaScript
+host. It is not a standalone extension, a key store, or a complete privacy
+policy for the host application.
+
+The wallet handles Zcash account import, scanning, balances, addresses, PCZT
+creation and signing, and transaction submission. The `voting` feature adds
+`WebVotingSession`. The release package enables `wasm-parallel,voting` and
+exports `WebWallet`, `WebVotingSession`, and `initThreadPool`. The generated
+`pkg/zcash_wallet_wasm.d.ts` describes the exact JavaScript API of a built
+package.
+
+## Build and verification
+
+Use [BUILDING.md](BUILDING.md) to build the release package from a specific
+source commit in the pinned Linux/amd64 Docker environment. The release
+command inside the container is `make build-voting-wasm`; other Makefile
+targets may enable different features or test fixtures. Do not mix files from
+different `pkg/` builds. A source commit alone does not identify the binary
+deployed by an extension; verify the entire package against its `SHA256SUMS`.
+
+The parallel WASM package uses shared memory. Its browser host must provide
+cross-origin isolation and `SharedArrayBuffer`, and correctly serve the WASM,
+JavaScript, and worker files. The extension's permissions, Content Security
+Policy, storage, and update mechanism are outside this repository.
+
+## Security boundaries
+
+The JavaScript host supplies wallet secrets, serialized wallet state, and
+network endpoints. It is responsible for user authorization before signing,
+protecting data at rest, choosing trusted HTTPS services, and reviewing what
+is displayed to the user. See [PRIVACY.md](PRIVACY.md) for the data flows and
+network trust limits visible in this code. Passing data into WASM does not
+hide it from the host or automatically erase its JavaScript copies.
+
+No audit claim applies to a release unless a report identifies the exact
+source commit, enabled features, dependencies, and scope it covers.
