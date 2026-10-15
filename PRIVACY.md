@@ -19,11 +19,13 @@ using shielded Zcash transactions or HTTPS.
 Relevant code: `src/bindgen/wallet.rs`, `src/bindgen/keys.rs`,
 `src/bindgen/voting.rs`, `src/init.rs`.
 
-`db_to_bytes_chunked` currently ignores exceptions thrown by its JavaScript
-callback and does not await a Promise returned by that callback. Its successful
-return does not prove that every chunk was durably stored. Do not treat it as
-confirmation of a completed backup; verify the stored bytes before relying on
-the backup, or use `db_to_bytes` with a separately checked storage operation.
+`db_to_bytes_chunked` propagates the original value thrown synchronously by
+its JavaScript callback without logging it, but does not await a Promise
+returned by that callback. Use a synchronous callback and do not treat a
+successful return as proof of durable storage. Verify the stored bytes before
+relying on a backup, or use `db_to_bytes` with a separately checked storage
+operation. Treat caught callback errors as sensitive if the host puts wallet
+data in their messages.
 
 ## Network data flow
 

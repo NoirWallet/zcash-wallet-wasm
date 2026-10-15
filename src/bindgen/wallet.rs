@@ -2,7 +2,9 @@
 // Copyright 2024 ChainSafe Systems
 // Modified by NoirWallet; see THIRD_PARTY_NOTICES.md for licensing.
 
+use std::cell::RefCell;
 use std::num::NonZeroU32;
+use std::rc::Rc;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -632,15 +634,29 @@ impl WebWallet {
         Ok(bytes.into_boxed_slice())
     }
 
-    pub async fn db_to_bytes_chunked(&self, callback: &js_sys::Function) -> Result<(), Error> {
+    /// The callback must complete synchronously; returned Promises are not awaited.
+    /// A thrown value rejects this call unchanged.
+    pub async fn db_to_bytes_chunked(&self, callback: &js_sys::Function) -> Result<(), JsValue> {
         let cb = callback.clone();
-        self.inner
+        let callback_error = Rc::new(RefCell::new(None));
+        let error_in_callback = Rc::clone(&callback_error);
+        let result = self
+            .inner
             .db_to_bytes_chunked(move |chunk: &[u8]| {
+                if error_in_callback.borrow().is_some() {
+                    return;
+                }
                 let arr = js_sys::Uint8Array::from(chunk);
-                let _ = cb.call1(&JsValue::NULL, &arr);
+                if let Err(error) = cb.call1(&JsValue::NULL, &arr) {
+                    *error_in_callback.borrow_mut() = Some(error);
+                }
             })
-            .await?;
-        Ok(())
+            .await;
+        if let Some(error) = callback_error.borrow_mut().take() {
+            Err(error)
+        } else {
+            result.map_err(Into::into)
+        }
     }
 
     #[wasm_bindgen(unchecked_return_type = "TransferResult")]

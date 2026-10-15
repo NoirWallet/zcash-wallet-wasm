@@ -52,4 +52,34 @@ await test('release package initializes shared memory and wallet API', async () 
   }
 });
 
+await test('chunked wallet export reports callback failure', async () => {
+  const walletBytes = new Uint8Array(await (await fetch('/fixtures/wallet.bin')).arrayBuffer());
+  const wallet = new bindings.WebWallet('test', 'https://example.invalid', walletBytes);
+  try {
+    const expected = await wallet.db_to_bytes();
+    const chunks = [];
+    await wallet.db_to_bytes_chunked(chunk => chunks.push(new Uint8Array(chunk)));
+    const actual = Uint8Array.from(chunks.flatMap(chunk => Array.from(chunk)));
+    assert(chunks.length > 0, 'chunk callback was not called');
+    assert(actual.length === expected.length && actual.every((byte, index) => byte === expected[index]),
+      'chunked export differs from ordinary export');
+
+    const writeError = new Error('simulated storage failure');
+    let calls = 0;
+    let failure;
+    try {
+      await wallet.db_to_bytes_chunked(() => {
+        calls++;
+        throw writeError;
+      });
+    } catch (error) {
+      failure = error;
+    }
+    assert(calls === 1, 'failed callback was invoked again');
+    assert(failure === writeError, 'original callback error was not propagated');
+  } finally {
+    wallet.free();
+  }
+});
+
 window.sessionResults.done = true;
