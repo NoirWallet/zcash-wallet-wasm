@@ -35,5 +35,7 @@ is displayed to the user. See [PRIVACY.md](PRIVACY.md) for the data flows and
 network trust limits visible in this code. Passing data into WASM does not
 hide it from the host or automatically erase its JavaScript copies.
 
-No audit claim applies to a release unless a report identifies the exact
-source commit, enabled features, dependencies, and scope it covers.
+For private vulnerability reports and the published audit report, see
+[SECURITY.md](SECURITY.md). No audit claim applies to a release unless its
+exact source commit, enabled features, dependencies, and scope are covered by
+the report.
