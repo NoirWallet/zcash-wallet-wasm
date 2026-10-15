@@ -19,6 +19,12 @@ using shielded Zcash transactions or HTTPS.
 Relevant code: `src/bindgen/wallet.rs`, `src/bindgen/keys.rs`,
 `src/bindgen/voting.rs`, `src/init.rs`.
 
+`db_to_bytes_chunked` currently ignores exceptions thrown by its JavaScript
+callback and does not await a Promise returned by that callback. Its successful
+return does not prove that every chunk was durably stored. Do not treat it as
+confirmation of a completed backup; verify the stored bytes before relying on
+the backup, or use `db_to_bytes` with a separately checked storage operation.
+
 ## Network data flow
 
 The trigger column describes this module's configuration or the named method,
