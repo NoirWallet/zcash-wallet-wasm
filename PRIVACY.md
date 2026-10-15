@@ -55,6 +55,8 @@ Relevant code: `src/wallet.rs`, `src/compact_block_source.rs`,
   repository does not establish Tor or proxy coverage for every request.
 - Do not put credentials in service URLs. CDN warnings can include full URLs;
   treat network errors and console output as sensitive when reporting failures.
+- Do not log seed phrases, keys, wallet state, or account-linked addresses.
+  Addresses are not secrets, but logs can connect wallet activity to an identity.
 - Keep the complete JS/WASM/worker package from one verified build. A source
   audit does not verify a deployed binary unless its identity is checked.
 

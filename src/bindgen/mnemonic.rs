@@ -321,10 +321,7 @@ pub fn mnemonic_to_transparent_address(
 ///     "",  // no passphrase
 ///     0    // first account
 /// );
-/// console.log("Unified:", addresses.unified);
-/// console.log("Orchard:", addresses.orchard);
-/// console.log("Sapling:", addresses.sapling);
-/// console.log("Transparent:", addresses.transparent);
+/// // Display the selected receiver in the wallet UI; avoid logging account addresses.
 /// ```
 #[wasm_bindgen]
 pub fn mnemonic_to_addresses(
@@ -385,9 +382,7 @@ pub fn mnemonic_to_addresses(
 ///     "main",
 ///     "u1..." // unified address string
 /// );
-/// console.log("Orchard:", addresses.orchard);
-/// console.log("Sapling:", addresses.sapling);
-/// console.log("Transparent:", addresses.transparent);
+/// // Select the receiver needed by the payment flow; avoid logging addresses.
 /// ```
 #[wasm_bindgen]
 pub fn parse_unified_address(network: &str, unified_address: &str) -> Result<JsValue, Error> {

@@ -734,9 +734,7 @@ impl WebWallet {
     ///
     /// ```javascript
     /// const addresses = await wallet.get_unified_addresses(accountId);
-    /// console.log("Unified Address:", addresses.unified);
-    /// console.log("Sapling (zs):", addresses.sapling_zs);
-    /// console.log("Transparent:", addresses.transparent);
+    /// // Display the selected address in the wallet UI; avoid logging account addresses.
     /// ```
     pub async fn get_unified_addresses(&self, account_id: u32) -> Result<JsValue, Error> {
         use zcash_client_backend::data_api::Account;
