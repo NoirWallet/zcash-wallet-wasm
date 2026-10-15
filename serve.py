@@ -6,7 +6,7 @@ Required for running zcash-wallet-wasm in the browser.
 Usage:
     python3 serve.py [port] [host]
 
-Default: 0.0.0.0:8000 (allows remote access)
+Default: 127.0.0.1:8000 (local development only)
 """
 
 import http.server
@@ -114,7 +114,7 @@ class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('positional_port', nargs='?', type=int, default=8000)
-    parser.add_argument('positional_host', nargs='?', default='')
+    parser.add_argument('positional_host', nargs='?', default='127.0.0.1')
     parser.add_argument('--port', type=int)
     parser.add_argument('--host')
     args = parser.parse_args()
@@ -136,17 +136,17 @@ if __name__ == '__main__':
         print(f"\n{'='*60}")
         print(f"Zcash Wallet WASM Development Server")
         print(f"{'='*60}")
-        display_host = HOST if HOST else "0.0.0.0"
+        display_host = HOST
         print(f"Listening on: {display_host}:{PORT}")
         print(f"\nAccess URLs:")
         print(f"  Local:      http://localhost:{PORT}/")
         print(f"  Local IPv4: http://127.0.0.1:{PORT}/")
-        print(f"  Network:    http://{local_ip}:{PORT}/")
+        if HOST not in ('127.0.0.1', 'localhost', '::1'):
+            print(f"  Network:    http://{local_ip}:{PORT}/")
         print(f"\nAvailable test pages:")
-        print(f"  - test_wallet.html (Wallet functionality)")
-        print(f"  - test_message_signing.html (Message signing)")
-        print(f"  - test_encryption.html (Encryption/Decryption)")
-        print(f"  - test_mnemonic.html (Mnemonic tools)")
+        print(f"  - test_voting.html (Voting browser tests)")
+        print(f"  - tests/browser-session/ (WASM session tests)")
+        print(f"  - tests/browser-transport/ (Transport tests)")
         print(f"\nPress Ctrl+C to stop the server")
         print(f"{'='*60}\n")
 
