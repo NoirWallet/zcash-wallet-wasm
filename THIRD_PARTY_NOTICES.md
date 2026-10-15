@@ -54,7 +54,9 @@ Rust registry dependencies are pinned by `Cargo.lock`. The root
 `package.json` lists only JavaScript development dependencies for repository
 tests and tooling; it is not a dependency manifest for the browser extension.
 Older generated `pkg/` versions remain accessible in Git history but are not
-verified current releases. Anyone distributing a built WASM/JavaScript
-package must determine the licenses and notices applicable to that exact
-package, including linked Rust dependencies and generated JavaScript. This
-inventory does not make that package-specific determination.
+verified current releases. They were not accompanied by complete
+package-specific third-party license and notice manifests; this source
+inventory does not retroactively supply one. Anyone distributing a built
+WASM/JavaScript package must determine the licenses and notices applicable to
+that exact package, including linked Rust dependencies and generated
+JavaScript. This inventory does not make that package-specific determination.

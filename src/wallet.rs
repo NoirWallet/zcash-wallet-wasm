@@ -946,7 +946,7 @@ where
     /// `zcash-accounts` QR) are recorded as the account derivation so that PCZTs created
     /// from this account carry the metadata the device needs to locate its signing keys.
     ///
-    /// This is a thin wrapper around the audited `import_account_ufvk`; it adds no new
+    /// This is a thin wrapper around `import_account_ufvk`; it adds no new
     /// import logic.
     pub async fn create_account_ufvk(
         &self,
@@ -986,7 +986,7 @@ where
     /// when the PCZT spends Sapling notes, which never happens for hardware-wallet
     /// accounts (Keystone supports transparent + Orchard only).
     ///
-    /// This composes the audited `pczt_prove` and `pczt_send` without modification.
+    /// This composes `pczt_prove` and `pczt_send` without modification.
     pub async fn pczt_prove_and_send(
         &self,
         pczt: Pczt,
