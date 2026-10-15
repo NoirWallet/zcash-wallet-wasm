@@ -39,3 +39,12 @@ For private vulnerability reports and the published audit report, see
 [SECURITY.md](SECURITY.md). No audit claim applies to a release unless its
 exact source commit, enabled features, dependencies, and scope are covered by
 the report.
+
+## License
+
+NoirWallet-owned code is available under the [Business Source License 1.1](LICENSE.md)
+with no Additional Use Grant. Non-production use is allowed before the
+2029-01-01 Change Date; production use requires a separate license until the
+work changes to Apache-2.0 under the license terms. BUSL-1.1 is source-available,
+not an Open Source license before that change. Separately licensed third-party
+code retains its own notices and terms.
