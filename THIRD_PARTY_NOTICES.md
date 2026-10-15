@@ -14,8 +14,8 @@ package.
 | `zcash_voting/browser-deps/rusqlite/` | rusqlite, MIT | [`zcash_voting/browser-deps/rusqlite/LICENSE`](zcash_voting/browser-deps/rusqlite/LICENSE). |
 | `zcash_voting/browser-deps/pir-client/` | [valargroup/vote-nullifier-pir](https://github.com/valargroup/vote-nullifier-pir), MIT or Apache-2.0 | The vendored crate manifest declares its upstream and license. |
 | `src/wallet/zip244_orchard.hex` | [zcash/zcash-test-vectors](https://github.com/zcash/zcash-test-vectors), MIT or Apache-2.0 | Exactly matches the transaction bytes at index 2 (vector 0; the first two entries are metadata) of [`zip_0244.json` at `78321be`](https://github.com/zcash/zcash-test-vectors/blob/78321beacb0e0477e33cd002b56585a107c2708c/test-vectors/zcash/zip_0244.json). Decoded-byte SHA-256: `b91277bb10ec58b576ebcab779ecd65cec12112d827b9209b1c2d4393e9ee9a0`. |
-| Generated `workerHelpers.js` in WASM packages | `wasm-bindgen-rayon`; the generated file retains `Copyright 2022 Google Inc.` and its Apache-2.0 notice | Present in the generated package tracked by the initial commit (`543a8c5`) and in the current release build output. The current `pkg/` is not tracked. |
-| Generated `wasm_thread` JS snippets in the initial `pkg/` | [`wasm_thread` 0.3.0 at `9e432077`](https://github.com/ec2/wasm_thread/tree/9e432077948d927d49373d1d039c23447d3648df), MIT or Apache-2.0 | The initial commit's `Cargo.lock` pins this revision. Its three generated JS snippets are historical artifacts; the current lockfile no longer contains `wasm_thread`. |
+| Generated `workerHelpers.js` in WASM packages | `wasm-bindgen-rayon`; the generated file retains `Copyright 2022 Google Inc.` and its Apache-2.0 notice | Present in historical generated packages and in the current release build output. The current `pkg/` is not tracked. |
+| Generated `wasm_thread` JS snippets in early `pkg/` versions | [`wasm_thread` 0.3.0 at `9e432077`](https://github.com/ec2/wasm_thread/tree/9e432077948d927d49373d1d039c23447d3648df), MIT or Apache-2.0 | The initial commit's `Cargo.lock` pins this revision. These generated JS snippets are historical artifacts; the current lockfile no longer contains `wasm_thread`. |
 
 The following files in the initial NoirWallet commit (`543a8c5`) contain code
 matching WebZjs source at commit
@@ -53,8 +53,8 @@ Apache-2.0 option. Its upstream MIT license identifies the copyright holder as:
 Rust registry dependencies are pinned by `Cargo.lock`. The root
 `package.json` lists only JavaScript development dependencies for repository
 tests and tooling; it is not a dependency manifest for the browser extension.
-The initial commit's generated `pkg/` remains accessible in Git history but is
-not a verified current release. Anyone distributing a built WASM/JavaScript
+Older generated `pkg/` versions remain accessible in Git history but are not
+verified current releases. Anyone distributing a built WASM/JavaScript
 package must determine the licenses and notices applicable to that exact
 package, including linked Rust dependencies and generated JavaScript. This
 inventory does not make that package-specific determination.
