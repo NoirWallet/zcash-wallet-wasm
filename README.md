@@ -20,6 +20,8 @@ command inside the container is `make build-voting-wasm`; other Makefile
 targets may enable different features or test fixtures. Do not mix files from
 different `pkg/` builds. A source commit alone does not identify the binary
 deployed by an extension; verify the entire package against its `SHA256SUMS`.
+The current source tree does not track `pkg/`. An obsolete generated package
+remains in the initial Git commit; it is not a verified release artifact.
 
 The parallel WASM package uses shared memory. Its browser host must provide
 cross-origin isolation and `SharedArrayBuffer`, and correctly serve the WASM,

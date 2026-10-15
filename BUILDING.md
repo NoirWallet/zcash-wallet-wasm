@@ -60,6 +60,11 @@ Do not mix files from different builds or rebuild with host-installed Rust tools
 If any hash differs from the release manifest, stop the frontend release and
 keep the build log for investigation. Source commit identity alone does not
 prove that a deployed extension contains the corresponding binary.
+Before distributing the package, collect the third-party notices applicable to
+that exact WASM/JavaScript output, including linked Rust dependencies and the
+generated worker helper. The root npm dependencies are development tools, not
+the browser extension's dependency inventory; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 The `pkg/` output uses shared WebAssembly memory. The browser host must support
 `SharedArrayBuffer` and cross-origin isolation, including compatible COOP/COEP
