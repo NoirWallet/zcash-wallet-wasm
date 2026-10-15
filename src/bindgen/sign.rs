@@ -1,3 +1,7 @@
+// Portions derived from ChainSafe WebZjs.
+// Copyright 2024 ChainSafe Systems
+// Modified by NoirWallet; see THIRD_PARTY_NOTICES.md for licensing.
+
 use crate::Network;
 use crate::bindgen::UnifiedSpendingKey;
 use crate::error::Error;

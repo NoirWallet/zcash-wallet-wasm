@@ -1,5 +1,6 @@
 // Copyright 2024 ChainSafe Systems
 // SPDX-License-Identifier: Apache-2.0, MIT
+// Modified by NoirWallet; see THIRD_PARTY_NOTICES.md for licensing.
 
 use crate::error::Error;
 use serde::{Deserialize, Serialize};
