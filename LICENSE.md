@@ -5,11 +5,11 @@ License text copyright © 2024 MariaDB plc, All Rights Reserved.
 
 Licensor: NoirWallet
 
-Licensed Work: Copyright (c) 2026 NoirWallet. Original zcash-wallet-wasm code
-owned by NoirWallet in this repository. Separately licensed third-party code
-is excluded, including
-`librustzcash/`, `zcash_voting/`, and `src/network.rs`; their existing license
-notices continue to apply.
+Licensed Work: Copyright (c) 2026 NoirWallet. Original code and modifications
+owned by NoirWallet in this repository. Pre-existing third-party code is
+excluded, including ChainSafe WebZjs-derived portions of `src/`,
+`librustzcash/`, and `zcash_voting/`. Their existing license notices and terms
+continue to apply; see `THIRD_PARTY_NOTICES.md`.
 
 Additional Use Grant: None
 

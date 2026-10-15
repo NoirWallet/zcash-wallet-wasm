@@ -48,3 +48,5 @@ with no Additional Use Grant. Non-production use is allowed before the
 work changes to Apache-2.0 under the license terms. BUSL-1.1 is source-available,
 not an Open Source license before that change. Separately licensed third-party
 code retains its own notices and terms.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the identified
+upstream code and test materials; the source-provenance review is still open.

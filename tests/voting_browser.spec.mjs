@@ -146,7 +146,7 @@ test('wallet initialization, sync, selection and reload use durable bytes and cl
 test('defaults are usable and secret input is runtime-only', async ({ page }) => {
     await page.goto('/test_voting.html');
     await expect(page.locator('#initialize')).toBeEnabled({ timeout: 50000 });
-    await expect(page.getByRole('heading', { name: 'Zcash voting' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'NoirWallet voting' })).toBeVisible();
     await expect(page.locator('#lwd')).toHaveValue('https://zcash-testnet.chainsafe.dev');
     await expect(page.locator('#birthday')).toHaveValue('3771641');
     await expect(page.locator('#mnemonic')).toHaveAttribute('type', 'password');

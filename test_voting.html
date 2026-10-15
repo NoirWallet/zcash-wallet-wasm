@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Zcash voting | Testnet</title>
+  <title>NoirWallet voting | Zcash testnet</title>
   <style>
     :root {font-family:system-ui,sans-serif;color:#202728;background:#f7f9f8;color-scheme:light;letter-spacing:0}
     * {box-sizing:border-box;min-width:0} body {margin:0} button,input,select {font:inherit}
     header {background:#fff;border-bottom:1px solid #d8e0dc;padding:22px max(24px,calc((100% - 1120px)/2));display:flex;align-items:center;gap:14px}
-    header img {width:46px;height:46px} h1 {font-size:25px;margin:0} .tag {color:#287353;font-size:13px;font-weight:650} header .tag {margin-left:auto}
+    h1 {font-size:25px;margin:0} .tag {color:#287353;font-size:13px;font-weight:650} header .tag {margin-left:auto}
     main {max-width:1168px;margin:auto;padding:0 24px 32px} section {padding:24px 0;border-bottom:1px solid #d8e0dc}
     h2 {font-size:18px;margin:0 0 16px} h3,legend {font-size:15px;font-weight:650;margin:0 0 12px}
     .grid {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px} .wide {grid-column:span 2}
@@ -22,13 +22,13 @@
     .rounds {display:grid;grid-template-columns:1fr 1fr;gap:24px}.round {padding:12px 0;border-top:1px solid #e0e6e2}.round p {margin:7px 0;font-size:13px;overflow-wrap:anywhere}.rejected {color:#9b3540}
     fieldset {border:0;border-top:1px solid #e0e6e2;padding:16px 0;margin:12px 0}.choices {display:flex;flex-wrap:wrap;gap:18px}.choices label {flex-direction:row;align-items:center;min-height:32px}.choices input {width:18px;height:18px;accent-color:#236447}
     .empty {font-size:13px;color:#67776e;margin:0;min-height:36px}.metrics {font-variant-numeric:tabular-nums} #operation-status {color:#8a3440} .footer-actions {justify-content:space-between}
-    @media(max-width:600px) {header {padding:18px 18px;gap:10px}h1 {font-size:22px}header .tag {font-size:11px}header img {width:38px;height:38px}main {padding:0 18px 24px}section {padding:22px 0}.grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.wide {grid-column:span 2}.rounds {grid-template-columns:1fr;gap:20px}.actions {gap:8px}button {padding:8px 10px}.footer-actions {justify-content:flex-start}}
+    @media(max-width:600px) {header {padding:18px 18px;gap:10px}h1 {font-size:22px}header .tag {font-size:11px}main {padding:0 18px 24px}section {padding:22px 0}.grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.wide {grid-column:span 2}.rounds {grid-template-columns:1fr;gap:20px}.actions {gap:8px}button {padding:8px 10px}.footer-actions {justify-content:flex-start}}
   </style>
   <script defer src="./node_modules/lucide/dist/umd/lucide.js"></script>
   <script type="module" src="./voting_page.mjs"></script>
 </head>
 <body>
-  <header><img src="./assets/zcash-mark.svg" alt="Zcash"><h1>Zcash voting</h1><span class="tag">TESTNET / STAGE</span></header>
+  <header><h1>NoirWallet voting</h1><span class="tag">ZCASH TESTNET / STAGE</span></header>
   <main>
     <section aria-labelledby="wallet-heading">
       <h2 id="wallet-heading">Wallet</h2>
