@@ -1,3 +1,7 @@
+// Portions derived from ChainSafe WebZjs.
+// Copyright 2024 ChainSafe Systems
+// Modified by NoirWallet; see THIRD_PARTY_NOTICES.md for licensing.
+
 use crate::Network;
 use crate::bindgen::UnifiedSpendingKey;
 use crate::error::Error;
@@ -336,9 +340,7 @@ fn encode_compact_size(size: usize) -> Vec<u8> {
 ///
 /// ```javascript
 /// const result = await sign_message_with_transparent("main", usk, "Hello Zcash!", undefined);
-/// console.log("Signature:", result.signature);  // hex format
-/// console.log("Public Key:", result.pubkey);     // uncompressed hex (65 bytes)
-/// console.log("Address:", result.address);       // t-address
+/// // Return the signature to the requesting flow; avoid logging account identifiers.
 /// ```
 #[wasm_bindgen]
 pub fn sign_message_with_transparent(

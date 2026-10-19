@@ -2,8 +2,9 @@ import { pbkdf2Sync } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
-// The child is an offline transaction replay. No mnemonic or seed is persisted.
-// Usage: node scripts/diagnostics/run_transparent_replay.mjs <binary> <public-fixture.json>
+// Use synthetic test mnemonics only. This wrapper sends the derived seed to the
+// selected binary; only that binary can guarantee it remains offline and unlogged.
+// Usage: node scripts/diagnostics/run_transparent_replay.mjs <trusted-binary> <public-fixture.json>
 async function readMnemonic() {
   if (!process.stdin.isTTY) {
     const rl = createInterface({ input: process.stdin, terminal: false });
@@ -11,7 +12,7 @@ async function readMnemonic() {
     rl.close();
     return phrase;
   }
-  process.stderr.write('Mnemonic (hidden input): ');
+  process.stderr.write('Synthetic test mnemonic (hidden input): ');
   process.stdin.setRawMode(true);
   process.stdin.setEncoding('utf8');
   process.stdin.resume();
@@ -38,6 +39,7 @@ async function readMnemonic() {
   });
 }
 if (process.argv.length !== 4) throw Error('Expected binary path and public fixture path');
+process.stderr.write('Synthetic test mnemonic only; the selected binary receives its derived seed.\n');
 let phrase = await readMnemonic();
 try {
   const seed = pbkdf2Sync(phrase.trim().normalize('NFKD'), 'mnemonic', 2048, 64, 'sha512');

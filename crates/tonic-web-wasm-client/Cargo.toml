@@ -3,6 +3,7 @@ name = "tonic-web-wasm-client-compat"
 version = "0.8.0"
 edition = "2024"
 publish = false
+license-file = "../../LICENSE.md"
 
 [dependencies]
 http-body = "1"

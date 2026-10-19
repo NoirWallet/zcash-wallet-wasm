@@ -1,3 +1,7 @@
+// Portions derived from ChainSafe WebZjs.
+// Copyright 2024 ChainSafe Systems
+// Modified by NoirWallet; see THIRD_PARTY_NOTICES.md for licensing.
+
 use crate::error::Error;
 use wasm_bindgen::prelude::*;
 use zcash_address::ZcashAddress;

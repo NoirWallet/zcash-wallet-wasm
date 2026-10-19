@@ -7,7 +7,9 @@ native-tests
 CLAUDE.md
 
 /local-docs/
+/local-manual-pages/
 /node_modules/
 /test-results/
 /playwright-report/
 /pkg*/
+/wasm-dist/

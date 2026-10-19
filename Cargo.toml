@@ -2,6 +2,7 @@
 name = "zcash-wallet-wasm"
 version = "0.1.0"
 edition = "2024"
+license-file = "LICENSE.md"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

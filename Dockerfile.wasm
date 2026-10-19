@@ -1,0 +1,56 @@
+FROM docker.io/library/node:24.18.0-bookworm-slim@sha256:d45d78e7929b46875bbd4e29bea672d5bc48186c6c3588306521c815e78352d6 AS node
+
+FROM docker.io/library/rust:1.91-trixie@sha256:74ea50141061f341fe0cbea6892c79a668cd2951a31b0ccc68babe45401cd5ee AS build
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN set -eux; \
+    sed -i 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20251208T000000Z|; s|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20251208T000000Z|' /etc/apt/sources.list.d/debian.sources; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
+    apt-get install -y --no-install-recommends clang=1:19.0-63; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN rustup set auto-self-update disable && \
+    rustup toolchain install nightly-2025-11-15 \
+    --profile minimal --component rust-src --component clippy --component rustfmt \
+    --target wasm32-unknown-unknown
+
+RUN set -eux; \
+    curl -fsSL https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz -o /tmp/wasm-pack.tar.gz; \
+    echo 'c09f971ecaed9a2efc80fdcea7a00ef6b53c7fadc8c57d1f61b53a6aa66b668a  /tmp/wasm-pack.tar.gz' | sha256sum -c -; \
+    tar -xzf /tmp/wasm-pack.tar.gz -C /tmp; \
+    install /tmp/wasm-pack-v0.15.0-x86_64-unknown-linux-musl/wasm-pack /usr/local/bin/wasm-pack; \
+    rm -rf /tmp/wasm-pack.tar.gz /tmp/wasm-pack-v0.15.0-x86_64-unknown-linux-musl
+
+RUN set -eux; \
+    curl -fsSL https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.122/wasm-bindgen-0.2.122-x86_64-unknown-linux-musl.tar.gz -o /tmp/wasm-bindgen.tar.gz; \
+    echo '122a3fe2ea9c6e3e89b50e42dd1a346e499f3f65a54aae0b4eaeb658139d1e0e  /tmp/wasm-bindgen.tar.gz' | sha256sum -c -; \
+    tar -xzf /tmp/wasm-bindgen.tar.gz -C /tmp; \
+    install /tmp/wasm-bindgen-0.2.122-x86_64-unknown-linux-musl/wasm-bindgen /usr/local/bin/wasm-bindgen; \
+    rm -rf /tmp/wasm-bindgen.tar.gz /tmp/wasm-bindgen-0.2.122-x86_64-unknown-linux-musl
+
+RUN set -eux; \
+    curl -fsSL https://github.com/WebAssembly/binaryen/releases/download/version_117/binaryen-version_117-x86_64-linux.tar.gz -o /tmp/binaryen.tar.gz; \
+    echo '3dc677006555b355ea2da5e82602065a161d5e83eaefd3f759afa00b96e83212  /tmp/binaryen.tar.gz' | sha256sum -c -; \
+    tar -xzf /tmp/binaryen.tar.gz -C /opt; \
+    rm /tmp/binaryen.tar.gz
+
+ENV PATH="/opt/binaryen-version_117/bin:${PATH}" \
+    SOURCE_DATE_EPOCH=0
+
+WORKDIR /src
+COPY . .
+
+# The vendored protobuf build scripts rewrite tracked source when protoc exists.
+RUN ! command -v protoc
+RUN cargo fetch --locked
+RUN CARGO_NET_OFFLINE=true make build-voting-wasm
+RUN node tests/check_wasm_release.mjs pkg
+RUN bash -o pipefail -c 'find pkg -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS' \
+    && sha256sum --check SHA256SUMS
+
+FROM scratch AS wasm-package
+COPY --from=build /src/pkg /pkg
+COPY --from=build /src/SHA256SUMS /SHA256SUMS
