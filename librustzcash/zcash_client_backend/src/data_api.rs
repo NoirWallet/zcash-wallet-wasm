@@ -70,6 +70,7 @@ use std::{
     hash::Hash,
     io,
     num::{NonZeroU32, TryFromIntError},
+    ops::Range,
 };
 
 use incrementalmerkletree::{Retention, frontier::Frontier};
@@ -116,7 +117,7 @@ use {
     feature = "transparent-inputs",
     any(test, feature = "test-dependencies")
 ))]
-use {std::ops::Range, transparent::keys::NonHardenedChildIndex};
+use transparent::keys::NonHardenedChildIndex;
 
 #[cfg(feature = "zcashd-compat")]
 use zcash_keys::keys::zcashd;
@@ -2106,6 +2107,10 @@ pub trait WalletRead {
     ) -> Result<Option<Self::Account>, Self::Error>;
 
     /// Returns information about every address tracked for this account.
+    ///
+    /// An exposed unified address can omit the transparent receiver that the wallet tracks
+    /// at its diversifier index. The result then also contains that receiver, as an
+    /// [`Address::Transparent`] entry whose [`AddressSource`] has the same diversifier index.
     fn list_addresses(&self, account: Self::AccountId) -> Result<Vec<AddressInfo>, Self::Error>;
 
     /// Returns the wallet account that controls the given address, if any.
@@ -2350,6 +2355,43 @@ pub trait WalletRead {
         &self,
         query: NullifierQuery,
     ) -> Result<Vec<(Self::AccountId, orchard::note::Nullifier)>, Self::Error>;
+
+    /// Returns the outpoints of the transparent outputs that the wallet holds and does not know
+    /// to have been spent, each mapped to the account that received it.
+    ///
+    /// The result is the transparent counterpart of
+    /// [`get_sapling_nullifiers(NullifierQuery::Unspent)`](Self::get_sapling_nullifiers): it is
+    /// the set of identifiers whose appearance in a scanned block reveals a spend of wallet
+    /// funds. Unlike the queries that serve input selection, it applies no confirmation,
+    /// coinbase-maturity or note-locking filter; an output is included whenever the wallet could
+    /// still observe a spend of it.
+    ///
+    /// This is a required method rather than one defaulting to a panic, for the same reason as
+    /// [`Self::get_ironwood_nullifiers`]: it is called on the scan path, so a backend that did
+    /// not override it would abort the process on the first scan.
+    #[cfg(feature = "transparent-inputs")]
+    fn get_unspent_transparent_outpoints(
+        &self,
+    ) -> Result<HashMap<OutPoint, Self::AccountId>, Self::Error>;
+
+    /// Returns every transparent receiver the wallet knows of, mapped to the account that
+    /// controls it and, for an HD-derived receiver, the change-level key scope used to derive it.
+    ///
+    /// The map covers receivers of every provenance: external and change receivers, ephemeral
+    /// receivers, and addresses imported without key material. A scanned transparent output pays
+    /// the wallet exactly when its recipient address is a key of this map.
+    ///
+    /// This is a required method rather than one defaulting to a panic, for the same reason as
+    /// [`Self::get_ironwood_nullifiers`]: it is called on the scan path, so a backend that did
+    /// not override it would abort the process on the first scan.
+    #[cfg(feature = "transparent-inputs")]
+    #[allow(clippy::type_complexity)]
+    fn get_transparent_receiver_accounts(
+        &self,
+    ) -> Result<
+        HashMap<TransparentAddress, (Self::AccountId, Option<TransparentKeyScope>)>,
+        Self::Error,
+    >;
 
     /// Returns the set of non-ephemeral transparent receivers associated with the given
     /// account controlled by this wallet.
@@ -2866,10 +2908,13 @@ pub struct ScannedBlock<AccountId> {
     orchard: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
     #[cfg(feature = "orchard")]
     ironwood: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
+    #[cfg(feature = "transparent-inputs")]
+    transparent_spend_map: Vec<(TxIndex, TxId, Vec<OutPoint>)>,
 }
 
 impl<AccountId> ScannedBlock<AccountId> {
     /// Constructs a new `ScannedBlock`
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         block_height: BlockHeight,
         block_hash: BlockHash,
@@ -2884,6 +2929,11 @@ impl<AccountId> ScannedBlock<AccountId> {
             orchard::tree::MerkleHashOrchard,
             orchard::note::Nullifier,
         >,
+        #[cfg(feature = "transparent-inputs")] transparent_spend_map: Vec<(
+            TxIndex,
+            TxId,
+            Vec<OutPoint>,
+        )>,
     ) -> Self {
         Self {
             block_height,
@@ -2895,6 +2945,8 @@ impl<AccountId> ScannedBlock<AccountId> {
             orchard,
             #[cfg(feature = "orchard")]
             ironwood,
+            #[cfg(feature = "transparent-inputs")]
+            transparent_spend_map,
         }
     }
 
@@ -2937,6 +2989,22 @@ impl<AccountId> ScannedBlock<AccountId> {
         &self,
     ) -> &ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier> {
         &self.ironwood
+    }
+
+    /// Returns, for each transaction in the block, the outpoints spent by its transparent inputs
+    /// that do not spend any transparent output the wallet already knows of.
+    ///
+    /// This is the transparent counterpart of [`ScannedBundles::nullifier_map`], and exists for
+    /// the same reason: an output created in a block range the wallet has not yet scanned cannot
+    /// be recognized as its own at the time the spend is observed. Recording the spending
+    /// transaction against the outpoint allows the spend to be resolved if that output is
+    /// discovered later.
+    ///
+    /// Each entry is keyed by both transaction index within the block and transaction ID, so that
+    /// a caller may identify the transaction by either.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn transparent_spend_map(&self) -> &[(TxIndex, TxId, Vec<OutPoint>)] {
+        &self.transparent_spend_map
     }
 
     /// Consumes `self` and returns the lists of Sapling, Orchard, and Ironwood note commitments
@@ -3869,6 +3937,45 @@ pub trait WalletWrite:
         height: BlockHeight,
         retain_with_priority: Option<ScanPriority>,
     ) -> Result<u64, <Self as WalletRead>::Error>;
+
+    /// Queues `range` to be scanned again, overriding the record of any part of it that has
+    /// already been scanned.
+    ///
+    /// The range is queued at [`ScanPriority::Historic`], so it is scanned only once no
+    /// higher-priority work remains. Queue entries within `range` whose priority exceeds
+    /// [`ScanPriority::Historic`] are left as they are, since they already require the blocks
+    /// they cover to be scanned at least as urgently; entries recording the range as
+    /// [`ScanPriority::Scanned`] or [`ScanPriority::Ignored`] are overridden.
+    ///
+    /// This destroys nothing: no block, transaction, note, note commitment tree state, or
+    /// witness is removed, and no account birthday is altered. It records only that the blocks
+    /// in `range` must be processed again. Re-scanning a block that was already scanned is
+    /// idempotent with respect to the wallet's contents.
+    ///
+    /// Scanning is performed against every account's viewing keys, so this re-scans `range`
+    /// for the whole wallet.
+    ///
+    /// Neither end of `range` is clamped; it is queued exactly as given. Below the wallet's
+    /// birthday, blocks that no account can hold notes in are queued and scanned to no effect.
+    /// Above the wallet's view of the chain tip, a [`ScanPriority::Historic`] entry is left
+    /// covering heights that do not yet exist, and [`WalletRead::suggest_scan_ranges`] will
+    /// offer it. Neither case is destructive, and the second self-corrects as the chain grows
+    /// into the queued heights. A caller that wants neither should clamp `range` itself,
+    /// against [`WalletRead::get_wallet_birthday`] and [`WalletRead::chain_height`].
+    ///
+    /// An empty range queues nothing and is not an error.
+    ///
+    /// In contrast to [`truncate_to_chain_state`] and [`rewind_to_chain_state`], this does not
+    /// require a [`ChainState`]: a range that re-enters the queue is scanned from a frontier
+    /// supplied at scan time, so the wallet needs no note commitment tree state at the range's
+    /// start in order to queue it.
+    ///
+    /// [`truncate_to_chain_state`]: WalletWrite::truncate_to_chain_state
+    /// [`rewind_to_chain_state`]: WalletWrite::rewind_to_chain_state
+    fn queue_rescan(
+        &mut self,
+        range: Range<BlockHeight>,
+    ) -> Result<(), <Self as WalletRead>::Error>;
 
     /// Updates the state of the wallet database by persisting the provided block information,
     /// along with the note commitments that were detected when scanning the block for transactions
@@ -4908,7 +5015,7 @@ mod tests {
 
     fn sapling_address_for_tag(tag: u8) -> sapling::PaymentAddress {
         match SaplingPoolTester::sk_default_address(&SaplingPoolTester::sk(&[tag; 32])) {
-            Address::Sapling(pa) => pa,
+            Address::Sapling(pa) => *pa,
             other => panic!("expected Sapling address, got {other:?}"),
         }
     }
@@ -4923,6 +5030,8 @@ mod tests {
             Some(orchard).flatten(),
             Some(sapling).flatten(),
             transparent,
+            None,
+            None,
         )
         .expect("test UA must be valid")
         .into()
@@ -5039,7 +5148,7 @@ mod tests {
 
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Unified(ua),
+            &Address::Unified(Box::new(ua)),
         );
 
         assert_eq!(result.unwrap(), Some(1));
@@ -5060,7 +5169,7 @@ mod tests {
 
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Unified(ua_from_other_seed),
+            &Address::Unified(Box::new(ua_from_other_seed)),
         );
 
         assert_eq!(result.unwrap(), None);
@@ -5086,7 +5195,7 @@ mod tests {
         // resolve it.
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Sapling(sapling_pa),
+            &Address::Sapling(Box::new(sapling_pa)),
         );
 
         assert_eq!(result.unwrap(), Some(1));
@@ -5107,7 +5216,7 @@ mod tests {
 
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Sapling(sapling_address_for_tag(1)),
+            &Address::Sapling(Box::new(sapling_address_for_tag(1))),
         );
         assert_eq!(result.unwrap(), None);
     }
@@ -5135,12 +5244,14 @@ mod tests {
             Some(ua2.orchard().copied().expect("orchard receiver")),
             Some(ua1.sapling().copied().expect("sapling receiver")),
             None,
+            None,
+            None,
         )
         .expect("sapling+orchard UA must be valid");
 
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Unified(frankenstein),
+            &Address::Unified(Box::new(frankenstein)),
         );
 
         assert!(matches!(

@@ -86,8 +86,10 @@ pub fn tx1_sighash(
         Option::from(ExtractedNoteCommitment::from_bytes(&field(97))).ok_or_else(invalid)?,
         TransmittedNoteCiphertext {
             epk_bytes: field(129),
-            enc_ciphertext: effects[161..741].try_into().unwrap(),
-            out_ciphertext: effects[741..821].try_into().unwrap(),
+            enc_ciphertext: voting_crypto_deps::zcash_note_encryption::note_bytes::NoteBytesData(
+                effects[161..741].try_into().map_err(|_| invalid())?,
+            ),
+            out_ciphertext: effects[741..821].try_into().map_err(|_| invalid())?,
         },
         Option::from(ValueCommitment::from_bytes(&field(1))).ok_or_else(invalid)?,
         (),

@@ -8,16 +8,20 @@ use std::{
 
 use assert_matches::assert_matches;
 use incrementalmerkletree::{Hashable, Level, Position, frontier::Frontier};
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use secrecy::Secret;
 use shardtree::error::ShardTreeError;
 
 use transparent::address::TransparentAddress;
-use zcash_keys::{address::Address, keys::UnifiedSpendingKey};
+use zcash_keys::{
+    address::{Address, UnifiedAddress},
+    keys::{UnifiedAddressRequest, UnifiedSpendingKey},
+};
 use zcash_primitives::{
     block::BlockHash,
     transaction::{
         Transaction,
+        builder::DEFAULT_TX_EXPIRY_DELTA,
         fees::zip317::{FeeRule as Zip317FeeRule, MARGINAL_FEE, MINIMUM_FEE},
     },
 };
@@ -38,7 +42,7 @@ use crate::{
         WalletSummary, WalletTest, WalletWrite,
         anchor_retention::AnchorRetentionInterval,
         chain::{self, ChainState, CommitmentTreeRoot, ScanSummary},
-        error::Error,
+        error::{AddressExpiryError, Error},
         testing::{
             AddressType, CacheInsertionResult, FakeCompactOutput, InitialChainState, TestBuilder,
             single_output_change_strategy,
@@ -64,7 +68,7 @@ use crate::data_api::wallet::input_selection::GreedyInputSelectorError;
 use crate::{
     data_api::BlockMetadata,
     scanning::{
-        Nullifiers, ScanningKeys,
+        ScanningKeys, SpendIdentifiers,
         full::{decrypt_block, scan_block},
     },
 };
@@ -78,7 +82,7 @@ use zcash_protocol::PoolType;
 #[cfg(feature = "orchard")]
 use {
     super::orchard::OrchardPoolTester,
-    crate::data_api::wallet::{input_selection::SpendPolicy, propose_transfer},
+    crate::data_api::wallet::propose_transfer,
     std::collections::BTreeMap,
     zcash_primitives::transaction::{TxVersion, builder::BundlePadding},
     zcash_protocol::zip318::{AnchorBucketInterval, MAX_RESIDUAL_VALUE},
@@ -87,7 +91,7 @@ use {
 #[cfg(not(feature = "orchard"))]
 use zcash_address::{
     ZcashAddress,
-    unified::{self, Encoding as _, Receiver},
+    unified::{self, Encoding as _, Receiver, Revision, Uitem},
 };
 
 // `ProposalError` also reaches this module through the `transparent-inputs` group below,
@@ -95,10 +99,17 @@ use zcash_address::{
 #[cfg(all(feature = "orchard", not(feature = "transparent-inputs")))]
 use crate::proposal::ProposalError;
 
+// `SpendPolicy` is used only by scenarios behind one of these two features.
+#[cfg(any(feature = "orchard", feature = "transparent-inputs"))]
+use crate::data_api::wallet::input_selection::SpendPolicy;
+
 #[cfg(feature = "transparent-inputs")]
 use {
     crate::{
-        data_api::{CoinbaseFilter, OutputOfSentTx, TransactionDataRequest, TransactionStatus},
+        data_api::{
+            CoinbaseFilter, OutputOfSentTx, TransactionDataRequest, TransactionStatus,
+            wallet::input_selection::TransparentSpendPolicy,
+        },
         fees::ChangeValue,
         proposal::{Proposal, ProposalError, StepOutput, StepOutputIndex},
         wallet::{Exposure, TransparentAddressSource, WalletTransparentOutput},
@@ -109,11 +120,8 @@ use {
         bundle::{OutPoint, TxOut},
         keys::{NonHardenedChildIndex, TransparentKeyScope},
     },
-    zcash_keys::keys::{UnifiedAddressRequest, transparent::gap_limits::GapLimits},
-    zcash_primitives::transaction::{
-        builder::DEFAULT_TX_EXPIRY_DELTA,
-        fees::{FeeRule, transparent::InputSize, zip317},
-    },
+    zcash_keys::keys::transparent::gap_limits::GapLimits,
+    zcash_primitives::transaction::fees::{FeeRule, transparent::InputSize, zip317},
     zcash_protocol::{
         TxId,
         value::{BalanceError, MAX_MONEY, ZatBalance},
@@ -124,7 +132,8 @@ use {
 use {
     crate::data_api::wallet::{SignerView, redact_pczt_for_batch_signer, redact_pczt_for_signer},
     pczt::roles::{combiner::Combiner, prover::Prover, signer::Signer, verifier::Verifier},
-    rand_core::OsRng,
+    rand::rngs::SysRng,
+    rand_core::UnwrapErr,
     transparent::builder::TransparentSigningSet,
     zcash_primitives::transaction::builder::{BuildConfig, Builder},
     zcash_proofs::prover::LocalTxProver,
@@ -177,7 +186,7 @@ pub trait ShieldedPoolTester {
     fn fvk_default_address(fvk: &Self::Fvk) -> Address;
     fn fvks_equal(a: &Self::Fvk, b: &Self::Fvk) -> bool;
 
-    fn random_fvk(mut rng: impl RngCore) -> Self::Fvk {
+    fn random_fvk(mut rng: impl Rng) -> Self::Fvk {
         let sk = {
             let mut sk_bytes = vec![0; 32];
             rng.fill_bytes(&mut sk_bytes);
@@ -186,7 +195,7 @@ pub trait ShieldedPoolTester {
 
         Self::sk_to_fvk(&sk)
     }
-    fn random_address(rng: impl RngCore) -> Address {
+    fn random_address(rng: impl Rng) -> Address {
         Self::fvk_default_address(&Self::random_fvk(rng))
     }
 
@@ -494,7 +503,7 @@ pub fn scan_full_block_detects_outputs<T: ShieldedPoolTester>(
         &header,
         vtx,
         &scanning_keys,
-        &Nullifiers::empty(),
+        &SpendIdentifiers::empty(),
         Some(&prior_block_metadata),
         |_addr| Ok::<_, Infallible>(None),
     )
@@ -506,7 +515,7 @@ pub fn scan_full_block_detects_outputs<T: ShieldedPoolTester>(
         &header,
         vtx,
         &scanning_keys,
-        &Nullifiers::empty(),
+        &SpendIdentifiers::empty(),
         Some(&prior_block_metadata),
     )
     .expect("scanning the block succeeds");
@@ -1260,10 +1269,13 @@ pub fn send_max_delivers_via_sapling_when_orchard_is_unavailable<T: ShieldedPool
         Address::Sapling(addr) => addr.to_bytes(),
         _ => panic!("expected a Sapling address"),
     };
-    let ua = unified::Address::try_from_items(vec![
-        Receiver::Sapling(sapling_receiver),
-        Receiver::Orchard([0xab; 43]),
-    ])
+    let ua = unified::Address::try_from_items(
+        Revision::R0,
+        vec![
+            Uitem::Data(Receiver::Sapling(sapling_receiver)),
+            Uitem::Data(Receiver::Orchard([0xab; 43])),
+        ],
+    )
     .unwrap();
     let addy = ZcashAddress::try_from_encoded(&ua.encode(&st.network().network_type())).unwrap();
 
@@ -1317,7 +1329,11 @@ pub fn send_max_to_orchard_only_ua_fails_without_orchard<T: ShieldedPoolTester>(
 
     // Without the `orchard` feature, the Orchard receiver's contents are not parsed,
     // so arbitrary receiver bytes suffice.
-    let ua = unified::Address::try_from_items(vec![Receiver::Orchard([0xab; 43])]).unwrap();
+    let ua = unified::Address::try_from_items(
+        Revision::R0,
+        vec![Uitem::Data(Receiver::Orchard([0xab; 43]))],
+    )
+    .unwrap();
     let addy = ZcashAddress::try_from_encoded(&ua.encode(&st.network().network_type())).unwrap();
 
     let fee_rule = StandardFeeRule::Zip317;
@@ -2069,6 +2085,78 @@ pub fn spend_everything_multi_step_with_marginal_notes_proposed_transfer<
 
     let ending_balance = st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN);
     assert_eq!(ending_balance, Zatoshis::ZERO); // ending balance should be zero
+}
+
+/// Tests that the `InsufficientFunds` error of a transfer permitted to spend the account's
+/// transparent outputs reports the value of those outputs as available, alongside the notes.
+///
+/// The test:
+/// - Adds a shielded note and a transparent UTXO to the account.
+/// - Proposes a transfer exceeding their combined value, permitting transparent spends.
+/// - Verifies that `available` is the sum of the note and the UTXO, and that `required` is
+///   the payment plus the fee for spending both.
+#[cfg(feature = "transparent-inputs")]
+pub fn insufficient_funds_counts_transparent_inputs<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    let note_value = Zatoshis::const_from_u64(50_000);
+    let (h, _, _) = st.add_a_single_note_checking_balance(note_value);
+
+    let account = st.test_account().cloned().unwrap();
+    let uaddr = st
+        .wallet()
+        .get_last_generated_address_matching(account.id(), UnifiedAddressRequest::AllAvailableKeys)
+        .unwrap()
+        .unwrap();
+    let taddr = uaddr.transparent().unwrap();
+
+    let utxo_value = Zatoshis::const_from_u64(30_000);
+    let utxo = WalletTransparentOutput::from_parts(
+        OutPoint::fake(),
+        TxOut::new(utxo_value, taddr.script().into()),
+        Some(h),
+        Some(account.id()),
+        Some(TransparentKeyScope::EXTERNAL),
+        None,
+    )
+    .unwrap();
+    st.wallet_mut()
+        .put_received_transparent_utxo(&utxo)
+        .unwrap();
+
+    let to: Address = T::sk_default_address(&T::sk(&[0xf5; 32]));
+    let amount = Zatoshis::const_from_u64(100_000);
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        amount,
+    )])
+    .unwrap();
+
+    let input_selector = GreedyInputSelector::new();
+    let change_strategy =
+        single_output_change_strategy(StandardFeeRule::Zip317, None, T::SHIELDED_PROTOCOL);
+
+    // The transaction would spend the transparent input and the note, paying the recipient
+    // and a change output in the note's pool: one transparent logical action plus two
+    // shielded ones.
+    let expected_required = (amount + (MARGINAL_FEE * 3u64).unwrap()).unwrap();
+    let expected_available = (note_value + utxo_value).unwrap();
+
+    assert_matches!(
+        st.propose_transfer_with_policy(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+            &SpendPolicy::default().with_transparent(TransparentSpendPolicy::any_account_addr()),
+        ),
+        Err(Error::InsufficientFunds { available, required })
+            if available == expected_available && required == expected_required
+    );
 }
 
 pub fn send_with_multiple_change_outputs<T: ShieldedPoolTester>(
@@ -6372,7 +6460,7 @@ where
 
     // Generate some new random blocks
     for _ in 0..10 {
-        let output_count = st.rng_mut().gen_range(2..10);
+        let output_count = st.rng_mut().random_range(2..10);
         gen_random_block(&mut st, output_count);
     }
 
@@ -6867,9 +6955,9 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
         .circuit_version(),
     );
     let pczt_proven = Prover::new(pczt_updated)
-        .create_orchard_proof(orchard_pk)
+        .create_orchard_proof(UnwrapErr(SysRng), orchard_pk)
         .unwrap()
-        .create_sapling_proofs(&sapling_prover, &sapling_prover)
+        .create_sapling_proofs(UnwrapErr(SysRng), &sapling_prover, &sapling_prover)
         .unwrap()
         .finish();
 
@@ -7224,7 +7312,7 @@ fn build_transparent_coinbase_tx(
             &[],
             // unused internally
             &[],
-            OsRng,
+            UnwrapErr(SysRng),
             &LocalTxProver::bundled(),
             &LocalTxProver::bundled(),
             // unused internally
@@ -8607,7 +8695,7 @@ where
         .sign_orchard_with::<pczt::roles::low_level_signer::OrchardParseError, _>(|_, bundle, _| {
             for &index in &orchard_signable {
                 bundle.actions_mut()[index]
-                    .sign(original_sighash, &ask, OsRng)
+                    .sign(original_sighash, &ask, UnwrapErr(SysRng))
                     .unwrap();
             }
             Ok(())
@@ -8617,7 +8705,7 @@ where
             |_, bundle, _| {
                 for &index in &ironwood_signable {
                     bundle.actions_mut()[index]
-                        .sign(original_sighash, &ask, OsRng)
+                        .sign(original_sighash, &ask, UnwrapErr(SysRng))
                         .unwrap();
                 }
                 Ok(())
@@ -8715,9 +8803,9 @@ where
         .circuit_version(),
     );
     let proven = Prover::new(authorized)
-        .create_orchard_proof(orchard_pk)
+        .create_orchard_proof(UnwrapErr(SysRng), orchard_pk)
         .unwrap()
-        .create_ironwood_proof(orchard_pk)
+        .create_ironwood_proof(UnwrapErr(SysRng), orchard_pk)
         .unwrap()
         .finish();
 
@@ -9936,5 +10024,232 @@ pub fn self_migration_keeps_spending_orchard<Dsf: DataStoreFactory>(
     assert!(
         step.is_canonical_crossing(&zip318, canonical_fee),
         "the second crossing must still be canonical"
+    );
+}
+
+/// Tests that payment construction enforces the ZIP 316 Revision 2 address expiration
+/// rules: a payment to an address whose expiry height conflicts with the transaction's
+/// expiry height is refused, a payment to an address whose expiry time has passed is
+/// refused (for any recipient of a multi-recipient transaction), and a payment to an
+/// address with unexpired metadata succeeds.
+pub fn create_to_address_respects_recipient_expiry<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    // Add funds to the wallet: one note for each payment expected to succeed. The
+    // payments expected to be refused are checked first, while every note is unspent.
+    st.add_notes_checking_balance([
+        [Zatoshis::const_from_u64(100_000)],
+        [Zatoshis::const_from_u64(100_000)],
+        [Zatoshis::const_from_u64(100_000)],
+    ]);
+
+    let account = st.test_account().cloned().unwrap();
+    let birthday = account.birthday().height();
+    let chain_tip = st.wallet().chain_height().unwrap().unwrap();
+
+    // Construct recipient addresses carrying expiry metadata from the account's own
+    // default address, so that every receiver is valid for the active pool set.
+    let (default_addr, _) = account
+        .usk()
+        .to_unified_full_viewing_key()
+        .default_address(UnifiedAddressRequest::AllAvailableKeys)
+        .unwrap();
+    let with_expiry = |expiry_height: Option<BlockHeight>, expiry_time: Option<u64>| {
+        UnifiedAddress::from_receivers(
+            #[cfg(feature = "orchard")]
+            default_addr.orchard().copied(),
+            default_addr.sapling().copied(),
+            default_addr.transparent().copied(),
+            expiry_height,
+            expiry_time,
+        )
+        .expect("the default address has at least one receiver")
+    };
+
+    let payment_value = Zatoshis::const_from_u64(20_000);
+    let change_strategy =
+        single_output_change_strategy(StandardFeeRule::Zip317, None, T::SHIELDED_PROTOCOL);
+    let input_selector = GreedyInputSelector::new();
+
+    // An address is expired only once the chain has advanced *past* its expiry height,
+    // so one expiring at exactly the chain tip is not yet expired. It is refused because
+    // the transaction's default expiry height lies beyond it.
+    let expired_by_height = with_expiry(Some(chain_tip), None);
+    let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+        Address::from(expired_by_height.clone()).to_zcash_address(st.network()),
+        payment_value,
+    )])
+    .unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    assert_matches!(
+        st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal
+        ),
+        Err(Error::RecipientAddressExpiry {
+            payment_index: 0,
+            error: AddressExpiryError::ExpiryHeightConflict { .. },
+        })
+    );
+
+    // An expiry time before the current time makes the address expired; the constraint
+    // applies to every recipient of a multi-recipient transaction.
+    /// One second past the Unix epoch, long before the test clock's current time.
+    const EXPIRY_TIME_IN_PAST: u64 = 1;
+    let valid_far_future = with_expiry(
+        Some(birthday + 10_000),
+        Some(super::TEST_CLOCK_EPOCH_OFFSET.as_secs() + 10_000),
+    );
+    let expired_by_time = with_expiry(None, Some(EXPIRY_TIME_IN_PAST));
+    let request = zip321::TransactionRequest::new(vec![
+        Payment::without_memo(
+            Address::from(valid_far_future.clone()).to_zcash_address(st.network()),
+            payment_value,
+        ),
+        Payment::without_memo(
+            Address::from(expired_by_time.clone()).to_zcash_address(st.network()),
+            payment_value,
+        ),
+    ])
+    .unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    assert_matches!(
+        st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal
+        ),
+        Err(Error::RecipientAddressExpiry {
+            payment_index: 1,
+            error: AddressExpiryError::TimeExpired { .. },
+        })
+    );
+
+    // A payment to an address with unexpired metadata succeeds.
+    let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+        Address::from(valid_far_future.clone()).to_zcash_address(st.network()),
+        payment_value,
+    )])
+    .unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    assert_matches!(
+        st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal
+        ),
+        Ok(_)
+    );
+
+    // One block below the tip, the chain has advanced past the address's expiry height, so
+    // the address is expired and the payment is refused on that ground rather than for a
+    // transaction-expiry conflict.
+    let recipient = with_expiry(Some(chain_tip - 1), None);
+    let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+        Address::from(recipient).to_zcash_address(st.network()),
+        payment_value,
+    )])
+    .unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    assert_matches!(
+        st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal
+        ),
+        Err(Error::RecipientAddressExpiry {
+            payment_index: 0,
+            error: AddressExpiryError::HeightExpired { .. },
+        })
+    );
+
+    // The transaction's expiry height may equal the address's expiry height; only a
+    // transaction expiry strictly greater than the address's is forbidden. The default
+    // transaction expiry is the target height plus `DEFAULT_TX_EXPIRY_DELTA`, and the
+    // target height is the block after the chain tip.
+    let recipient = with_expiry(Some(chain_tip + 1 + DEFAULT_TX_EXPIRY_DELTA), None);
+    let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+        Address::from(recipient).to_zcash_address(st.network()),
+        payment_value,
+    )])
+    .unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    assert_matches!(
+        st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal
+        ),
+        Ok(_)
+    );
+
+    // An address carrying only an expiry time is expired only once the current time is
+    // *after* it, so one expiring at exactly the current time is still valid.
+    let recipient = with_expiry(None, Some(super::TEST_CLOCK_EPOCH_OFFSET.as_secs()));
+    let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+        Address::from(recipient).to_zcash_address(st.network()),
+        payment_value,
+    )])
+    .unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    assert_matches!(
+        st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal
+        ),
+        Ok(_)
     );
 }

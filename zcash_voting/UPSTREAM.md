@@ -1,17 +1,33 @@
 # Valar Voting Upstream
 
 - Repository: https://github.com/valargroup/zcash_voting
-- Commit: `57e25c7dae7d75fe746e5f40e450f6cd65c5c7c5`
-- Crate: `zcash_voting` `3.1.0-rc.15`
-- Imported: 2026-09-07
+- Tag: `v5.2.0-rc.2`
+- Commit: `e7b9a6b62539319fcd82c17f6f6babb9ff7e78dc`
+- Crate: `zcash_voting` `5.2.0-rc.2`
+- Imported: 2026-10-22
 - Wallet integration backend: `lrz`, with `browser`; never `zakura`.
 
-This directory contains the complete workspace from that commit, copied with
-`rsync -a --exclude=.git` after checking out and verifying the exact revision.
+This directory contains the complete workspace from that tag, merged with the
+browser and wallet patches and copied without upstream `.git` metadata.
 It is ordinary source, not a submodule. Upstream licenses, tests, examples,
 documentation, and release tooling are retained.
-One extra EOF blank line in `docs/immediate-share-selection-plan.md` is removed
-so the vendor import passes `git diff --check`.
+
+## Current local compatibility
+
+- The `lrz,browser` build retains the local LRZ graph and the caller-local
+  browser transport, SQLite ownership, proof execution, and helper recovery.
+- Voting schema v25 merges upstream v18-v24 with the earlier browser v18-v22
+  journals. Legacy submission evidence is captured during migration so old
+  accepted transactions resume by status lookup without a duplicate POST.
+- NU7 Testnet is accepted for Ironwood V3 voting notes at the network's
+  activation height; older snapshots retain their prior branch behavior.
+- The root wallet supplies the browser session driver, durable checkpoints,
+  external signing, and compatibility wrappers for its existing public API.
+
+## Historical import notes
+
+The sections below document the earlier 3.1.0-rc.15 browser fork. Version and
+schema numbers there describe that prior import, not the current upstream tag.
 
 ## Local Compatibility Patches
 

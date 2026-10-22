@@ -418,7 +418,7 @@ impl Account {
     ) -> Result<Option<(TransparentAddress, NonHardenedChildIndex)>, Error> {
         Ok(self
             .uivk()
-            .transparent()
+            .p2pkh()
             .as_ref()
             .map(|tivk| tivk.default_address()))
     }
@@ -480,7 +480,7 @@ impl Account {
     /// Maintain a rolling lookahead after the last mined use, without exposing
     /// or reserving those addresses for transaction construction.
     pub(crate) fn ensure_internal_gap(&mut self, first_gap_index: u32) -> Result<(), Error> {
-        let Some(pubkey) = self.viewing_key.transparent() else {
+        let Some(pubkey) = self.viewing_key.p2pkh() else {
             return Ok(());
         };
         let end = first_gap_index
@@ -621,8 +621,8 @@ impl Account {
             .ok_or(AddressGenerationError::DiversifierSpaceExhausted)?;
         let account_pubkey = self
             .viewing_key
-            .transparent()
-            .ok_or(AddressGenerationError::KeyNotAvailable(Typecode::P2pkh))?;
+            .p2pkh()
+            .ok_or(AddressGenerationError::KeyNotAvailable(Typecode::P2PKH))?;
         let internal_ivk = account_pubkey.derive_internal_ivk()?;
 
         (start..end)
@@ -663,7 +663,7 @@ impl Account {
     }
     pub(crate) fn ephemeral_ivk(&self) -> Result<Option<EphemeralIvk>, Error> {
         self.viewing_key
-            .transparent()
+            .p2pkh()
             .map(AccountPubKey::derive_ephemeral_ivk)
             .transpose()
             .map_err(Into::into)
@@ -896,7 +896,10 @@ mod serialization {
                     AccountSource::Imported { ref key_source, .. } => key_source,
                 }
                 .clone(),
-                viewing_key: acc.viewing_key.encode(&EncodingParams),
+                viewing_key: acc
+                    .viewing_key
+                    .encode(&EncodingParams)
+                    .expect("wallet account UFVK must be encodable"),
                 birthday: Some(acc.birthday().clone().try_into().unwrap()),
                 addresses: acc
                     .addresses()
@@ -954,10 +957,10 @@ mod serialization {
 
         fn try_from(acc: proto::Account) -> Result<Self, Self::Error> {
             let viewing_key = UnifiedFullViewingKey::decode(&EncodingParams, &acc.viewing_key)
-                .map_err(Error::UfvkDecodeError)?;
+                .map_err(|e| Error::UfvkDecodeError(e.to_string()))?;
             #[cfg(feature = "transparent-inputs")]
             let internal_ivk = viewing_key
-                .transparent()
+                .p2pkh()
                 .map(AccountPubKey::derive_internal_ivk)
                 .transpose()?;
             let account = Self {
@@ -1006,7 +1009,7 @@ mod serialization {
                                 a.diversifier_index,
                             )?),
                             UnifiedAddress::decode(&EncodingParams, &a.address)
-                                .map_err(Error::UfvkDecodeError)?,
+                                .map_err(|e| Error::UfvkDecodeError(e.to_string()))?,
                         ))
                     })
                     .collect::<Result<_, Error>>()?,

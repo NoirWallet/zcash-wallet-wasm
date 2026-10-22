@@ -108,7 +108,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
         .zip(scope_code)
         .map(|(ufvk_str, scope_code)| {
             let ufvk = UnifiedFullViewingKey::decode(params, &ufvk_str)
-                .map_err(SqliteClientError::CorruptedData)?;
+                .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?;
 
             let spending_key_scope = zip32::Scope::try_from(KeyScope::decode(scope_code)?)
                 .map_err(|_| {
@@ -775,6 +775,11 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn create_to_address_respects_recipient_expiry() {
+        testing::pool::create_to_address_respects_recipient_expiry::<OrchardPoolTester>()
+    }
+
+    #[test]
     fn scan_full_block_detects_outputs() {
         testing::pool::scan_full_block_detects_outputs::<OrchardPoolTester>()
     }
@@ -826,6 +831,12 @@ pub(crate) mod tests {
     #[test]
     fn send_max_proposal_fails_when_unconfirmed_funds_present() {
         testing::pool::send_max_proposal_fails_when_unconfirmed_funds_present::<OrchardPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-inputs")]
+    fn insufficient_funds_counts_transparent_inputs() {
+        testing::pool::insufficient_funds_counts_transparent_inputs::<OrchardPoolTester>()
     }
 
     #[test]
@@ -1765,7 +1776,7 @@ pub(crate) mod tests {
             wallet::orchard::select_spendable_ironwood_notes,
         };
         use orchard::keys::{FullViewingKey, Scope, SpendAuthorizingKey};
-        use rand_core::OsRng;
+        use rand::{rand_core::UnwrapErr, rngs::SysRng};
         use transparent::builder::TransparentSigningSet;
 
         // A network on which Ironwood (NU6.3) is active from the Sapling activation height, so
@@ -2304,7 +2315,12 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             let tx = builder
-                .mock_build(&TransparentSigningSet::new(), &[], &[orchard_sak], OsRng)
+                .mock_build(
+                    &TransparentSigningSet::new(),
+                    &[],
+                    &[orchard_sak],
+                    UnwrapErr(SysRng),
+                )
                 .unwrap()
                 .transaction()
                 .clone();

@@ -11,6 +11,7 @@ use nonempty::NonEmpty;
 use pczt::Pczt;
 use pczt::roles::prover::Prover;
 use pczt::roles::updater::Updater;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use sapling::ProofGenerationKey;
 use secrecy::{ExposeSecret, SecretVec, Zeroize};
 use serde::Serialize;
@@ -54,6 +55,7 @@ use zcash_client_backend::sync::{
     CompactBlockSource, run_next_batch_optimized_with_block_source,
     run_next_batch_with_block_source, run_with_block_source,
 };
+use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::OvkPolicy;
 use zcash_client_backend::zip321::{Payment, TransactionRequest};
 use zcash_client_backend::{
@@ -563,6 +565,8 @@ where
     >(
         db,
         network,
+        &SystemClock,
+        &mut UnwrapErr(SysRng),
         prover,
         prover,
         &spending_keys,
@@ -597,12 +601,8 @@ fn orchard_circuit_version_for_branch(
 ) -> orchard::circuit::OrchardCircuitVersion {
     match branch_id {
         BranchId::Nu6_3 => orchard::circuit::OrchardCircuitVersion::PostNu6_3,
+        BranchId::Nu7 => orchard::circuit::OrchardCircuitVersion::PostNu6_3,
         BranchId::Nu6_2 => orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
-        // NU7 is still behind a cfg in librustzcash; if this crate is compiled with
-        // that cfg enabled, its placeholder branch ID uses the post-NU6.3 circuit.
-        branch_id if u32::from(branch_id) == 0xffff_ffff => {
-            orchard::circuit::OrchardCircuitVersion::PostNu6_3
-        }
         _ => orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2,
     }
 }
@@ -958,7 +958,7 @@ where
         key_source: Option<&str>,
     ) -> Result<AccountId, Error> {
         let ufvk = UnifiedFullViewingKey::decode(&self.network, ufvk_encoded)
-            .map_err(Error::KeyDecoding)?;
+            .map_err(|error| Error::KeyDecoding(error.to_string()))?;
 
         let derivation = Zip32Derivation::new(
             SeedFingerprint::from_bytes(seed_fingerprint),
@@ -2573,6 +2573,8 @@ where
         >(
             &mut *db,
             &self.network,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             account_id,
             OvkPolicy::Sender,
             &proposal,
@@ -2688,6 +2690,8 @@ where
         >(
             &mut *db,
             &self.network,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             account_id,
             OvkPolicy::Sender,
             &proposal,
@@ -2794,6 +2798,8 @@ where
             >(
                 &mut *db,
                 &self.network,
+                &SystemClock,
+                &mut UnwrapErr(SysRng),
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
@@ -2810,6 +2816,8 @@ where
             >(
                 &mut *db,
                 &self.network,
+                &SystemClock,
+                &mut UnwrapErr(SysRng),
                 account_id,
                 OvkPolicy::Sender,
                 &proposal,
@@ -3070,6 +3078,8 @@ where
             >(
                 &mut *db,
                 &self.network,
+                &SystemClock,
+                &mut UnwrapErr(SysRng),
                 account_id,
                 ovk_policy.clone(),
                 &proposal,
@@ -3086,6 +3096,8 @@ where
             >(
                 &mut *db,
                 &self.network,
+                &SystemClock,
+                &mut UnwrapErr(SysRng),
                 account_id,
                 ovk_policy,
                 &proposal,
@@ -3173,6 +3185,8 @@ where
         >(
             &mut *db,
             &self.network,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             account_id,
             OvkPolicy::Sender,
             &proposal,
@@ -3539,7 +3553,7 @@ where
             tracing::info!("🔧 Starting Orchard proof generation...");
             let orchard_start = js_sys::Date::now();
             prover_instance = prover_instance
-                .create_orchard_proof(orchard_proving_key)
+                .create_orchard_proof(UnwrapErr(SysRng), orchard_proving_key)
                 .map_err(|e| Error::PcztProve(format!("Failed to create Orchard proof: {e:?}")))?;
             orchard_elapsed = (js_sys::Date::now() - orchard_start) / 1000.0;
             tracing::info!("✅ Orchard proof completed in {:.2}s", orchard_elapsed);
@@ -3553,7 +3567,7 @@ where
             tracing::info!("🔧 Starting Ironwood proof generation...");
             let ironwood_start = js_sys::Date::now();
             prover_instance = prover_instance
-                .create_ironwood_proof(orchard_proving_key)
+                .create_ironwood_proof(UnwrapErr(SysRng), orchard_proving_key)
                 .map_err(|e| Error::PcztProve(format!("Failed to create Ironwood proof: {e:?}")))?;
             ironwood_elapsed = (js_sys::Date::now() - ironwood_start) / 1000.0;
             tracing::info!("✅ Ironwood proof completed in {:.2}s", ironwood_elapsed);
@@ -3563,7 +3577,7 @@ where
         tracing::info!("🔧 Starting Sapling proofs generation...");
         let sapling_start = js_sys::Date::now();
         prover_instance = prover_instance
-            .create_sapling_proofs(prover, prover)
+            .create_sapling_proofs(UnwrapErr(SysRng), prover, prover)
             .map_err(|e| Error::PcztProve(format!("Failed to create Sapling proofs: {e:?}")))?;
         let sapling_elapsed = (js_sys::Date::now() - sapling_start) / 1000.0;
         tracing::info!("✅ Sapling proofs completed in {:.2}s", sapling_elapsed);
@@ -3591,6 +3605,8 @@ where
         let start_time = js_sys::Date::now();
         let txid = extract_and_store_transaction_from_pczt::<_, ()>(
             &mut *db,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             pczt,
             Some((&spend_vk, &output_vk)),
             Some(orchard_verifying_key),
@@ -3672,10 +3688,11 @@ mod tests {
     use super::{
         OvkPolicy, TransferEstimate, TransferFundingSource, TransferOverallStatus,
         TransferSubmissionStatus, UnifiedSpendingKey, allow_exact_send_max_fallback,
-        dynamic_zip317_fee_rule, hardware_orchard_ovk_policy, submit_to_first_accepting_endpoint,
-        submit_to_zero_indexers_with_fallback, submit_transfer_transactions_with,
-        transaction_request_is_due, transaction_status_from_raw_height, transfer_expiry_height,
-        transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
+        dynamic_zip317_fee_rule, hardware_orchard_ovk_policy, orchard_circuit_version_for_branch,
+        submit_to_first_accepting_endpoint, submit_to_zero_indexers_with_fallback,
+        submit_transfer_transactions_with, transaction_request_is_due,
+        transaction_status_from_raw_height, transfer_expiry_height, transfer_policies,
+        usk_from_seed_str, validate_expiry_delta_blocks,
     };
     use crate::Network;
     use nonempty::NonEmpty;
@@ -3694,6 +3711,14 @@ mod tests {
 
     fn txid(value: u8) -> TxId {
         TxId::from_bytes([value; 32])
+    }
+
+    #[test]
+    fn nu7_uses_the_ironwood_orchard_circuit() {
+        assert_eq!(
+            orchard_circuit_version_for_branch(zcash_protocol::consensus::BranchId::Nu7),
+            orchard::circuit::OrchardCircuitVersion::PostNu6_3
+        );
     }
 
     #[test]
