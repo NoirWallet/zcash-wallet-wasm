@@ -150,6 +150,7 @@ export interface TransferResult {
 export interface TransferEstimate {
     amountZats: string;
     feeZats: string;
+    marginalFeeZats: string;
     transactionCount: number;
     stepFeesZats: string[];
 }

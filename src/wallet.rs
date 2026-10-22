@@ -84,8 +84,11 @@ mod browser_fixture;
 
 #[cfg(test)]
 mod confirmations_tests;
+#[cfg(test)]
+mod fee_tests;
 const BATCH_SIZE: u32 = 10000;
 pub(crate) const DEFAULT_ZERO_INDEXER_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+const STANDARD_FEE_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn consume_transparent_history_budget(remaining: &mut usize) -> Result<(), Error> {
     *remaining = remaining.checked_sub(1).ok_or_else(|| Error::Generic(
@@ -437,6 +440,7 @@ where
 pub(crate) struct TransferEstimate {
     amount_zats: String,
     fee_zats: String,
+    marginal_fee_zats: String,
     transaction_count: usize,
     step_fees_zats: Vec<String>,
 }
@@ -445,6 +449,7 @@ impl TransferEstimate {
     fn from_amount_and_step_fees(
         amount: Zatoshis,
         step_fees: impl IntoIterator<Item = Zatoshis>,
+        marginal_fee_zats: u64,
     ) -> Result<Self, Error> {
         let mut fee = Zatoshis::ZERO;
         let mut step_fees_zats = vec![];
@@ -457,6 +462,7 @@ impl TransferEstimate {
         Ok(Self {
             amount_zats: u64::from(amount).to_string(),
             fee_zats: u64::from(fee).to_string(),
+            marginal_fee_zats: marginal_fee_zats.to_string(),
             transaction_count: step_fees_zats.len(),
             step_fees_zats,
         })
@@ -516,6 +522,7 @@ fn proposal_payment_amount_zats<FeeRuleT, NoteRef>(
 
 fn transfer_estimate_from_proposal<FeeRuleT, NoteRef>(
     proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
+    marginal_fee_zats: u64,
 ) -> Result<TransferEstimate, Error> {
     TransferEstimate::from_amount_and_step_fees(
         Zatoshis::from_u64(proposal_payment_amount_zats(proposal)?)?,
@@ -523,6 +530,7 @@ fn transfer_estimate_from_proposal<FeeRuleT, NoteRef>(
             .steps()
             .iter()
             .map(|step| step.balance().fee_required()),
+        marginal_fee_zats,
     )
 }
 
@@ -833,6 +841,42 @@ where
             .map(CompactTxStreamerClient::new)
             .collect();
         self.zero_indexer_send_timeout = send_timeout;
+    }
+
+    async fn resolve_transfer_fee(&self, supplied_fee: Option<u64>) -> Result<Option<u64>, Error> {
+        if let Some(fee) = supplied_fee {
+            dynamic_zip317_fee_rule(fee)?;
+            return Ok(Some(fee));
+        }
+
+        let mut client = self.client.clone();
+        let recommended = tokio_with_wasm::alias::time::timeout(
+            STANDARD_FEE_QUERY_TIMEOUT,
+            client.get_standard_fee(service::Empty {}),
+        )
+        .await;
+        match recommended {
+            Ok(Ok(response)) => {
+                let fee = response.into_inner().fee_zat;
+                if dynamic_zip317_fee_rule(fee).is_ok() {
+                    Ok(Some(fee))
+                } else {
+                    tracing::warn!(
+                        fee,
+                        "Invalid recommended marginal fee; using standard ZIP-317 fee"
+                    );
+                    Ok(None)
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "Standard fee RPC unavailable; using standard ZIP-317 fee");
+                Ok(None)
+            }
+            Err(_) => {
+                tracing::warn!("Standard fee RPC timed out; using standard ZIP-317 fee");
+                Ok(None)
+            }
+        }
     }
 
     fn transfer_confirmations_policy(
@@ -2408,7 +2452,7 @@ where
             .map(validate_expiry_delta_blocks)
             .transpose()?;
 
-        match marginal_fee_zats {
+        match self.resolve_transfer_fee(marginal_fee_zats).await? {
             Some(marginal_fee_zats) => {
                 let proposal = self
                     .propose_unified_transfer(
@@ -2422,7 +2466,7 @@ where
                         expiry_delta_blocks,
                     )
                     .await?;
-                transfer_estimate_from_proposal(&proposal)
+                transfer_estimate_from_proposal(&proposal, marginal_fee_zats)
             }
             None => {
                 let proposal = self
@@ -2437,7 +2481,7 @@ where
                         expiry_delta_blocks,
                     )
                     .await?;
-                transfer_estimate_from_proposal(&proposal)
+                transfer_estimate_from_proposal(&proposal, prim_zip317::MARGINAL_FEE.into())
             }
         }
     }
@@ -2472,7 +2516,7 @@ where
         marginal_fee_zats: Option<u64>,
         expiry_delta_blocks: Option<u32>,
     ) -> Result<TransferResult, Error> {
-        match marginal_fee_zats {
+        match self.resolve_transfer_fee(marginal_fee_zats).await? {
             Some(marginal_fee_zats) => {
                 let proposal = self
                     .propose_unified_transfer(
@@ -4262,10 +4306,12 @@ mod tests {
                 Zatoshis::const_from_u64(15_000),
                 Zatoshis::const_from_u64(10_000),
             ],
+            5_000,
         )
         .unwrap();
         assert_eq!(estimate.amount_zats, "50000");
         assert_eq!(estimate.fee_zats, "25000");
+        assert_eq!(estimate.marginal_fee_zats, "5000");
         assert_eq!(estimate.transaction_count, 2);
         assert_eq!(estimate.step_fees_zats, ["15000", "10000"]);
     }
