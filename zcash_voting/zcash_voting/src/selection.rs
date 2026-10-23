@@ -156,12 +156,12 @@ pub(crate) fn validate_snapshot_notes(
 
 #[cfg(test)]
 pub(crate) fn test_snapshot_tree_state(height: u64, notes: &[NoteInfo]) -> Vec<u8> {
-    use incrementalmerkletree::{
+    use orchard::tree::MerkleHashOrchard;
+    use prost::Message;
+    use voting_crypto_deps::incrementalmerkletree::{
         frontier::{CommitmentTree, Frontier},
         Hashable,
     };
-    use orchard::tree::MerkleHashOrchard;
-    use prost::Message;
     let mut frontier = Frontier::<MerkleHashOrchard, 32>::empty();
     for position in 0..=notes.iter().map(|n| n.position).max().unwrap_or(0) {
         let leaf = notes

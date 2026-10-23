@@ -1441,8 +1441,9 @@ impl VotingDb {
                 .map_err(|_| invalid())?,
         )
         .ok_or_else(invalid)?;
-        let expected: [u8; 32] =
-            (&orchard::keys::SpendValidatingKey::from(fvk.clone()).randomize(&alpha)).into();
+        let expected: [u8; 32] = (&orchard::keys::SpendValidatingKey::from(fvk.clone())
+            .randomize(&voting_crypto_deps::spend_auth_randomizer(&alpha)))
+            .into();
         if rk != expected {
             return Err(invalid());
         }

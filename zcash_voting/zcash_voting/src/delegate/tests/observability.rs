@@ -32,6 +32,15 @@ fn preparation_keeps_selection_and_failed_witness_work_in_one_report() {
     db.set_wallet_id("observed-preparation");
     let hotkey = test_regtest_voting_hotkey();
     let round_id = "01".repeat(32);
+    let anchor_tree_state_bytes = crate::selection::test_snapshot_tree_state(
+        10,
+        &crate::selection::select_snapshot_note_infos(
+            &wallet,
+            &account_uuid.expose_uuid().to_string(),
+            10,
+        )
+        .unwrap(),
+    );
 
     let report = prepare_delegation_bundle_with_report(
         &db,
@@ -47,9 +56,9 @@ fn preparation_keeps_selection_and_failed_witness_work_in_one_report() {
                     nullifier_imt_root: vec![3; 32],
                 },
                 resolved_round_name: "Observed round".into(),
-                // Witness validation must fail after wallet selection, retaining
-                // both phases in the same diagnostic snapshot.
-                anchor_tree_state_bytes: vec![0xAA],
+                // A valid frontier passes selection; the mismatched round root
+                // fails witness generation after both phases are observed.
+                anchor_tree_state_bytes,
                 branch_id_provider: LightwalletdBranchIdProvider::resolved(u32::from(
                     BranchId::Nu6_3,
                 )),

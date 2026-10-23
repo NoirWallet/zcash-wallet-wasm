@@ -71,7 +71,7 @@ fn pipeline_cached_proof_reports_reused_at_both_boundaries() {
         network: Network::Regtest,
         round_params,
         resolved_round_name: prepared.round_name.clone(),
-        anchor_tree_state_bytes: vec![],
+        anchor_tree_state_bytes: prepared.anchor_tree_state_bytes.clone(),
         branch_id_provider: prepared.branch_id_provider.clone(),
     };
     let pipeline = DelegationPipeline::new(

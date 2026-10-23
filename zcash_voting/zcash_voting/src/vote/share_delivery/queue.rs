@@ -118,6 +118,14 @@ pub(in crate::vote) async fn submit_votes<'a>(
     on_report: &mut (dyn FnMut(&CommittedVote, &ShareBatchDeliveryReport) + Send),
 ) -> Vec<VoteDeliveryResult<'a>> {
     let scope = ShareOperationScope::capture(db);
+    let observations = client.observation_scope();
+    let observations = crate::helper::url::canonical_helper_url_list(params.configured_server_urls)
+        .ok()
+        .filter(|urls| urls.len() == params.configured_server_urls.len())
+        .map(|urls| observations.with_helper_fleet(&urls))
+        .unwrap_or(observations);
+    let observed_client = client.observing(&observations);
+    let client = &observed_client;
     let preparation_stage = client
         .observation_scope()
         .stage("helper::prepare_delivery_queue");

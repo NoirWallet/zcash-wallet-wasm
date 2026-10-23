@@ -55,7 +55,7 @@ use zcash_client_backend::sync::{
     CompactBlockSource, run_next_batch_optimized_with_block_source,
     run_next_batch_with_block_source, run_with_block_source,
 };
-use zcash_client_backend::util::SystemClock;
+use zcash_client_backend::util::Clock;
 use zcash_client_backend::wallet::OvkPolicy;
 use zcash_client_backend::zip321::{Payment, TransactionRequest};
 use zcash_client_backend::{
@@ -89,6 +89,15 @@ mod fee_tests;
 const BATCH_SIZE: u32 = 10000;
 pub(crate) const DEFAULT_ZERO_INDEXER_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const STANDARD_FEE_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct WalletClock;
+
+impl Clock for WalletClock {
+    fn now(&self) -> std::time::SystemTime {
+        // The time crate uses the JavaScript clock on browser WASM.
+        time::OffsetDateTime::now_utc().into()
+    }
+}
 
 fn consume_transparent_history_budget(remaining: &mut usize) -> Result<(), Error> {
     *remaining = remaining.checked_sub(1).ok_or_else(|| Error::Generic(
@@ -573,7 +582,7 @@ where
     >(
         db,
         network,
-        &SystemClock,
+        &WalletClock,
         &mut UnwrapErr(SysRng),
         prover,
         prover,
@@ -2617,7 +2626,7 @@ where
         >(
             &mut *db,
             &self.network,
-            &SystemClock,
+            &WalletClock,
             &mut UnwrapErr(SysRng),
             account_id,
             OvkPolicy::Sender,
@@ -2734,7 +2743,7 @@ where
         >(
             &mut *db,
             &self.network,
-            &SystemClock,
+            &WalletClock,
             &mut UnwrapErr(SysRng),
             account_id,
             OvkPolicy::Sender,
@@ -2842,7 +2851,7 @@ where
             >(
                 &mut *db,
                 &self.network,
-                &SystemClock,
+                &WalletClock,
                 &mut UnwrapErr(SysRng),
                 account_id,
                 OvkPolicy::Sender,
@@ -2860,7 +2869,7 @@ where
             >(
                 &mut *db,
                 &self.network,
-                &SystemClock,
+                &WalletClock,
                 &mut UnwrapErr(SysRng),
                 account_id,
                 OvkPolicy::Sender,
@@ -3122,7 +3131,7 @@ where
             >(
                 &mut *db,
                 &self.network,
-                &SystemClock,
+                &WalletClock,
                 &mut UnwrapErr(SysRng),
                 account_id,
                 ovk_policy.clone(),
@@ -3140,7 +3149,7 @@ where
             >(
                 &mut *db,
                 &self.network,
-                &SystemClock,
+                &WalletClock,
                 &mut UnwrapErr(SysRng),
                 account_id,
                 ovk_policy,
@@ -3229,7 +3238,7 @@ where
         >(
             &mut *db,
             &self.network,
-            &SystemClock,
+            &WalletClock,
             &mut UnwrapErr(SysRng),
             account_id,
             OvkPolicy::Sender,
@@ -3649,7 +3658,7 @@ where
         let start_time = js_sys::Date::now();
         let txid = extract_and_store_transaction_from_pczt::<_, ()>(
             &mut *db,
-            &SystemClock,
+            &WalletClock,
             &mut UnwrapErr(SysRng),
             pczt,
             Some((&spend_vk, &output_vk)),

@@ -80,15 +80,18 @@ pub fn tx1_sighash(
         type SaplingAuth = <Authorized as Authorization>::SaplingAuth;
         type OrchardAuth = EffectsOnly;
     }
+    let enc_ciphertext: [u8; TX1_ENC_CIPHERTEXT_LEN] =
+        effects[161..741].try_into().map_err(|_| invalid())?;
+    #[cfg(feature = "lrz")]
+    let enc_ciphertext =
+        voting_crypto_deps::zcash_note_encryption::note_bytes::NoteBytesData(enc_ciphertext);
     let action = Action::from_parts(
         Option::from(Nullifier::from_bytes(&field(33))).ok_or_else(invalid)?,
         VerificationKey::try_from(field(65)).map_err(|_| invalid())?,
         Option::from(ExtractedNoteCommitment::from_bytes(&field(97))).ok_or_else(invalid)?,
         TransmittedNoteCiphertext {
             epk_bytes: field(129),
-            enc_ciphertext: voting_crypto_deps::zcash_note_encryption::note_bytes::NoteBytesData(
-                effects[161..741].try_into().map_err(|_| invalid())?,
-            ),
+            enc_ciphertext,
             out_ciphertext: effects[741..821].try_into().map_err(|_| invalid())?,
         },
         Option::from(ValueCommitment::from_bytes(&field(1))).ok_or_else(invalid)?,

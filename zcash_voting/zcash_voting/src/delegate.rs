@@ -802,6 +802,7 @@ where
         session_json,
         observations,
     )?;
+    observations.bind_round_id(&lwd.round_params.vote_round_id);
     let DelegationLwdInputs {
         round_params,
         resolved_round_name,

@@ -84,7 +84,17 @@ fn no_query_treats_a_transaction_hash_as_the_only_proof_a_vote_finished() {
             let lines: Vec<&str> = contents.lines().collect();
             for (index, line) in lines.iter().enumerate() {
                 let asks_about_a_vote_hash =
-                    line.contains("tx_hash IS NOT NULL") || line.contains("tx_hash IS NULL");
+                    ["tx_hash IS NOT NULL", "tx_hash IS NULL"]
+                        .iter()
+                        .any(|predicate| {
+                            line.match_indices(predicate).any(|(offset, _)| {
+                                offset == 0
+                                    || !matches!(
+                                        line.as_bytes()[offset - 1],
+                                        b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
+                                    )
+                            })
+                        });
                 // Delegation submissions are a separate column with their own
                 // lifecycle; this rule is about votes.
                 if !asks_about_a_vote_hash || line.contains("delegation_tx_hash") {
@@ -99,6 +109,15 @@ fn no_query_treats_a_transaction_hash_as_the_only_proof_a_vote_finished() {
                 let guards_its_own_write = line.contains("tx_hash = :tx_hash")
                     && window.iter().any(|nearby| nearby.contains("SET tx_hash"));
                 if guards_its_own_write {
+                    continue;
+                }
+                // These statements enumerate hash-bearing evidence for
+                // migration or integrity checks; neither decides completion.
+                let collects_hash_evidence = window.iter().any(|nearby| {
+                    nearby.contains("INSERT INTO legacy_vote_evidence")
+                        || nearby.contains("SELECT bundle_index,proposal_id,tx_hash FROM votes")
+                });
+                if collects_hash_evidence {
                     continue;
                 }
                 let considers_the_second_witness = window.iter().any(|nearby| {

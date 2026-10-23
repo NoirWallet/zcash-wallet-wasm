@@ -1008,11 +1008,6 @@ fn validate_dynamic_config(
     validate_endpoints(&config.vote_servers, "vote_servers")?;
     validate_endpoints(&config.pir_endpoints, "pir_endpoints")?;
     validate_pir_layout(config.pir_layout)?;
-    for round_id in config.rounds.keys() {
-        validate_vote_round_id_hex(round_id).map_err(|e| VotingConfigError::DecodeFailed {
-            message: format!("invalid rounds key: {e}"),
-        })?;
-    }
     require_supported(
         "vote_server",
         &config.supported_versions.vote_server,
@@ -1112,14 +1107,14 @@ fn verify_round_entry(
     trusted_keys: &[TrustedKey],
     pir_layout: PirLayout,
 ) -> bool {
-    if entry.auth_version != ROUND_AUTH_VERSION_V2
+    if validate_vote_round_id_hex(round_id).is_err()
+        || entry.auth_version != ROUND_AUTH_VERSION_V2
         || entry.ea_pk.len() != 32
         || entry.signatures.is_empty()
     {
         return false;
     }
-    // Round keys are hex-validated during dynamic-config validation, but decode
-    // defensively: an undecodable round id can never authenticate.
+    // An invalid round ID is skipped without invalidating other signed rounds.
     let Ok(round_id_bytes) = hex::decode(round_id) else {
         return false;
     };
@@ -1947,6 +1942,28 @@ mod tests {
             }]
         );
         assert_eq!(resolved.skipped_round_ids, vec![ROUND_ID_2.to_string()]);
+    }
+
+    #[test]
+    fn dynamic_resolution_skips_invalid_round_ids_without_rejecting_valid_rounds() {
+        const INVALID_FIELD_ID: &str =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let signing_key = SigningKey::from_bytes(&[3u8; 32]);
+        let mut dynamic: serde_json::Value =
+            serde_json::from_slice(&dynamic_bytes(&signing_key)).unwrap();
+        let entry = dynamic["rounds"][ROUND_ID].clone();
+        dynamic["rounds"][INVALID_FIELD_ID] = entry.clone();
+        dynamic["rounds"]["malformed"] = entry;
+
+        let resolved =
+            resolve_test_dynamic(&signing_key, &serde_json::to_vec(&dynamic).unwrap()).unwrap();
+
+        assert_eq!(resolved.authenticated_rounds.len(), 1);
+        assert_eq!(resolved.authenticated_rounds[0].round_id, ROUND_ID);
+        assert_eq!(
+            resolved.skipped_round_ids,
+            vec![INVALID_FIELD_ID.to_string(), "malformed".to_string()]
+        );
     }
 
     #[test]

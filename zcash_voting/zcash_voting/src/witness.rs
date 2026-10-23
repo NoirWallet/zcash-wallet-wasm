@@ -573,6 +573,7 @@ mod tests {
     use pasta_curves::pallas;
     use voting_crypto_deps::incrementalmerkletree::frontier::{CommitmentTree, Frontier};
     use voting_crypto_deps::incrementalmerkletree::Retention;
+    use voting_crypto_deps::zip32::{AccountId, Scope};
     use zcash_client_backend::data_api::WalletCommitmentTrees;
     use zcash_client_backend::proto::service::TreeState;
     use zcash_client_sqlite::util::SystemClock;
@@ -662,7 +663,7 @@ mod tests {
         let ufvk = crate::backend::zcash_keys::keys::UnifiedSpendingKey::from_seed(
             &VotingNetwork::Regtest,
             &[17; 32],
-            zip32::AccountId::ZERO,
+            AccountId::ZERO,
         )
         .unwrap()
         .to_unified_full_viewing_key();
@@ -672,9 +673,7 @@ mod tests {
             .find_map(|b| orchard::note::RandomSeed::from_bytes([b; 32], &rho).into_option())
             .unwrap();
         let note = orchard::Note::from_parts(
-            ufvk.orchard()
-                .unwrap()
-                .address_at(0u32, zip32::Scope::External),
+            ufvk.orchard().unwrap().address_at(0u32, Scope::External),
             orchard::value::NoteValue::from_raw(1),
             rho,
             rseed,
@@ -684,7 +683,7 @@ mod tests {
         NoteInfo::from_orchard_note(
             &note,
             position,
-            zip32::Scope::External,
+            Scope::External,
             &ufvk,
             &VotingNetwork::Regtest,
         )

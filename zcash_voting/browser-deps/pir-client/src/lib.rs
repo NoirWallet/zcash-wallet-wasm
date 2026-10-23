@@ -278,72 +278,87 @@ impl PirClient {
             root_info.pir_layout.pir_depth
         );
 
-        let (tier0_resp, tier1_resp) =
-            futures::try_join!(transport.get(&tier0_url), transport.get(&tier1_url))
-                .context("connect data fetch failed")?;
-        let tier1_scenario: YpirScenario =
-            serde_json::from_slice(&body_for_status(tier1_resp, "GET /params/tier1 failed")?)
-                .context("parse /params/tier1 response")?;
-        anyhow::ensure!(
-            tier1_scenario.poly_len == expected_layout.poly_len,
-            "PIR poly_len mismatch: expected {}, server advertised {}",
-            expected_layout.poly_len,
-            tier1_scenario.poly_len
-        );
-
-        let (layout_rows, _layout_leaves, layout_row_bytes) = tier1_geometry(root_info.pir_layout)?;
-        let scenario_item_bits = root_info
-            .tier1_row_bytes
-            .checked_mul(8)
-            .context("server Tier 1 row width overflows bit size")?;
-        anyhow::ensure!(
-            layout_rows == root_info.tier1_rows
-                && layout_row_bytes == root_info.tier1_row_bytes
-                && tier1_scenario.num_items == root_info.tier1_rows
-                && tier1_scenario.item_size_bits == scenario_item_bits
-                && layout_rows >= YPIR_MIN_ROWS
-                && scenario_item_bits >= YPIR_MIN_ITEM_BITS,
-            "server Tier 1 shape mismatch: layout implies {}x{} bytes, /root reports {}x{} bytes, and /params reports {} items x {} bits",
-            layout_rows,
-            layout_row_bytes,
-            root_info.tier1_rows,
-            root_info.tier1_row_bytes,
-            tier1_scenario.num_items,
-            tier1_scenario.item_size_bits
-        );
-
-        let expected_tier0_bytes = root_info
-            .pir_layout
-            .tier0_bytes()
-            .map_err(anyhow::Error::msg)?;
-        let tier0_bytes = body_for_status(tier0_resp, "GET /tier0 failed")?;
-        log::debug!(
-            "Downloaded Tier 0: {} bytes in {:.1}s",
-            tier0_bytes.len(),
-            t0.elapsed().as_secs_f64()
-        );
-        anyhow::ensure!(
-            tier0_bytes.len() == expected_tier0_bytes,
-            "Tier 0 size mismatch: got {} bytes, layout expects {}",
-            tier0_bytes.len(),
-            expected_tier0_bytes
-        );
-        let tier0 = Tier0Data::from_layout(tier0_bytes.to_vec(), root_info.pir_layout)?;
-
-        let pir_root_bytes = hex::decode(&root_info.pir_root)?;
-        anyhow::ensure!(
-            pir_root_bytes.len() == 32,
-            "pir_root hex decoded to {} bytes, expected 32",
-            pir_root_bytes.len()
-        );
-        let mut pir_root_arr = [0u8; 32];
-        pir_root_arr.copy_from_slice(&pir_root_bytes);
-        let pir_root = Option::from(Fp::from_repr(pir_root_arr))
-            .ok_or_else(|| anyhow::anyhow!("invalid pir_root field element"))?;
-        anyhow::ensure!(
-            tier0.root() == pir_root,
-            "Tier 0 root does not match server pir_root"
-        );
+        // Wait for both public assets before deciding whether endpoint fallback
+        // is allowed: malformed data must outrank a retryable sibling failure.
+        let (tier0_response, tier1_response) =
+            futures::join!(transport.get(&tier0_url), transport.get(&tier1_url));
+        let tier1_result = (|| -> Result<(YpirScenario, usize)> {
+            let tier1_response = tier1_response.context("connect data fetch failed")?;
+            let tier1_scenario: YpirScenario = serde_json::from_slice(&body_for_status(
+                tier1_response,
+                "GET /params/tier1 failed",
+            )?)
+            .context("parse /params/tier1 response")?;
+            anyhow::ensure!(
+                tier1_scenario.poly_len == expected_layout.poly_len,
+                "PIR poly_len mismatch: expected {}, server advertised {}",
+                expected_layout.poly_len,
+                tier1_scenario.poly_len
+            );
+            let (layout_rows, _layout_leaves, layout_row_bytes) =
+                tier1_geometry(root_info.pir_layout)?;
+            let scenario_item_bits = root_info
+                .tier1_row_bytes
+                .checked_mul(8)
+                .context("server Tier 1 row width overflows bit size")?;
+            anyhow::ensure!(
+                layout_rows == root_info.tier1_rows
+                    && layout_row_bytes == root_info.tier1_row_bytes
+                    && tier1_scenario.num_items == root_info.tier1_rows
+                    && tier1_scenario.item_size_bits == scenario_item_bits
+                    && layout_rows >= YPIR_MIN_ROWS
+                    && scenario_item_bits >= YPIR_MIN_ITEM_BITS,
+                "server Tier 1 shape mismatch: layout implies {}x{} bytes, /root reports {}x{} bytes, and /params reports {} items x {} bits",
+                layout_rows,
+                layout_row_bytes,
+                root_info.tier1_rows,
+                root_info.tier1_row_bytes,
+                tier1_scenario.num_items,
+                tier1_scenario.item_size_bits
+            );
+            Ok((tier1_scenario, layout_row_bytes))
+        })();
+        let tier0_result = (|| -> Result<Tier0Data> {
+            let tier0_response = tier0_response.context("connect data fetch failed")?;
+            let expected_tier0_bytes = root_info
+                .pir_layout
+                .tier0_bytes()
+                .map_err(anyhow::Error::msg)?;
+            let tier0_bytes = body_for_status(tier0_response, "GET /tier0 failed")?;
+            log::debug!(
+                "Downloaded Tier 0: {} bytes in {:.1}s",
+                tier0_bytes.len(),
+                t0.elapsed().as_secs_f64()
+            );
+            anyhow::ensure!(
+                tier0_bytes.len() == expected_tier0_bytes,
+                "Tier 0 size mismatch: got {} bytes, layout expects {}",
+                tier0_bytes.len(),
+                expected_tier0_bytes
+            );
+            let tier0 = Tier0Data::from_layout(tier0_bytes, root_info.pir_layout)?;
+            let pir_root_bytes = hex::decode(&root_info.pir_root)?;
+            anyhow::ensure!(
+                pir_root_bytes.len() == 32,
+                "pir_root hex decoded to {} bytes, expected 32",
+                pir_root_bytes.len()
+            );
+            let mut pir_root_arr = [0u8; 32];
+            pir_root_arr.copy_from_slice(&pir_root_bytes);
+            let pir_root = Option::from(Fp::from_repr(pir_root_arr))
+                .ok_or_else(|| anyhow::anyhow!("invalid pir_root field element"))?;
+            anyhow::ensure!(
+                tier0.root() == pir_root,
+                "Tier 0 root does not match server pir_root"
+            );
+            Ok(tier0)
+        })();
+        let (tier0, (tier1_scenario, layout_row_bytes)) = match (tier0_result, tier1_result) {
+            (Err(error), _) if !error.is::<RetryableTransportError>() => return Err(error),
+            (_, Err(error)) if !error.is::<RetryableTransportError>() => return Err(error),
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+            (Ok(tier0), Ok(tier1)) => (tier0, tier1),
+        };
 
         let circuit_root_bytes = hex::decode(&root_info.circuit_root)?;
         anyhow::ensure!(

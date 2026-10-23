@@ -594,6 +594,9 @@ pub(crate) async fn observe_confirm_pending_share(
     cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<ShareConfirmationReport, VotingError> {
     let observations = client.observation_scope();
+    let observations = ConfiguredHelperFleet::new(params.configured_server_urls)
+        .map(|fleet| observations.with_helper_fleet(fleet.urls()))
+        .unwrap_or(observations);
     observations.bind_round_id(params.round_id);
     let attributed = observations.attributed(crate::ObservationAttribution {
         bundle_index: Some(params.share.bundle_index),
@@ -853,6 +856,9 @@ pub(crate) async fn observe_track_pending_shares(
     cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<ShareTrackingReport, VotingError> {
     let observations = client.observation_scope();
+    let observations = ConfiguredHelperFleet::new(params.configured_server_urls)
+        .map(|fleet| observations.with_helper_fleet(fleet.urls()))
+        .unwrap_or(observations);
     observations.bind_round_id(params.round_id);
     let stage = observations.stage("helper::track_pending_shares");
     let observed_client = client.observing(stage.scope());
