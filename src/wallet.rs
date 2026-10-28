@@ -390,6 +390,50 @@ where
     }
 }
 
+async fn get_from_zero_indexers_with_fallback<ZF, ZFut, LF, LFut>(
+    endpoint_count: usize,
+    filter: service::TxFilter,
+    request_timeout: Duration,
+    mut get_from_zero_indexer: ZF,
+    get_from_lightwalletd: LF,
+) -> Result<service::RawTransaction, tonic::Status>
+where
+    ZF: FnMut(usize, service::TxFilter) -> ZFut,
+    ZFut: Future<Output = Result<service::RawTransaction, tonic::Status>>,
+    LF: FnOnce(service::TxFilter) -> LFut,
+    LFut: Future<Output = Result<service::RawTransaction, tonic::Status>>,
+{
+    for index in 0..endpoint_count {
+        match tokio_with_wasm::alias::time::timeout(
+            request_timeout,
+            get_from_zero_indexer(index, filter.clone()),
+        )
+        .await
+        {
+            Ok(Ok(transaction)) => return Ok(transaction),
+            Ok(Err(status)) if status.code() == tonic::Code::NotFound => {
+                tracing::debug!(
+                    "zero-indexer endpoint {} has not indexed transaction",
+                    index + 1
+                );
+            }
+            Ok(Err(status)) => {
+                tracing::warn!(
+                    "zero-indexer endpoint {} GetTransaction failed: {status}",
+                    index + 1
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "zero-indexer endpoint {} GetTransaction timed out",
+                    index + 1
+                );
+            }
+        }
+    }
+    get_from_lightwalletd(filter).await
+}
+
 async fn submit_transfer_transactions_with<F, Fut>(
     transactions: NonEmpty<TransactionToSubmit>,
     mut submit: F,
@@ -1230,6 +1274,43 @@ where
         Ok(db)
     }
 
+    async fn get_transaction_with_fallback(
+        &self,
+        filter: service::TxFilter,
+        prefer_zero_indexer: bool,
+    ) -> Result<service::RawTransaction, tonic::Status> {
+        let mut lightwalletd = self.client.clone();
+        if prefer_zero_indexer && !self.zero_indexer_clients.is_empty() {
+            let clients = self.zero_indexer_clients.clone();
+            get_from_zero_indexers_with_fallback(
+                clients.len(),
+                filter,
+                self.zero_indexer_send_timeout,
+                move |index, filter| {
+                    let mut client = clients[index].clone();
+                    async move {
+                        client
+                            .get_transaction(filter)
+                            .await
+                            .map(tonic::Response::into_inner)
+                    }
+                },
+                |filter| async move {
+                    lightwalletd
+                        .get_transaction(filter)
+                        .await
+                        .map(tonic::Response::into_inner)
+                },
+            )
+            .await
+        } else {
+            lightwalletd
+                .get_transaction(filter)
+                .await
+                .map(tonic::Response::into_inner)
+        }
+    }
+
     pub(crate) async fn process_pending_transaction_requests(&self) -> Result<(), Error>
     where
         W: WalletChainRevision,
@@ -1259,16 +1340,25 @@ where
 
         let mut client = self.client.clone();
         for (requested_txid, needs_enhancement) in transaction_requests {
-            let response = client
-                .get_transaction(service::TxFilter {
-                    block: None,
-                    index: 0,
-                    hash: requested_txid.as_ref().to_vec(),
-                })
+            let prefer_zero_indexer = if needs_enhancement {
+                false
+            } else {
+                let db = self.db.read().await;
+                matches!(db.get_transaction(requested_txid), Ok(Some(tx)) if requires_zero_indexer(&tx))
+            };
+            let response = self
+                .get_transaction_with_fallback(
+                    service::TxFilter {
+                        block: None,
+                        index: 0,
+                        hash: requested_txid.as_ref().to_vec(),
+                    },
+                    prefer_zero_indexer,
+                )
                 .await;
             let mut db = self.checked_history_write(&revision).await?;
             let raw = match response {
-                Ok(response) => response.into_inner(),
+                Ok(raw) => raw,
                 Err(status) if !needs_enhancement && status.code() == tonic::Code::NotFound => {
                     db.set_transaction_status(
                         requested_txid,
@@ -3741,11 +3831,11 @@ mod tests {
     use super::{
         OvkPolicy, TransferEstimate, TransferFundingSource, TransferOverallStatus,
         TransferSubmissionStatus, UnifiedSpendingKey, allow_exact_send_max_fallback,
-        dynamic_zip317_fee_rule, hardware_orchard_ovk_policy, orchard_circuit_version_for_branch,
-        submit_to_first_accepting_endpoint, submit_to_zero_indexers_with_fallback,
-        submit_transfer_transactions_with, transaction_request_is_due,
-        transaction_status_from_raw_height, transfer_expiry_height, transfer_policies,
-        usk_from_seed_str, validate_expiry_delta_blocks,
+        dynamic_zip317_fee_rule, get_from_zero_indexers_with_fallback, hardware_orchard_ovk_policy,
+        orchard_circuit_version_for_branch, submit_to_first_accepting_endpoint,
+        submit_to_zero_indexers_with_fallback, submit_transfer_transactions_with,
+        transaction_request_is_due, transaction_status_from_raw_height, transfer_expiry_height,
+        transfer_policies, usk_from_seed_str, validate_expiry_delta_blocks,
     };
     use crate::Network;
     use nonempty::NonEmpty;
@@ -3816,6 +3906,79 @@ mod tests {
         )
         .unwrap();
         assert!(!super::requires_zero_indexer(&parsed_transparent));
+    }
+
+    #[test]
+    fn orchard_status_request_survives_wallet_restore() {
+        use zcash_client_backend::data_api::{
+            SentTransaction, TransactionDataRequest, WalletRead, WalletWrite,
+        };
+
+        let network = Network::MainNetwork;
+        let orchard_bytes = hex::decode(include_str!("wallet/zip244_orchard.hex").trim()).unwrap();
+        let vector = super::Transaction::read(
+            orchard_bytes.as_slice(),
+            zcash_protocol::consensus::BranchId::Nu5,
+        )
+        .unwrap();
+        let tx = zcash_primitives::transaction::TransactionData::from_parts(
+            super::TxVersion::V5,
+            zcash_protocol::consensus::BranchId::Nu5,
+            0,
+            vector.expiry_height(),
+            None,
+            None,
+            None,
+            vector.orchard_bundle().cloned(),
+        )
+        .freeze()
+        .unwrap();
+        let mut db = super::MemoryWalletDb::new(network, 100);
+        db.store_transactions_to_be_sent(&[SentTransaction::new(
+            &tx,
+            time::OffsetDateTime::now_utc(),
+            TargetHeight::from(BlockHeight::from_u32(2_000_000)),
+            Default::default(),
+            &[],
+            Zatoshis::ZERO,
+            &[],
+        )])
+        .unwrap();
+
+        let mut bytes = Vec::new();
+        db.encode(&mut bytes).unwrap();
+        let restored = super::MemoryWalletDb::decode_new(bytes.as_slice(), network, 100).unwrap();
+        assert!(
+            restored
+                .transaction_data_requests()
+                .unwrap()
+                .contains(&TransactionDataRequest::GetStatus(tx.txid()))
+        );
+        assert!(super::requires_zero_indexer(
+            &restored.get_transaction(tx.txid()).unwrap().unwrap()
+        ));
+
+        let mut old_snapshot =
+            <zcash_client_memory::proto::memwallet::MemoryWallet as prost::Message>::decode(
+                bytes.as_slice(),
+            )
+            .unwrap();
+        old_snapshot.transaction_data_requests.clear();
+        let restored_legacy = super::MemoryWalletDb::decode_new(
+            <zcash_client_memory::proto::memwallet::MemoryWallet as prost::Message>::encode_to_vec(
+                &old_snapshot,
+            )
+            .as_slice(),
+            network,
+            100,
+        )
+        .unwrap();
+        assert!(
+            restored_legacy
+                .transaction_data_requests()
+                .unwrap()
+                .contains(&TransactionDataRequest::GetStatus(tx.txid()))
+        );
     }
 
     #[tokio::test]
@@ -4019,6 +4182,86 @@ mod tests {
             .unwrap();
         assert_eq!(response.error_code, 0);
         assert_eq!(attempts, vec![(0, vec![42]), (1, vec![42]), (2, vec![42])]);
+    }
+
+    #[tokio::test]
+    async fn get_transaction_uses_next_zero_indexer_after_not_found() {
+        let filter = service::TxFilter {
+            hash: txid(3).as_ref().to_vec(),
+            ..Default::default()
+        };
+        let mut attempts = Vec::new();
+        let mut fallback_called = false;
+        let raw = get_from_zero_indexers_with_fallback(
+            2,
+            filter.clone(),
+            Duration::from_secs(1),
+            |index, candidate| {
+                attempts.push((index, candidate.hash));
+                async move {
+                    if index == 0 {
+                        Err(tonic::Status::not_found("not indexed"))
+                    } else {
+                        Ok(service::RawTransaction {
+                            data: vec![3],
+                            ..Default::default()
+                        })
+                    }
+                }
+            },
+            |_| {
+                fallback_called = true;
+                async { Err(tonic::Status::internal("unexpected fallback")) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(raw.data, vec![3]);
+        assert_eq!(attempts, vec![(0, filter.hash.clone()), (1, filter.hash)]);
+        assert!(!fallback_called);
+    }
+
+    #[tokio::test]
+    async fn get_transaction_falls_back_after_zero_indexer_timeout_and_error() {
+        let filter = service::TxFilter {
+            hash: txid(4).as_ref().to_vec(),
+            ..Default::default()
+        };
+        let attempts = std::cell::RefCell::new(Vec::new());
+        let raw = get_from_zero_indexers_with_fallback(
+            2,
+            filter.clone(),
+            Duration::from_millis(1),
+            |index, candidate| {
+                attempts.borrow_mut().push((index, candidate.hash));
+                async move {
+                    if index == 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    Err(tonic::Status::unavailable("offline"))
+                }
+            },
+            |candidate| {
+                attempts.borrow_mut().push((2, candidate.hash));
+                async {
+                    Ok(service::RawTransaction {
+                        data: vec![4],
+                        ..Default::default()
+                    })
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(raw.data, vec![4]);
+        assert_eq!(
+            attempts.into_inner(),
+            vec![
+                (0, filter.hash.clone()),
+                (1, filter.hash.clone()),
+                (2, filter.hash)
+            ]
+        );
     }
 
     #[tokio::test]

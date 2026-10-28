@@ -1537,10 +1537,9 @@ Instead derive the ufvk in the calling code and import it using `import_account_
                 }
             }
 
-            // Add the transaction to the set to be queried for transaction status. This is only necessary
-            // at present for fully transparent transactions, because any transaction with a shielded
-            // component will be detected via ordinary chain scanning and/or nullifier checking.
-            if !detectable_via_scanning {
+            // Orchard transactions may be broadcast through zero-indexer before the
+            // ordinary chain scanner sees them, so query their status as well.
+            if !detectable_via_scanning || sent_tx.tx().orchard_bundle().is_some() {
                 self.transaction_data_request_queue
                     .queue_status_retrieval(&sent_tx.tx().txid());
             }
