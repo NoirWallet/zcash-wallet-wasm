@@ -295,6 +295,10 @@ impl PartialEq for Account {
 }
 
 impl Account {
+    pub(crate) fn set_name(&mut self, name: &str) {
+        self.account_name = name.to_owned();
+    }
+
     pub(crate) fn new(
         account_name: String,
         account_id: AccountId,

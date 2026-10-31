@@ -1,10 +1,10 @@
 # Valar Voting Upstream
 
 - Repository: https://github.com/valargroup/zcash_voting
-- Tag: `v5.2.0-rc.2`
-- Commit: `e7b9a6b62539319fcd82c17f6f6babb9ff7e78dc`
-- Crate: `zcash_voting` `5.2.0-rc.2`
-- Imported: 2026-10-22
+- Tag: `v5.2.0`
+- Commit: `340c34c47c1230fa2cca37ab2f38fd801db32d0a`
+- Crate: `zcash_voting` `5.2.0`
+- Imported: 2026-10-31
 - Wallet integration backend: `lrz`, with `browser`; never `zakura`.
 
 This directory contains the complete workspace from that tag, merged with the
@@ -19,8 +19,8 @@ documentation, and release tooling are retained.
 - Voting schema v25 merges upstream v18-v24 with the earlier browser v18-v22
   journals. Legacy submission evidence is captured during migration so old
   accepted transactions resume by status lookup without a duplicate POST.
-- NU7 Testnet is accepted for Ironwood V3 voting notes at the network's
-  activation height; older snapshots retain their prior branch behavior.
+- NU7 Testnet and Mainnet are accepted for Ironwood V3 voting notes at their
+  activation heights; TX1 effects v1 remains signed under NU6.3.
 - The root wallet supplies the browser session driver, durable checkpoints,
   external signing, and compatibility wrappers for its existing public API.
 
@@ -28,6 +28,8 @@ documentation, and release tooling are retained.
 
 The sections below document the earlier 3.1.0-rc.15 browser fork. Version and
 schema numbers there describe that prior import, not the current upstream tag.
+References below to testnet-only PIR and a snapshot-derived TX1 branch ID are
+historical; the current behavior is described under Current local compatibility.
 
 ## Local Compatibility Patches
 

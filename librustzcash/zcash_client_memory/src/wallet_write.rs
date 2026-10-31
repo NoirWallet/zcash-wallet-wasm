@@ -131,6 +131,14 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         todo!("remove all transactions associated with the account")
     }
 
+    fn set_account_name(&mut self, account: AccountId, name: &str) -> Result<(), Error> {
+        self.accounts
+            .get_mut(account)
+            .ok_or(Error::AccountUnknown(account))?
+            .set_name(name);
+        Ok(())
+    }
+
     fn get_next_available_address(
         &mut self,
         account: AccountId,

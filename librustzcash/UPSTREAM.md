@@ -1,9 +1,9 @@
 # Upstream Source
 
 - Repository: https://github.com/zcash/librustzcash
-- Tag: `zcash_client_backend-0.25.0-pre.2`
-- Commit: 9751317da1ff2e9613318f71353989d3f1b7f650
-- Imported: 2026-10-22
+- Release: `zcash_client_backend 0.25.0` (release commit; no final tag found)
+- Commit: 08d86a53156f3cc6a59c486b9760932110ecbf07
+- Imported: 2026-10-31
 
 ## Local patches
 

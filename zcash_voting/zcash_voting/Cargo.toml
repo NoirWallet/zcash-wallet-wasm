@@ -1,6 +1,6 @@
 [package]
 name = "zcash_voting"
-version = "5.2.0-rc.2"
+version = "5.2.0"
 edition = "2021"
 rust-version = "1.97"
 description = "Client-side library for Zcash shielded voting: ZKP delegation and vote-commitment proofs (Halo 2), ElGamal encryption, governance PCZT construction, Merkle witness generation, and SQLite round-state persistence."
@@ -16,7 +16,6 @@ lrz = [
     "voting-circuits/lrz",
     "pir-client/upstream",
     "pir-types/upstream",
-    "imt-tree/upstream",
     "vote-commitment-tree/lrz",
     "vote-commitment-tree-client/lrz",
     "zakura-wallet-lib/lrz",
@@ -27,7 +26,6 @@ zakura = [
     "voting-circuits/default",
     "pir-client/zakura",
     "pir-types/zakura",
-    "imt-tree/zakura",
     "vote-commitment-tree/zakura",
     "vote-commitment-tree-client/zakura",
     "zakura-wallet-lib/zakura",
@@ -57,16 +55,15 @@ ed25519-dalek = "2"
 
 pir-client = { path = "../browser-deps/pir-client", version = "=0.9.0", default-features = false }
 pir-types = { version = "=0.8.0", default-features = false }
-valar-spiral-rs = { version = "=0.5.3-rc.1", default-features = false }
+# Select the shared-Spiral release accepted by pir-client's broader range.
 valar-ypir = { version = "=0.2.1", default-features = false }
-imt-tree = { version = "=0.7.0", default-features = false }
 
 bytes = "1"
 http = "1"
 http-body-util = "0.1"
 
-vote-commitment-tree = { path = "../vote-commitment-tree", version = "=0.8.0", default-features = false }
-vote-commitment-tree-client = { path = "../vote-commitment-tree-client", version = "=0.10.0", default-features = false, features = ["http"] }
+vote-commitment-tree = { path = "../vote-commitment-tree", version = "=0.8.1", default-features = false }
+vote-commitment-tree-client = { path = "../vote-commitment-tree-client", version = "=0.10.1", default-features = false, features = ["http"] }
 
 
 anyhow = "1"
@@ -84,14 +81,14 @@ uuid = "1.23.1"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 zakura-wallet-lib = { version = "=0.1.0-rc9.2", default-features = false }
 # Keep SQLite's cfg-gated WalletRead contract aligned with wallet integrations.
-zcash_client_sqlite = { version = "0.23.0-pre.1", optional = true, default-features = false, features = ["transparent-inputs"] }
+zcash_client_sqlite = { version = "0.23.0-pre.2", optional = true, default-features = false, features = ["transparent-inputs"] }
 hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "webpki-roots"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 tower-service = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
-tonic = { version = "0.14", features = ["channel", "tls-webpki-roots", "tls-ring"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen", "channel", "tls-webpki-roots", "tls-ring"] }
 rusqlite = { version = "=0.37.0", features = ["bundled", "serialize", "backup"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -102,10 +99,10 @@ getrandom = { version = "0.2", features = ["js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 rusqlite-browser = { package = "rusqlite", path = "../browser-deps/rusqlite", version = "=0.40.2", default-features = false, features = ["cache", "ffi-sqlite-wasm-rs", "serialize", "fallible_uint"] }
 sqlite-wasm-rs = { version = "=0.5.5", default-features = false }
-zcash_client_backend = { version = "0.25.0-pre.2", default-features = false, features = ["orchard", "lightwalletd-tonic"] }
-zcash_keys = { version = "0.17.0-pre.2", default-features = false, features = ["orchard"] }
-zcash_primitives = { version = "0.31.0-pre.2", default-features = false }
-pczt = { version = "0.10.0-pre.2", default-features = false, features = ["orchard", "io-finalizer", "signer", "zcp-builder"] }
+zcash_client_backend = { version = "0.25.0", default-features = false, features = ["orchard", "lightwalletd-tonic"] }
+zcash_keys = { version = "0.17.0", default-features = false, features = ["orchard"] }
+zcash_primitives = { version = "0.31.0", default-features = false }
+pczt = { version = "0.10.0", default-features = false, features = ["orchard", "io-finalizer", "signer", "zcp-builder"] }
 orchard = { version = "0.16", default-features = false, features = ["circuit", "unstable-voting-circuits"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]

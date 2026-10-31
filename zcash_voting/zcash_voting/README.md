@@ -15,8 +15,8 @@ Import `zcash_voting::prelude::*` and use the SDK-owned lifecycle:
 
 1. Open a wallet-scoped sidecar with `VotingDb::open_wallet_sidecar` and persist
    bundle setup through `DelegationPipeline::setup_bundles` or the round APIs.
-   Snapshot selection is Ironwood / NU6.3-only. Bundle policy is persisted per
-   round; its default includes privacy trimming. Use
+   Snapshot selection supports Ironwood notes on NU6.3 and NU7. Bundle policy
+   is persisted per round; its default includes privacy trimming. Use
    `recoverable_bundle_policy_v1()` when reproducible bundle reconstruction is
    required, and preserve the existing sidecar and voting hotkey secret.
 2. Bind a `RoundExecutor` to the round, network, authenticated proposal roster,
@@ -402,8 +402,8 @@ metadata. The selected wallet facade release is `zakura-wallet-lib 0.1.0-rc9.2`.
 This release requires Rust 1.97 or newer.
 
 The default backend uses Zakura Common 4.0.0, `voting-circuits 0.14.0`,
-`voting-crypto-deps 0.4.0`, `vote-commitment-tree 0.8.0`, and
-`vote-commitment-tree-client 0.10.0`. The alternate backend selects upstream
+`voting-crypto-deps 0.4.0`, `vote-commitment-tree 0.8.1`, and
+`vote-commitment-tree-client 0.10.1`. The alternate backend selects upstream
 `orchard 0.16` and matching wallet prereleases through the same facade.
 See the [5.2 migration guide](../docs/migrating-to-common-v3.md) for the complete
 coordinated dependency matrix and type-boundary guidance.

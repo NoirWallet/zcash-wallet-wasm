@@ -72,15 +72,21 @@ async fn connect_snapshot(
     root: &[u8],
     height: u64,
 ) -> anyhow::Result<PirClient> {
-    if network != crate::Network::Testnet || root.len() != 32 || height == 0 {
+    if root.len() != 32 || height == 0 {
         return Err(snapshot_identity_error().into());
     }
+    let expected_network = match network {
+        crate::Network::Mainnet => pir_types::ZcashNetwork::Main,
+        crate::Network::Testnet => pir_types::ZcashNetwork::Test,
+        crate::Network::Regtest => return Err(snapshot_identity_error().into()),
+    };
     let endpoint = normalize_endpoint_url(endpoint);
     anyhow::ensure!(!endpoint.is_empty(), "PIR endpoint missing");
     let negotiated = negotiated_pir_layout(layout)?;
     let bound = SnapshotTransport {
         inner: transport,
         root_url: format!("{endpoint}/root"),
+        expected_network,
         layout: negotiated,
         root: root.to_vec(),
         height,
@@ -223,6 +229,7 @@ fn verify_pir_batch(
 struct SnapshotTransport {
     inner: Arc<dyn Transport>,
     root_url: String,
+    expected_network: pir_types::ZcashNetwork,
     layout: NegotiatedPirLayout,
     root: Vec<u8>,
     height: u64,
@@ -238,7 +245,7 @@ impl Transport for SnapshotTransport {
                 let info: pir_types::RootInfo = serde_json::from_slice(&response.body)?;
                 anyhow::ensure!(
                     (200..300).contains(&response.status)
-                        && info.zcash_network == pir_types::ZcashNetwork::Test
+                        && info.zcash_network == self.expected_network
                         && pir_types::is_current_dataset(
                             &info.nullifier_pool,
                             info.dataset_version
@@ -781,6 +788,7 @@ fn failover_over<S, T>(
 mod tests {
     mod classification;
     mod fleet;
+    mod snapshot_network;
 
     use super::*;
     use crate::config::{
@@ -1206,24 +1214,37 @@ mod tests {
 
     impl RecordingTransport {
         fn matching_root() -> Self {
+            Self::matching_root_for(pir_types::ZcashNetwork::Test)
+        }
+
+        fn matching_root_for(network: pir_types::ZcashNetwork) -> Self {
             let transport = Self::default();
-            transport.insert_matching_assets(COMPILED_PIR_LAYOUT, DEFAULT_YPIR_POLY_LEN);
+            transport.insert_matching_assets(network, COMPILED_PIR_LAYOUT, DEFAULT_YPIR_POLY_LEN);
             transport
         }
 
         fn with_root_layout(layout: NegotiatedPirLayout) -> Self {
             let transport = Self::default();
-            transport.insert_matching_assets(layout, layout.poly_len);
+            transport.insert_matching_assets(
+                pir_types::ZcashNetwork::Test,
+                layout,
+                layout.poly_len,
+            );
             transport
         }
 
-        fn insert_matching_assets(&self, layout: NegotiatedPirLayout, poly_len: usize) {
+        fn insert_matching_assets(
+            &self,
+            network: pir_types::ZcashNetwork,
+            layout: NegotiatedPirLayout,
+            poly_len: usize,
+        ) {
             let rows = layout.tier1_rows().unwrap();
             let row_bytes = layout.tier1_row_bytes().unwrap();
             let item_bits = layout.tier1_item_bits().unwrap();
             let tier0_bytes = layout.tier0_bytes().unwrap();
             let root = RootInfo {
-                zcash_network: pir_types::ZcashNetwork::Test,
+                zcash_network: network,
                 nullifier_pool: NULLIFIER_POOL.to_owned(),
                 dataset_version: DATASET_VERSION,
                 circuit_root: hex::encode([0u8; 32]),

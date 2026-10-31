@@ -10,11 +10,38 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `WalletDb` implements
+  `zcash_client_backend::data_api::InputSource::get_change_receivers`, from the
+  items of the account's unified incoming viewing key.
+- `WalletDb` implements
+  `zcash_client_backend::data_api::WalletWrite::set_account_name`.
+
+### Changed
+- Migrated to `bip0039 0.14`, `schemerz 0.3`, `schemerz-rusqlite 0.371`.
+- MSRV is now 1.89
+- `WalletDb::check_witnesses` now requires `P: consensus::Parameters`.
+- A transaction whose expiry height the wallet does not know is now assumed to
+  expire after the default expiry delta for the mempool height at which the wallet
+  first observed it (120 blocks from NU7 activation onward), instead of after 40
+  blocks. This determines when the wallet stops counting such a transaction's
+  spends, and how long it keeps requesting the transaction's status. Without the
+  `spend-index` feature, the block range that the wallet requests when it searches
+  for a spend of a non-ephemeral transparent output likewise uses the default
+  expiry delta for the range's start height.
+- `WalletWrite::put_received_transparent_utxo` now records an unmined output as
+  first observed at the mempool height (the block after the chain tip), instead
+  of at the chain tip.
+- From NU7 activation, the wallet retains anchor checkpoints on the scaled ZIP 318
+  anchor grid (every 432 blocks rather than every 144).
+
+## [0.23.0-pre.2] - 2026-10-13
+
 ### Changed
 - Migrated to `pczt 0.10.0-pre.2`, `zcash_address 0.14.0-pre.2`,
   `zcash_client_backend 0.25.0-pre.2`, `zcash_keys 0.17.0-pre.2`,
-  `zcash_primitives 0.31.0-pre.2`, `zcash_protocol 0.11.0-pre.1`, and
-  `zcash_transparent 0.11.0-pre.2`.
+  `zcash_pool_migration 0.2.0-pre.2`, `zcash_primitives 0.31.0-pre.2`,
+  `zcash_protocol 0.11.0-pre.1`, and `zcash_transparent 0.11.0-pre.2`.
 - `WalletRead::list_addresses` now also returns the transparent receiver that
   the wallet tracks at the index of an exposed unified address that omits it,
   as an `Address::Transparent` entry with that diversifier index.

@@ -147,49 +147,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "axum"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
-dependencies = [
- "axum-core",
- "bytes",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "itoa",
- "matchit",
- "memchr",
- "mime",
- "percent-encoding",
- "pin-project-lite",
- "serde_core",
- "sync_wrapper",
- "tower",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
-name = "axum-core"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
-dependencies = [
- "bytes",
- "futures-core",
- "http",
- "http-body",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "sync_wrapper",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -679,11 +636,11 @@ dependencies = [
 
 [[package]]
 name = "daggy"
-version = "0.8.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70def8d72740e44d9f676d8dab2c933a236663d86dd24319b57a2bed4d694774"
+checksum = "804169db156b21258a2545757336922d93dfa229892c75911a0ad141aa0ff241"
 dependencies = [
- "petgraph 0.7.1",
+ "petgraph",
 ]
 
 [[package]]
@@ -1220,7 +1177,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "http",
- "indexmap 2.12.1",
+ "indexmap",
  "slab",
  "tokio",
  "tokio-util",
@@ -1274,19 +1231,13 @@ dependencies = [
  "ff",
  "group",
  "halo2_legacy_pdqsort",
- "indexmap 2.12.1",
+ "indexmap",
  "maybe-rayon",
  "pasta_curves",
  "rand 0.10.3",
  "rand_core 0.10.1",
  "tracing",
 ]
-
-[[package]]
-name = "hashbrown"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 
 [[package]]
 name = "hashbrown"
@@ -1424,12 +1375,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
-name = "httpdate"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1452,7 +1397,6 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
- "httpdate",
  "itoa",
  "pin-project-lite",
  "pin-utils",
@@ -1717,16 +1661,6 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "1.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
-dependencies = [
- "autocfg",
- "hashbrown 0.12.3",
-]
-
-[[package]]
-name = "indexmap"
 version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ad4bb2b565bca0645f4d68c5c9af97fba094e9791da685bf83cb5f3ce74acf2"
@@ -1895,12 +1829,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "matchit"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
-
-[[package]]
 name = "maybe-rayon"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1921,12 +1849,6 @@ name = "memuse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d97bbf43eb4f088f8ca469930cde17fa036207c9a5e02ccc5107c4e8b17c964"
-
-[[package]]
-name = "mime"
-version = "0.3.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minimal-lexical"
@@ -2161,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "pczt"
-version = "0.10.0-pre.2"
+version = "0.10.0"
 dependencies = [
  "blake2b_simd",
  "bls12_381",
@@ -2196,23 +2118,13 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "petgraph"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3672b37090dbd86368a4145bc067582552b29c27377cad4e0a306c97f9bd7772"
-dependencies = [
- "fixedbitset",
- "indexmap 2.12.1",
-]
-
-[[package]]
-name = "petgraph"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
 dependencies = [
  "fixedbitset",
  "hashbrown 0.15.5",
- "indexmap 2.12.1",
+ "indexmap",
 ]
 
 [[package]]
@@ -2410,7 +2322,7 @@ dependencies = [
  "itertools",
  "log",
  "multimap",
- "petgraph 0.8.3",
+ "petgraph",
  "prettyplease",
  "prost",
  "prost-types",
@@ -2878,22 +2790,22 @@ dependencies = [
 
 [[package]]
 name = "schemerz"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e82960ac11ccabd77d53c933532612079e01205b5873ec5095f4b3426493434"
+checksum = "85a66556ccb695e22d08620703a9526806e533de0094fe993896932592ba3a6c"
 dependencies = [
  "daggy",
- "indexmap 1.9.3",
+ "indexmap",
  "log",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "uuid",
 ]
 
 [[package]]
 name = "schemerz-rusqlite"
-version = "0.370.0"
+version = "0.371.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca6df8a13fb3b7914f94ac6579bd5e76b9292f135886e6becc3525f9e5116827"
+checksum = "c29c257d3233449db8224f7f0fcf51373b59755aec356d8648dc694804132d60"
 dependencies = [
  "rusqlite 0.37.0",
  "schemerz",
@@ -3480,10 +3392,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fec7c61a0695dc1887c1b53952990f3ad2e3a31453e1f49f10e75424943a93ec"
 dependencies = [
  "async-trait",
- "axum",
  "base64 0.22.1",
  "bytes",
- "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -3492,7 +3402,6 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "socket2",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -3585,7 +3494,7 @@ checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
 dependencies = [
  "futures-core",
  "futures-util",
- "indexmap 2.12.1",
+ "indexmap",
  "pin-project-lite",
  "slab",
  "sync_wrapper",
@@ -3867,20 +3776,17 @@ dependencies = [
 
 [[package]]
 name = "vote-commitment-tree"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
- "anyhow",
  "imt-tree",
  "incrementalmerkletree 0.8.2",
- "lazy_static",
- "libc",
  "shardtree 0.7.0",
  "voting-crypto-deps",
 ]
 
 [[package]]
 name = "vote-commitment-tree-client"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -4353,7 +4259,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_address"
-version = "0.14.0-pre.2"
+version = "0.14.0"
 dependencies = [
  "bech32 0.11.1",
  "bs58",
@@ -4365,7 +4271,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_client_backend"
-version = "0.25.0-pre.2"
+version = "0.25.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4459,7 +4365,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_client_sqlite"
-version = "0.23.0-pre.1"
+version = "0.23.0-pre.2"
 dependencies = [
  "bip32",
  "bitflags",
@@ -4514,7 +4420,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_keys"
-version = "0.17.0-pre.2"
+version = "0.17.0"
 dependencies = [
  "bech32 0.11.1",
  "bip32",
@@ -4555,7 +4461,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_pool_migration"
-version = "0.2.0-pre.1"
+version = "0.2.0-pre.2"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -4575,7 +4481,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_primitives"
-version = "0.31.0-pre.2"
+version = "0.31.0"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -4602,7 +4508,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_proofs"
-version = "0.31.0-pre.2"
+version = "0.31.0"
 dependencies = [
  "bellman",
  "blake2b_simd",
@@ -4621,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_protocol"
-version = "0.11.0-pre.1"
+version = "0.11.0"
 dependencies = [
  "corez",
  "document-features",
@@ -4658,7 +4564,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_transparent"
-version = "0.11.0-pre.2"
+version = "0.11.0"
 dependencies = [
  "bip32",
  "bs58",
@@ -4680,7 +4586,7 @@ dependencies = [
 
 [[package]]
 name = "zcash_voting"
-version = "5.2.0-rc.2"
+version = "5.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4696,7 +4602,6 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "imt-tree",
  "incrementalmerkletree 0.9.0",
  "js-sys",
  "nonempty",
@@ -4722,7 +4627,6 @@ dependencies = [
  "tower-service",
  "url",
  "uuid",
- "valar-spiral-rs",
  "valar-ypir",
  "vote-commitment-tree",
  "vote-commitment-tree-client",
@@ -4850,7 +4754,7 @@ dependencies = [
 
 [[package]]
 name = "zip321"
-version = "0.10.0-pre.2"
+version = "0.10.0"
 dependencies = [
  "base64 0.22.1",
  "nom",
