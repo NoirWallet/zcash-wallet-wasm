@@ -357,10 +357,28 @@ pub enum Recovery {
     /// No marker: nothing was in flight.
     Clean,
     /// A session started but never left the device. Safe to discard and start over.
-    Discardable { progress: SessionProgress },
+    Discardable {
+        session_id: [u8; 16],
+        progress: SessionProgress,
+    },
     /// A session reached a point of no return. It must be abandoned, never continued: continuing
     /// would mean reusing nonces that may already be outside this device.
-    Burned { progress: SessionProgress },
+    Burned {
+        session_id: [u8; 16],
+        progress: SessionProgress,
+    },
+}
+
+impl Recovery {
+    /// Session the leftover marker refers to, so the host can log or correlate it.
+    pub fn session_id(self) -> Option<[u8; 16]> {
+        match self {
+            Self::Clean => None,
+            Self::Discardable { session_id, .. } | Self::Burned { session_id, .. } => {
+                Some(session_id)
+            }
+        }
+    }
 }
 
 impl Recovery {
@@ -460,12 +478,18 @@ impl SessionGuard {
         let Some(bytes) = store.get(MARKER_KEY).map_err(GuardError::Store)? else {
             return Ok(Recovery::Clean);
         };
-        let progress = decode_marker(&bytes)?;
+        let (session_id, progress) = decode_marker(&bytes)?;
         Ok(match progress {
             // Nothing left the device, so the nonces are worthless but also unspent and unpublished.
-            SessionProgress::Created => Recovery::Discardable { progress },
+            SessionProgress::Created => Recovery::Discardable {
+                session_id,
+                progress,
+            },
             // Commitments or shares went out; the nonces must be treated as burned.
-            SessionProgress::Committed | SessionProgress::Consumed => Recovery::Burned { progress },
+            SessionProgress::Committed | SessionProgress::Consumed => Recovery::Burned {
+                session_id,
+                progress,
+            },
         })
     }
 
@@ -487,16 +511,19 @@ impl SessionGuard {
     }
 }
 
-fn decode_marker<E>(bytes: &[u8]) -> Result<SessionProgress, GuardError<E>> {
+fn decode_marker<E>(bytes: &[u8]) -> Result<([u8; 16], SessionProgress), GuardError<E>> {
     if bytes.len() != 18 || bytes[0] != 1 {
         return Err(GuardError::Malformed);
     }
-    match bytes[17] {
-        0 => Ok(SessionProgress::Created),
-        1 => Ok(SessionProgress::Committed),
-        2 => Ok(SessionProgress::Consumed),
-        _ => Err(GuardError::Malformed),
-    }
+    let mut session_id = [0u8; 16];
+    session_id.copy_from_slice(&bytes[1..17]);
+    let progress = match bytes[17] {
+        0 => SessionProgress::Created,
+        1 => SessionProgress::Committed,
+        2 => SessionProgress::Consumed,
+        _ => return Err(GuardError::Malformed),
+    };
+    Ok((session_id, progress))
 }
 
 /// A fresh random session id. Randomness, not a counter: an id that repeats across restarts would

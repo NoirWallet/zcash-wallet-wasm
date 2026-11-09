@@ -494,6 +494,7 @@ dependencies = [
  "frost-rerandomized",
  "rand_core 0.6.4",
  "reddsa 0.5.2",
+ "sha2 0.10.9",
  "zeroize",
 ]
 

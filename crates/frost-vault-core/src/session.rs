@@ -668,7 +668,7 @@ impl SignerSession {
         let mut r = Reader::new(&env.payload);
         let actions = r.u16()? as usize;
         let participants = r.u16()?;
-        let _threshold = r.u16()?;
+        let threshold = r.u16()?;
         let n = r.u8()? as usize;
         let signers = r.take(n)?.to_vec();
         r.finish()?;
@@ -677,6 +677,15 @@ impl SignerSession {
             return Err(SessionError::Counts {
                 actions: MAX_ACTIONS,
                 alphas: actions,
+            });
+        }
+        // The selection must be exactly threshold-sized, and every slot in it must exist. A
+        // coordinator that under-selects would otherwise produce a session that cannot aggregate,
+        // long after the user approved.
+        if signers.len() != threshold as usize || threshold > participants {
+            return Err(SessionError::Incomplete {
+                have: signers.len(),
+                need: threshold as usize,
             });
         }
         if self.my_slot as u16 >= participants || !signers.contains(&self.my_slot) {
@@ -777,6 +786,11 @@ impl SignerSession {
                 })
                 .collect::<Result<_, _>>()?;
 
+            // Burn the nonce *before* signing. Once it is handed to `sign_with_alpha` it may have
+            // contributed to a share, so a failed call must not leave it reusable — the `?` on the
+            // call would otherwise return early with the nonce still Committed.
+            self.nonce_states[action] = self.nonce_states[action].consume()?;
+
             let share = threshold::sign_with_alpha(
                 &self.nonces[action],
                 key_package,
@@ -784,9 +798,6 @@ impl SignerSession {
                 &decoded.sighash,
                 &decoded.alphas[action],
             )?;
-            // Consumed whether or not the call above succeeded: a nonce that may have touched a
-            // signing package must never be reused.
-            self.nonce_states[action] = self.nonce_states[action].consume()?;
             put_bytes(&mut payload, &share.serialize())?;
         }
 

@@ -225,6 +225,37 @@ fn a_signer_cannot_share_twice() {
 }
 
 #[test]
+fn a_failed_share_still_burns_the_nonce() {
+    // The nonce must not survive a signing attempt: if the share computation fails, a retry with the
+    // same nonce and a different challenge would leak the signing share.
+    let mut h = Harness::new(2, 2, vec![0, 1], 1);
+    let payloads = h.run_to_verifying(1);
+    let slot = payloads[0].recipient;
+    let signer = h.signers.get_mut(&slot).unwrap();
+    signer.on_payload(&payloads[0]).unwrap();
+    signer.approve().unwrap();
+
+    // Deliberately sign with the wrong participant's key package so the call fails.
+    let wrong = if slot == 0 { 1u8 } else { 0u8 };
+    let err = signer
+        .share(&h.dkg.key_packages[&h.identifiers[&wrong]])
+        .unwrap_err();
+    assert!(matches!(err, SessionError::Frost(_)), "{err:?}");
+    assert_eq!(signer.nonce_states(), &[NonceState::Consumed]);
+
+    // And the nonce really is gone: retrying with the right package cannot reuse it.
+    let err = signer
+        .share(&h.dkg.key_packages[&h.identifiers[&slot]])
+        .unwrap_err();
+    assert_eq!(
+        err,
+        SessionError::State(frost_vault_core::state::TransitionError::NonceUnusable(
+            NonceState::Consumed
+        ))
+    );
+}
+
+#[test]
 fn replayed_commitments_are_refused() {
     let mut h = Harness::new(2, 2, vec![0, 1], 1);
     let mut rng = OsRng;

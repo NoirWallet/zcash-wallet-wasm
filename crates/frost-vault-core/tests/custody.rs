@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use frost_vault_core::custody::{
-    new_session_id, CustodyError, GuardError, Recovery, SessionGuard, SessionProgress, SessionStore,
-    ShareBackup, ShareIdentity, MARKER_KEY,
+    new_session_id, CustodyError, GuardError, Recovery, SessionGuard, SessionProgress,
+    SessionStore, ShareBackup, ShareIdentity, MARKER_KEY,
 };
 use frost_vault_core::threshold::{run_dkg, Identifier};
 use rand::rngs::OsRng;
@@ -148,8 +148,11 @@ fn an_over_long_identity_is_refused() {
     let dkg = dkg(2, 2);
     let by_slot = roster(&dkg);
     let too_long = vec![0u8; 200];
-    let err = ShareBackup::new(&dkg.key_packages[&by_slot[&0]], identity(0, &too_long, b"v"))
-        .unwrap_err();
+    let err = ShareBackup::new(
+        &dkg.key_packages[&by_slot[&0]],
+        identity(0, &too_long, b"v"),
+    )
+    .unwrap_err();
     assert_eq!(err, CustodyError::Malformed);
 }
 
@@ -205,10 +208,12 @@ fn killing_before_any_commitment_is_only_discardable() {
     assert_eq!(
         SessionGuard::recover(&mut store).unwrap(),
         Recovery::Discardable {
+            session_id: sid(2),
             progress: SessionProgress::Created
         }
     );
     assert!(!Recovery::Discardable {
+        session_id: sid(2),
         progress: SessionProgress::Created
     }
     .may_resume());
@@ -225,10 +230,12 @@ fn killing_after_commitments_burns_the_session() {
     assert_eq!(
         recovery,
         Recovery::Burned {
+            session_id: sid(3),
             progress: SessionProgress::Committed
         }
     );
     assert!(!recovery.may_resume());
+    assert_eq!(recovery.session_id(), Some(sid(3)));
 }
 
 #[test]
@@ -240,6 +247,7 @@ fn killing_after_a_share_burns_the_session() {
     assert_eq!(
         SessionGuard::recover(&mut store).unwrap(),
         Recovery::Burned {
+            session_id: sid(4),
             progress: SessionProgress::Consumed
         }
     );
