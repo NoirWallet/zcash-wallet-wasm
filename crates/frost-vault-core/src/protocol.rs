@@ -36,11 +36,61 @@
 pub const VERSION: u8 = 1;
 
 pub const HEADER_LEN: usize = 28;
-
 /// Bound on payload size. The largest thing we ever ship is a redacted PCZT (several KB) or a
 /// batch envelope; 1 MiB is far above that and keeps a hostile length field from forcing an
 /// allocation.
 pub const MAX_PAYLOAD: usize = 1 << 20;
+
+/// The value pool a spend belongs to.
+///
+/// Only Ironwood exists here. A vault is created fresh, and since NU6.3 the Orchard pool forbids
+/// cross-address transfers, so a fee-paying party can only ever create Ironwood outputs for a
+/// vault's receiver — a vault never holds an Orchard note. An Orchard-pool action in a vault PCZT
+/// is therefore not something to interpret or forward: it is either a bug or a hostile
+/// construction, and it is refused by name rather than as an unknown tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValuePool {
+    /// Tag 1 on the wire, matching `pczt::orchard::ValuePool`.
+    Ironwood,
+}
+
+impl ValuePool {
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::Ironwood => 1,
+        }
+    }
+
+    /// Decode a wire tag. `0` is Orchard, which this protocol deliberately does not carry.
+    pub fn from_byte(b: u8) -> Result<Self, PoolError> {
+        match b {
+            1 => Ok(Self::Ironwood),
+            0 => Err(PoolError::OrchardNotSupported),
+            other => Err(PoolError::UnknownTag(other)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolError {
+    /// Tag 0: Orchard pool. Impossible in a freshly created vault (see [`ValuePool`]).
+    OrchardNotSupported,
+    UnknownTag(u8),
+}
+
+impl core::fmt::Display for PoolError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::OrchardNotSupported => f.write_str(
+                "orchard-pool action refused: a fresh vault holds no orchard notes and the orchard \
+                 pool forbids cross-address transfers",
+            ),
+            Self::UnknownTag(t) => write!(f, "unknown value pool tag {t}"),
+        }
+    }
+}
+
+impl std::error::Error for PoolError {}
 
 /// Message types. Explicit numbering, stable on the wire, and a hard rejection of anything not
 /// listed — an old signer that does not know a type must fail closed rather than guess.
@@ -354,5 +404,14 @@ mod tests {
                 actual: 5
             })
         );
+    }
+
+    #[test]
+    fn ironwood_is_the_only_pool() {
+        assert_eq!(ValuePool::Ironwood.to_byte(), 1);
+        assert_eq!(ValuePool::from_byte(1), Ok(ValuePool::Ironwood));
+        // Orchard is refused by name, not treated as an unknown tag: it is a decision, not a gap.
+        assert_eq!(ValuePool::from_byte(0), Err(PoolError::OrchardNotSupported));
+        assert_eq!(ValuePool::from_byte(9), Err(PoolError::UnknownTag(9)));
     }
 }
