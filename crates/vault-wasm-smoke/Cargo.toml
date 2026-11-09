@@ -1,0 +1,14 @@
+[package]
+name = "vault-wasm-smoke"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Minimal wasm exports used to prove the protocol crates actually run under wasm32"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+frost-vault-core = { path = "../frost-vault-core" }
+vault-deposit = { path = "../vault-deposit" }

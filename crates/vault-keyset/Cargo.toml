@@ -13,7 +13,12 @@ crate-type = ["rlib", "cdylib"]
 # Keys and addresses only. No builder, no prover, no wallet database: every device derives the same
 # keyset from the same two inputs, and that is all this tier does.
 orchard = { version = "0.16", default-features = false, features = ["std"] }
-zcash_keys = { path = "../../librustzcash/zcash_keys", default-features = false, features = ["orchard", "unstable-frost"] }
+# `zcash_address` has no pool features, so the constructors used here do not change shape when this
+# crate is linked next to the wallet (which enables transparent-inputs, expiry metadata, and so on).
+# That is not hypothetical: `zcash_keys::address::UnifiedAddress::from_receivers` gains an
+# `expiry_time` argument under those features, which broke this crate only when it was linked into
+# `zcash-wallet-wasm`.
+zcash_address = { path = "../../librustzcash/components/zcash_address" }
 zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 zeroize = { version = "1", features = ["derive"] }

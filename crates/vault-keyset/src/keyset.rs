@@ -18,8 +18,9 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use zcash_keys::address::UnifiedAddress;
-use zcash_keys::keys::UnifiedFullViewingKey;
+use zcash_address::unified::{
+    Address as UnifiedAddress, Encoding, Fvk, Receiver, Revision, Ufvk, Uitem,
+};
 use zcash_protocol::consensus::{Network, Parameters};
 
 /// Domain tag for the keyset fingerprint, so it can never be confused with another hash in the
@@ -132,20 +133,24 @@ impl VaultKeyset {
         let orchard_address = fvk.address_at(diversifier_index, Scope::External);
         let raw_address = orchard_address.to_raw_address_bytes();
 
-        // Built from the Orchard receiver alone so that no transparent receiver can appear: the
-        // vault cannot spend one, and a transparent receiver would let someone send funds that are
-        // unrecoverable forever.
-        let ua = UnifiedAddress::from_receivers(Some(orchard_address), None, None, None)
-            .ok_or(KeysetError::Encoding)?;
+        // Built from the Orchard item alone so that no transparent receiver can appear: the vault
+        // cannot spend one, and a transparent receiver would let someone send funds that are
+        // unrecoverable forever. Revision 0 is the shielded-only form and needs no feature flags to
+        // express.
+        let ua = UnifiedAddress::try_from_items(
+            Revision::R0,
+            vec![Uitem::Data(Receiver::Orchard(raw_address))],
+        )
+        .map_err(|_| KeysetError::Encoding)?;
         let fvk_bytes = fvk.to_bytes();
-        let ufvk = UnifiedFullViewingKey::from_orchard_fvk(fvk)
+        let ufvk = Ufvk::try_from_items(Revision::R0, vec![Uitem::Data(Fvk::Orchard(fvk_bytes))])
             .map_err(|_| KeysetError::InvalidFullViewingKey)?;
 
         Ok(Self {
             group_verifying_key: *group_verifying_key,
             fvk: fvk_bytes,
-            ufvk: ufvk.encode(&network).map_err(|_| KeysetError::Encoding)?,
-            address: ua.encode(&network),
+            ufvk: ufvk.encode(&network.network_type()),
+            address: ua.encode(&network.network_type()),
             raw_address,
             diversifier_index,
             fingerprint: fingerprint_of(network, &fvk_bytes),
@@ -160,21 +165,26 @@ impl VaultKeyset {
         diversifier_index: u32,
     ) -> Result<String, KeysetError> {
         let fvk = splice_fvk(&self.group_verifying_key, qsk)?;
-        let ua = UnifiedAddress::from_receivers(
-            Some(fvk.address_at(diversifier_index, Scope::External)),
-            None,
-            None,
-            None,
-        )
-        .ok_or(KeysetError::Encoding)?;
-        Ok(ua.encode(&network))
+        let raw = fvk
+            .address_at(diversifier_index, Scope::External)
+            .to_raw_address_bytes();
+        let ua =
+            UnifiedAddress::try_from_items(Revision::R0, vec![Uitem::Data(Receiver::Orchard(raw))])
+                .map_err(|_| KeysetError::Encoding)?;
+        Ok(ua.encode(&network.network_type()))
     }
 
     /// Whether this address carries only an Orchard receiver — the invariant that keeps the vault
     /// from holding funds it cannot spend. Re-decodes the string rather than trusting the derivation.
-    pub fn has_only_orchard_receiver(&self, network: Network) -> bool {
-        match UnifiedAddress::decode(&network, &self.address) {
-            Ok(ua) => ua.orchard().is_some() && !ua.has_sapling() && ua.transparent().is_none(),
+    pub fn has_only_orchard_receiver(&self) -> bool {
+        // Decode and ask the pool question, rather than sniffing the string: the bech32 data part can
+        // contain "t1" by chance, so a substring test would be both wrong and confusing.
+        match UnifiedAddress::decode(&self.address) {
+            Ok((_, _, ua)) => {
+                ua.has_receiver_of_type(zcash_protocol::PoolType::ORCHARD)
+                    && !ua.has_receiver_of_type(zcash_protocol::PoolType::TRANSPARENT)
+                    && !ua.has_receiver_of_type(zcash_protocol::PoolType::SAPLING)
+            }
             Err(_) => false,
         }
     }

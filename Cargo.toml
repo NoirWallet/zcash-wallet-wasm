@@ -16,6 +16,35 @@ multicore = ["zcash_proofs/multicore", "zcash_primitives/multicore", "zcash_clie
 wasm-parallel = ["wasm-bindgen-rayon", "multicore"]
 voting = ["dep:zcash_voting", "dep:futures-channel", "dep:web-sys", "dep:base64", "dep:rand_core"]
 voting-test-fixtures = ["voting", "zcash_voting/test-fixtures"]
+# FROST Secure Vault. Off by default so the shipping wallet is unchanged; enabling it proves the
+# protocol crates link and feature-unify with the wallet's threaded wasm configuration.
+frost-vault = [
+    "dep:frost-vault-core",
+    "dep:pczt-signer-core",
+    "dep:vault-keyset",
+    "dep:vault-pczt",
+    "dep:vault-deposit",
+]
+
+[dependencies.frost-vault-core]
+path = "crates/frost-vault-core"
+optional = true
+
+[dependencies.pczt-signer-core]
+path = "crates/pczt-signer-core"
+optional = true
+
+[dependencies.vault-keyset]
+path = "crates/vault-keyset"
+optional = true
+
+[dependencies.vault-pczt]
+path = "crates/vault-pczt"
+optional = true
+
+[dependencies.vault-deposit]
+path = "crates/vault-deposit"
+optional = true
 
 [dependencies.zcash_voting]
 path = "./zcash_voting/zcash_voting"

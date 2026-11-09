@@ -237,3 +237,108 @@ fn a_signer_outside_the_selection_cannot_join_the_session() {
     assert_eq!(err, SessionError::UnknownSender(2));
     let _ = prepared;
 }
+
+// ---------------------------------------------------------------------------
+// The consensus check: finalize, extract, verify.
+// ---------------------------------------------------------------------------
+
+/// The strongest test in the workspace: the transaction that comes out the other end is handed to
+/// `pczt`'s Transaction Extractor, which recomputes the binding signature and runs batch
+/// verification of the Halo2 proof *and* every spend authorization signature.
+///
+/// Everything else asserts that intermediate values agree with each other. This asserts that a
+/// Zcash node would accept the result.
+#[test]
+fn the_finalized_transaction_verifies_as_a_real_transaction() {
+    let (dkg, keyset, prepared) = coordinator_side_with_ak(2, 2);
+    let ak = &keyset.group_verifying_key;
+    let by_slot = roster(&dkg.identifiers);
+
+    let transport = Pczt::parse(&prepared.transport).expect("transport parses");
+    let material = bind_alphas(
+        &ironwood_action_rks(&transport).expect("rks"),
+        &prepared.alphas,
+    )
+    .expect("bind");
+    material[0].verify_rk(ak).expect("rk");
+
+    // Sign with both participants, as the flow test does.
+    let config = SessionConfig {
+        session_id: SESSION,
+        participants: 2,
+        threshold: 2,
+        signers: vec![0, 1],
+        identifiers: by_slot.clone(),
+    };
+    let mut coordinator =
+        CoordinatorSession::new(config, dkg.pubkeys.clone(), 1).expect("coordinator");
+    let mut signers: BTreeMap<u8, SignerSession> = [0u8, 1]
+        .iter()
+        .map(|slot| (*slot, SignerSession::new(SESSION, *slot, by_slot.clone())))
+        .collect();
+
+    let mut rng = FrostRng;
+    for env in coordinator.init().expect("init") {
+        let slot = env.recipient;
+        let commitments = signers
+            .get_mut(&slot)
+            .unwrap()
+            .on_init(&env, &dkg.key_packages[&by_slot[&slot]], &mut rng)
+            .expect("commitments");
+        coordinator.on_commitments(&commitments).expect("collect");
+    }
+    coordinator
+        .prepare_payload(prepared.sighash, prepared.alphas.clone())
+        .expect("prepare");
+    for env in coordinator.payloads().expect("payloads") {
+        let slot = env.recipient;
+        let signer = signers.get_mut(&slot).unwrap();
+        signer.on_payload(&env).expect("payload");
+        signer.approve().expect("approve");
+        let share = signer
+            .share(&dkg.key_packages[&by_slot[&slot]])
+            .expect("share");
+        coordinator.on_share(&share).expect("collect");
+    }
+    let signatures = coordinator.aggregate().expect("aggregate");
+
+    let signed = apply_material(prepared.kept, &material, &signatures).expect("apply");
+
+    // SpendFinalizer recomputes the binding signature over the now-authorized bundles.
+    let finalized = pczt::roles::spend_finalizer::SpendFinalizer::new(signed)
+        .finalize_spends()
+        .expect("finalize spends");
+
+    // Extracting verifies the proof and every spend auth signature; a bad share would fail here.
+    let tx = pczt::roles::tx_extractor::TransactionExtractor::new(finalized)
+        .extract(UnwrapErr(SysRng))
+        .expect("extract and verify");
+
+    let bundle_ref = tx.ironwood_bundle();
+    let bundle = bundle_ref.as_ref().expect("ironwood bundle");
+    assert_eq!(bundle.actions().len(), 1);
+    let rk_bytes: [u8; 32] = bundle.actions()[material[0].action_index as usize]
+        .rk()
+        .into();
+    assert_eq!(
+        rk_bytes, material[0].rk,
+        "the extracted transaction carries the rk we authorized"
+    );
+
+    // The transaction round-trips through its own consensus encoding.
+    let mut bytes = Vec::new();
+    tx.write(&mut bytes).expect("serialize");
+    assert!(bytes.len() > 1_000, "transaction is {} bytes", bytes.len());
+    let parsed = zcash_primitives::transaction::Transaction::read(
+        bytes.as_slice(),
+        zcash_protocol::consensus::BranchId::Nu6_3,
+    )
+    .expect("the extracted transaction parses back");
+    let mut again = Vec::new();
+    parsed.write(&mut again).expect("reserialize");
+    assert_eq!(again, bytes);
+}
+
+fn coordinator_side_with_ak(participants: u16, threshold: u16) -> (DkgOut, VaultKeyset, Prepared) {
+    coordinator_side(participants, threshold)
+}
