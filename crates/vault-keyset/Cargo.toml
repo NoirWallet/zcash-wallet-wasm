@@ -1,0 +1,25 @@
+[package]
+name = "vault-keyset"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "KEYSET_SETUP for the FROST Secure Vault: group ak to FVK, address and UFVK"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# Keys and addresses only. No builder, no prover, no wallet database: every device derives the same
+# keyset from the same two inputs, and that is all this tier does.
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+zcash_keys = { path = "../../librustzcash/zcash_keys", default-features = false, features = ["orchard", "unstable-frost"] }
+zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+hex = "0.4"
+# A DKG is the only way to obtain a real group verifying key in a test.
+frost-vault-core = { path = "../frost-vault-core" }
+rand = "0.8"
