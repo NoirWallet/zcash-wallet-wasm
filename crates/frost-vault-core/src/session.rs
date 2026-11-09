@@ -32,6 +32,18 @@ use crate::threshold::{
 /// Length of a session id on the wire.
 pub const SESSION_ID_LEN: usize = 16;
 
+/// Upper bound on actions per signing session.
+///
+/// The wire field is a `u16`, so a hostile payload could claim 65535 and make a decoder allocate for
+/// all of them. 96 is the per-round action budget a hardware signer already works to (and a vault
+/// transfer is one to three actions), so anything beyond it is not a vault transaction.
+pub const MAX_ACTIONS: usize = 96;
+
+/// Whether an action count from the wire is usable.
+fn valid_actions(n: usize) -> bool {
+    n > 0 && n <= MAX_ACTIONS
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionError {
     /// Message belongs to another session.
@@ -193,17 +205,26 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedPayload, SessionError> {
     let mut r = Reader::new(payload);
     let sighash = r.array32()?;
     let actions = r.u16()? as usize;
-    if actions == 0 {
-        return Err(SessionError::Malformed);
+    if !valid_actions(actions) {
+        return Err(SessionError::Counts {
+            actions: MAX_ACTIONS,
+            alphas: actions,
+        });
     }
     let mut alphas = Vec::with_capacity(actions);
     let mut per_action = Vec::with_capacity(actions);
     for _ in 0..actions {
         alphas.push(r.array32()?);
         let n = r.u8()? as usize;
+        if n > crate::threshold::MAX_PARTICIPANTS as usize {
+            return Err(SessionError::UnknownSender(n as u8));
+        }
         let mut grid = BTreeMap::new();
         for _ in 0..n {
             let slot = r.u8()?;
+            if slot as u16 >= crate::threshold::MAX_PARTICIPANTS {
+                return Err(SessionError::UnknownSender(slot));
+            }
             let commitments = SigningCommitments::deserialize(r.bytes()?).map_err(frost)?;
             grid.insert(slot, commitments);
         }
@@ -274,8 +295,11 @@ impl CoordinatorSession {
         actions: usize,
     ) -> Result<Self, SessionError> {
         cfg.validate()?;
-        if actions == 0 {
-            return Err(SessionError::Malformed);
+        if !valid_actions(actions) {
+            return Err(SessionError::Counts {
+                actions: MAX_ACTIONS,
+                alphas: actions,
+            });
         }
         Ok(Self {
             cfg,
@@ -374,7 +398,7 @@ impl CoordinatorSession {
         }
         let mut r = Reader::new(&env.payload);
         let count = r.u16()? as usize;
-        if count != self.actions {
+        if !valid_actions(count) || count != self.actions {
             return Err(SessionError::Counts {
                 actions: self.actions,
                 alphas: count,
@@ -474,7 +498,7 @@ impl CoordinatorSession {
             return Err(SessionError::NotApproved);
         }
         let count = r.u16()? as usize;
-        if count != self.actions {
+        if !valid_actions(count) || count != self.actions {
             return Err(SessionError::Counts {
                 actions: self.actions,
                 alphas: count,
@@ -649,8 +673,11 @@ impl SignerSession {
         let signers = r.take(n)?.to_vec();
         r.finish()?;
 
-        if actions == 0 {
-            return Err(SessionError::Malformed);
+        if !valid_actions(actions) || signers.len() > crate::threshold::MAX_PARTICIPANTS as usize {
+            return Err(SessionError::Counts {
+                actions: MAX_ACTIONS,
+                alphas: actions,
+            });
         }
         if self.my_slot as u16 >= participants || !signers.contains(&self.my_slot) {
             return Err(SessionError::UnknownSender(self.my_slot));
