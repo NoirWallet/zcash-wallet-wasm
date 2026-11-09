@@ -1,0 +1,19 @@
+[package]
+name = "pczt-signer-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Independent PCZT verification and signature material for the FROST Secure Vault signer"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+frost-vault-core = { path = "../frost-vault-core" }
+# orchard without `circuit`: the signer verifies, it never proves.
+pczt = { path = "../../librustzcash/pczt", default-features = false, features = ["std", "orchard", "signer"] }
+zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
+
+[dev-dependencies]
+rand = "0.8"
