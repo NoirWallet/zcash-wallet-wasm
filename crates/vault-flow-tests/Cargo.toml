@@ -1,0 +1,25 @@
+[package]
+name = "vault-flow-tests"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Cross-tier integration tests for the FROST Secure Vault"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+frost-vault-core = { path = "../frost-vault-core" }
+pczt-signer-core = { path = "../pczt-signer-core" }
+vault-keyset = { path = "../vault-keyset" }
+vault-pczt = { path = "../vault-pczt", features = ["test-fixtures"] }
+orchard = { version = "0.16", features = ["circuit"] }
+pczt = { path = "../../librustzcash/pczt", default-features = false, features = ["std", "orchard", "signer", "io-finalizer", "zcp-builder", "prover"] }
+zcash_primitives = { path = "../../librustzcash/zcash_primitives", default-features = false, features = ["std", "circuits", "multicore"] }
+zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
+rand = { version = "0.10", features = ["sys_rng"] }
+rand08 = { package = "rand", version = "0.8" }
+getrandom = { version = "0.4", features = ["wasm_js"] }

@@ -19,6 +19,10 @@ ff = "0.14"
 # wasm32-unknown-unknown needs the js-backed entropy source; harmless on native.
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
+[features]
+# Synthetic transaction construction, for tests only. Real note selection belongs to the wallet.
+test-fixtures = []
+
 [dev-dependencies]
 vault-keyset = { path = "../vault-keyset" }
 frost-vault-core = { path = "../frost-vault-core" }
