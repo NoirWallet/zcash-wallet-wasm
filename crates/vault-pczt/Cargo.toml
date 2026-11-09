@@ -1,0 +1,29 @@
+[package]
+name = "vault-pczt"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Coordinator-side PCZT construction for the FROST Secure Vault"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+orchard = { version = "0.16", features = ["circuit"] }
+pczt = { path = "../../librustzcash/pczt", default-features = false, features = ["std", "orchard", "io-finalizer", "zcp-builder", "prover", "signer"] }
+zcash_primitives = { path = "../../librustzcash/zcash_primitives", default-features = false, features = ["std", "circuits", "multicore"] }
+zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
+rand = { version = "0.10", features = ["sys_rng"] }
+ff = "0.14"
+# wasm32-unknown-unknown needs the js-backed entropy source; harmless on native.
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+vault-keyset = { path = "../vault-keyset" }
+frost-vault-core = { path = "../frost-vault-core" }
+rand08 = { package = "rand", version = "0.8" }
+hex = "0.4"
+ff = "0.14"
+# wasm32-unknown-unknown needs the js-backed entropy source; harmless on native.
+getrandom = { version = "0.4", features = ["wasm_js"] }
