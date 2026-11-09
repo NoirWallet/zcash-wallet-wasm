@@ -226,7 +226,7 @@ where
 /// see `pczt-signer-core` for that gate. Here we only bind the share to (commitments, message,
 /// alpha).
 pub fn sign_with_alpha(
-    commitment: &Commitment,
+    nonces: &SigningNonces,
     key_package: &KeyPackage,
     commitments: &BTreeMap<Identifier, SigningCommitments>,
     message: &[u8],
@@ -238,18 +238,12 @@ pub fn sign_with_alpha(
     // alpha from the seed and the commitments, whereas Orchard needs the alpha the transaction was
     // already built with. Keeping the explicit-randomizer entry point is the whole point.
     #[allow(deprecated)]
-    frost_rerandomized::sign(
-        &signing_package,
-        &commitment.nonces,
-        key_package,
-        randomizer,
-    )
-    .map_err(frost)
+    frost_rerandomized::sign(&signing_package, nonces, key_package, randomizer).map_err(frost)
 }
 
 /// Round 2, seed-derived randomizer (the generic ZF re-randomized FROST flow).
 pub fn sign_with_randomizer_seed(
-    commitment: &Commitment,
+    nonces: &SigningNonces,
     key_package: &KeyPackage,
     commitments: &BTreeMap<Identifier, SigningCommitments>,
     message: &[u8],
@@ -258,7 +252,7 @@ pub fn sign_with_randomizer_seed(
     let signing_package = frost_core::SigningPackage::new(commitments.clone(), message);
     frost_rerandomized::sign_with_randomizer_seed(
         &signing_package,
-        &commitment.nonces,
+        nonces,
         key_package,
         randomizer_seed,
     )

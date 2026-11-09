@@ -60,7 +60,7 @@ fn sign_once(
     let mut shares = BTreeMap::new();
     for c in &round1 {
         let kp = &dkg.key_packages[&c.identifier];
-        let share = sign_with_alpha(c, kp, &commitments, &msg, &alpha).expect("share");
+        let share = sign_with_alpha(&c.nonces, kp, &commitments, &msg, &alpha).expect("share");
         shares.insert(c.identifier, share);
     }
 
@@ -110,7 +110,13 @@ fn below_threshold_shares_do_not_aggregate() {
     // A signer refuses to even produce a share when the commitment set is below threshold, so a
     // 2-of-3 group cannot be talked into signing with one commitment. Failure happens before
     // aggregation, which is the stronger guarantee.
-    let share = sign_with_alpha(&c, &dkg.key_packages[&id0], &commitments, &msg, &alpha);
+    let share = sign_with_alpha(
+        &c.nonces,
+        &dkg.key_packages[&id0],
+        &commitments,
+        &msg,
+        &alpha,
+    );
     assert!(share.is_err());
 
     let mut shares = BTreeMap::new();
@@ -135,7 +141,14 @@ fn duplicate_signer_share_is_refused() {
     let mut commitments = BTreeMap::new();
     commitments.insert(id0, c.commitments);
 
-    assert!(sign_with_alpha(&c, &dkg.key_packages[&id0], &commitments, &msg, &alpha).is_err());
+    assert!(sign_with_alpha(
+        &c.nonces,
+        &dkg.key_packages[&id0],
+        &commitments,
+        &msg,
+        &alpha
+    )
+    .is_err());
 }
 
 #[test]
@@ -188,7 +201,7 @@ fn seed_derived_randomizer_path_also_works() {
         let kp = &dkg.key_packages[&c.identifier];
         shares.insert(
             c.identifier,
-            sign_with_randomizer_seed(c, kp, &commitments, &msg, &seed).expect("share"),
+            sign_with_randomizer_seed(&c.nonces, kp, &commitments, &msg, &seed).expect("share"),
         );
     }
 

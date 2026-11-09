@@ -193,7 +193,7 @@ fn a_frost_group_key_drives_a_real_ironwood_pczt() {
         shares.insert(
             c.identifier,
             sign_with_alpha(
-                c,
+                &c.nonces,
                 &dkg.key_packages[&c.identifier],
                 &commitments,
                 &sighash,
@@ -247,7 +247,7 @@ fn aggregate_signature_is_indistinguishable_from_a_single_signer_one() {
         shares.insert(
             c.identifier,
             sign_with_alpha(
-                c,
+                &c.nonces,
                 &dkg.key_packages[&c.identifier],
                 &commitments,
                 &sighash,

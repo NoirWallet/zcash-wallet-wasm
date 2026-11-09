@@ -14,16 +14,22 @@
 //!      0     1  version              (currently 1; any other value is refused)
 //!      1     1  message type         (unknown values are refused)
 //!      2     1  round / phase
-//!      3     1  sender roster index  (0..=MAX_PARTICIPANTS-1)
-//!      4     4  sequence             (per-session, strictly increasing)
-//!      8    16  session id
-//!     24     4  payload length
-//!     28     n  payload
+//!      3     1  sender slot          (roster index, or COORDINATOR_SLOT)
+//!      4     1  recipient slot       (roster index, or COORDINATOR_SLOT)
+//!      5     4  sequence             (per-sender, strictly increasing)
+//!      9    16  session id
+//!     25     4  payload length
+//!     29     n  payload
 //! ```
 //!
-//! 28 bytes of header is under a sixth of one 200-byte QR frame, and the roster index keeps two
+//! 29 bytes of header is under a sixth of one 200-byte QR frame, and the slot byte pair keeps two
 //! full public keys (64 bytes) out of every message: identity is established once when the roster
-//! is locked, not per message.
+//! is locked, not per message. Both slots are bound because §12.3 requires it: a message addressed
+//! to one signer must not be usable by another.
+//!
+//! The coordinator is not necessarily a key holder (§8.3's `B+C` recovery path), so it cannot be
+//! given a roster index. [`COORDINATOR_SLOT`] is reserved for it, which keeps "who sent this" total
+//! without inventing a second envelope shape.
 //!
 //! `session_id` is defined as `H(domain || group_id || roster_hash || session_nonce)`. Binding the
 //! session therefore binds the group and the locked participant set, which is how §12.3's group
@@ -35,7 +41,10 @@
 
 pub const VERSION: u8 = 1;
 
-pub const HEADER_LEN: usize = 28;
+pub const HEADER_LEN: usize = 29;
+
+/// Reserved slot for the coordinator, which may hold no key share (§8.3 `B+C` recovery).
+pub const COORDINATOR_SLOT: u8 = 0xFE;
 /// Bound on payload size. The largest thing we ever ship is a redacted PCZT (several KB) or a
 /// batch envelope; 1 MiB is far above that and keeps a hostile length field from forcing an
 /// allocation.
@@ -180,9 +189,15 @@ pub struct Envelope {
     pub msg_type: MsgType,
     pub round: u8,
     pub sender: u8,
+    pub recipient: u8,
     pub sequence: u32,
     pub session_id: [u8; 16],
     pub payload: Vec<u8>,
+}
+
+/// A slot is either a roster index or the coordinator's reserved slot.
+fn valid_slot(b: u8) -> bool {
+    (b as u16) < crate::threshold::MAX_PARTICIPANTS || b == COORDINATOR_SLOT
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,8 +208,8 @@ pub enum EnvelopeError {
     UnsupportedVersion(u8),
     /// `msg_type` is not a known [`MsgType`].
     UnknownMsgType(u8),
-    /// Sender index is not a valid roster slot.
-    BadSender(u8),
+    /// A slot byte is neither a roster index nor [`COORDINATOR_SLOT`].
+    BadSlot(u8),
     /// Declared payload length exceeds [`MAX_PAYLOAD`].
     PayloadTooLarge(u32),
     /// Declared payload length does not match the bytes present.
@@ -209,7 +224,10 @@ impl core::fmt::Display for EnvelopeError {
                 write!(f, "unsupported envelope version {v} (expected {VERSION})")
             }
             Self::UnknownMsgType(t) => write!(f, "unknown message type 0x{t:02x}"),
-            Self::BadSender(i) => write!(f, "sender roster index {i} out of range"),
+            Self::BadSlot(i) => write!(
+                f,
+                "slot byte 0x{i:02x} is neither a roster index nor the coordinator"
+            ),
             Self::PayloadTooLarge(n) => {
                 write!(f, "declared payload length {n} exceeds {MAX_PAYLOAD}")
             }
@@ -232,12 +250,16 @@ impl Envelope {
         msg_type: MsgType,
         round: u8,
         sender: u8,
+        recipient: u8,
         sequence: u32,
         session_id: [u8; 16],
         payload: Vec<u8>,
     ) -> Result<Self, EnvelopeError> {
-        if sender as u16 >= crate::threshold::MAX_PARTICIPANTS {
-            return Err(EnvelopeError::BadSender(sender));
+        if !valid_slot(sender) {
+            return Err(EnvelopeError::BadSlot(sender));
+        }
+        if !valid_slot(recipient) {
+            return Err(EnvelopeError::BadSlot(recipient));
         }
         if payload.len() > MAX_PAYLOAD {
             return Err(EnvelopeError::PayloadTooLarge(payload.len() as u32));
@@ -246,6 +268,7 @@ impl Envelope {
             msg_type,
             round,
             sender,
+            recipient,
             sequence,
             session_id,
             payload,
@@ -266,6 +289,7 @@ impl Envelope {
         out.push(self.msg_type.to_byte());
         out.push(self.round);
         out.push(self.sender);
+        out.push(self.recipient);
         out.extend_from_slice(&self.sequence.to_le_bytes());
         out.extend_from_slice(&self.session_id);
         out.extend_from_slice(&payload_len.to_le_bytes());
@@ -291,13 +315,17 @@ impl Envelope {
             MsgType::from_byte(bytes[1]).ok_or(EnvelopeError::UnknownMsgType(bytes[1]))?;
         let round = bytes[2];
         let sender = bytes[3];
-        if sender as u16 >= crate::threshold::MAX_PARTICIPANTS {
-            return Err(EnvelopeError::BadSender(sender));
+        let recipient = bytes[4];
+        if !valid_slot(sender) {
+            return Err(EnvelopeError::BadSlot(sender));
         }
-        let sequence = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        if !valid_slot(recipient) {
+            return Err(EnvelopeError::BadSlot(recipient));
+        }
+        let sequence = u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
         let mut session_id = [0u8; 16];
-        session_id.copy_from_slice(&bytes[8..24]);
-        let declared = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+        session_id.copy_from_slice(&bytes[9..25]);
+        let declared = u32::from_le_bytes([bytes[25], bytes[26], bytes[27], bytes[28]]);
         if declared as usize > MAX_PAYLOAD {
             return Err(EnvelopeError::PayloadTooLarge(declared));
         }
@@ -312,6 +340,7 @@ impl Envelope {
             msg_type,
             round,
             sender,
+            recipient,
             sequence,
             session_id,
             payload: body.to_vec(),
@@ -328,6 +357,7 @@ mod tests {
             MsgType::SignCommitments,
             2,
             1,
+            COORDINATOR_SLOT,
             7,
             [9u8; 16],
             vec![1, 2, 3, 4],
@@ -374,16 +404,31 @@ mod tests {
     }
 
     #[test]
+    fn accepts_the_coordinator_slot() {
+        let env = Envelope::new(
+            MsgType::SignInit,
+            1,
+            COORDINATOR_SLOT,
+            2,
+            1,
+            [3u8; 16],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(Envelope::decode(&env.encode()).unwrap(), env);
+    }
+
+    #[test]
     fn rejects_out_of_roster_sender() {
         let mut bytes = sample().encode();
         bytes[3] = 3; // MAX_PARTICIPANTS is 3, so index 3 is out of range
-        assert_eq!(Envelope::decode(&bytes), Err(EnvelopeError::BadSender(3)));
+        assert_eq!(Envelope::decode(&bytes), Err(EnvelopeError::BadSlot(3)));
     }
 
     #[test]
     fn rejects_length_lies() {
         let mut bytes = sample().encode();
-        bytes[24] = 9; // claim nine payload bytes, only four present
+        bytes[25] = 9; // claim nine payload bytes, only four present
         assert_eq!(
             Envelope::decode(&bytes),
             Err(EnvelopeError::LengthMismatch {

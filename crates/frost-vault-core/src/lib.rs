@@ -24,7 +24,9 @@
 //! * [`state`] — the DKG and signing session state machines, plus per-spend nonce lifecycle.
 
 pub mod protocol;
+pub mod session;
 pub mod state;
 pub mod threshold;
 
+pub use session::{CoordinatorSession, SessionConfig, SessionError, SignerSession};
 pub use threshold::{DkgOutput, Suite};
