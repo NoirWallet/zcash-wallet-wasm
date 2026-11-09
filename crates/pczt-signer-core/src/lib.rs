@@ -17,10 +17,12 @@
 //!   value accounting the display gate depends on. TEX addresses are refused for the same reason
 //!   the wallet library refuses them (`PaysTexFromShielded`): they are transparent-source-only.
 
+pub mod apply;
 pub mod gate;
 pub mod material;
 pub mod sighash;
 
+pub use apply::{apply_all, apply_ironwood_signature, apply_material, ApplyError};
 pub use gate::{check, PcztShape, Refusal};
 pub use material::{bind_alphas, ironwood_action_rks, ActionRk, MaterialError, SpendMaterial};
 pub use sighash::{shielded_sighash, verify_shielded_sighash, SighashError};

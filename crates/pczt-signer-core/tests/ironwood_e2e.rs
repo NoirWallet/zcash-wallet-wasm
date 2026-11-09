@@ -33,6 +33,7 @@ use pczt::roles::io_finalizer::IoFinalizer;
 use pczt::roles::redactor::Redactor;
 use pczt::roles::verifier::Verifier;
 use pczt::Pczt;
+use pczt_signer_core::apply::apply_ironwood_signature;
 use pczt_signer_core::gate::{check, PcztShape};
 use pczt_signer_core::material::{bind_alphas, ironwood_action_rks};
 use pczt_signer_core::sighash::shielded_sighash;
@@ -216,6 +217,20 @@ fn a_frost_group_key_drives_a_real_ironwood_pczt() {
     let mut other = sighash;
     other[0] ^= 0xff;
     assert!(verify_with_group_key_and_alpha(&ak, &m.alpha, &other, &sig).is_err());
+
+    // 7. Land it. The Signer role re-verifies against the action's rk, so this also proves the
+    //    aggregate is the signature that transaction expects.
+    let signed = apply_ironwood_signature(pczt.clone(), m.action_index, &sig)
+        .expect("signer role accepts the aggregate");
+    assert_eq!(
+        signed.ironwood().actions()[m.action_index as usize]
+            .spend()
+            .spend_auth_sig(),
+        &Some(sig)
+    );
+
+    // A signature produced for a different randomizer must not be accepted for this action.
+    assert!(apply_ironwood_signature(pczt, m.action_index, &[0x5Au8; 64]).is_err());
 }
 
 #[test]
@@ -310,4 +325,26 @@ fn proof_size_dominates_a_request_pczt() {
         "clearing an absent proof must be a no-op"
     );
     check(&PcztShape::of(&stripped)).expect("stripped pczt still admitted");
+}
+
+/// Regenerate the stored fixture. Run with `--ignored` after any change to the builder or the
+/// wallet stack; the resulting bytes are committed and pinned by `tests/fixture_pczt.rs`.
+#[test]
+#[ignore]
+fn regen_fixture() {
+    let mut rng = FrostRng;
+    let dkg = run_dkg(2, 2, &mut rng).expect("dkg");
+    // A fixed `ak` would be nicer for a stored fixture, but a FROST group key only exists as the
+    // output of a DKG, so the fixture records whichever group it was built for.
+    let ak = dkg.group_verifying_key().unwrap();
+    let pczt = fixture_pczt(&ak);
+    let bytes = pczt.serialize().expect("serialize");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut hexed = String::with_capacity(bytes.len() * 2 + 1);
+    for b in &bytes {
+        hexed.push_str(&format!("{b:02x}"));
+    }
+    hexed.push('\n');
+    std::fs::write(dir.join("ironwood_1action.hex"), hexed).unwrap();
 }

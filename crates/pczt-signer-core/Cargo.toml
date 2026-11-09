@@ -16,6 +16,8 @@ frost-vault-core = { path = "../frost-vault-core" }
 # into constructing the wrong one, so the ability simply is not linked.
 pczt = { path = "../../librustzcash/pczt", default-features = false, features = ["std", "orchard", "signer"] }
 zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
+# Needed only to name `orchard::ValuePool` when building a `SpendAuthSignature`; still no circuit.
+orchard = { version = "0.16", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # Test-only: build one real Ironwood PCZT to run the flow end to end. These features stay out of
@@ -25,6 +27,8 @@ zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", defaul
 rand = { version = "0.10", features = ["sys_rng"] }
 rand08 = { package = "rand", version = "0.8" }
 ff = "0.14"
-orchard = { version = "0.16", default-features = false, features = ["std"] }
 zcash_primitives = { path = "../../librustzcash/zcash_primitives", default-features = false, features = ["std"] }
 pczt = { path = "../../librustzcash/pczt", default-features = false, features = ["std", "orchard", "signer", "zcp-builder", "io-finalizer"] }
+
+[dev-dependencies.hex]
+version = "0.4"

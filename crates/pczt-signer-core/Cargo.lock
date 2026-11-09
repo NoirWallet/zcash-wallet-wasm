@@ -1028,6 +1028,7 @@ version = "0.1.0"
 dependencies = [
  "ff 0.14.0",
  "frost-vault-core",
+ "hex",
  "orchard",
  "pczt",
  "rand 0.10.3",
