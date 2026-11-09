@@ -16,6 +16,7 @@ crate-type = ["rlib", "cdylib"]
 reddsa = { version = "0.5.2", features = ["frost"] }
 frost-rerandomized = { version = "=3.0.0" }
 zeroize = { version = "1", features = ["derive"] }
+sha2 = { version = "0.10", default-features = false }
 # Traits only (RngCore/CryptoRng). No `getrandom` feature here on purpose: the entropy source is
 # wired by the final artifact (js feature for wasm, OsRng for native). A library that quietly pins
 # an RNG feature is how a deterministic nonce stream reaches FROST.

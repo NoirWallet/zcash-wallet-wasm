@@ -23,10 +23,12 @@
 //!   Keystone envelope binds no session, group, sender or round, so it cannot carry FROST rounds.
 //! * [`state`] — the DKG and signing session state machines, plus per-spend nonce lifecycle.
 
+pub mod custody;
 pub mod protocol;
 pub mod session;
 pub mod state;
 pub mod threshold;
 
+pub use custody::{Recovery, SessionGuard, SessionProgress, ShareBackup, ShareIdentity};
 pub use session::{CoordinatorSession, SessionConfig, SessionError, SignerSession};
 pub use threshold::{DkgOutput, Suite};
