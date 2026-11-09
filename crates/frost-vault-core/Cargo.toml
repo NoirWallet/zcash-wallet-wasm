@@ -1,0 +1,26 @@
+[package]
+name = "frost-vault-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "FROST threshold signing protocol core for the Noir FROST Secure Vault"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# FROST(Pallas, BLAKE2b-512) — the RedPallas ciphersuite Orchard/Ironwood spend auth uses.
+# 0.5.x is the last reddsa line that ships the `frost` feature; 0.6.1 (pulled by orchard 0.16)
+# dropped it. The two only ever meet at the byte boundary: ak 32B / FVK 96B / signature 64B.
+reddsa = { version = "0.5.2", features = ["frost"] }
+frost-rerandomized = { version = "=3.0.0" }
+zeroize = { version = "1", features = ["derive"] }
+# Traits only (RngCore/CryptoRng). No `getrandom` feature here on purpose: the entropy source is
+# wired by the final artifact (js feature for wasm, OsRng for native). A library that quietly pins
+# an RNG feature is how a deterministic nonce stream reaches FROST.
+rand_core = { version = "0.6" }
+
+[dev-dependencies]
+hex = "0.4"
+rand = "0.8"
