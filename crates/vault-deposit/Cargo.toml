@@ -1,0 +1,14 @@
+[package]
+name = "vault-deposit"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Deposit denomination policy and canary gating for the FROST Secure Vault"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# Only the ZIP 318 constants and the denomination helper: pure arithmetic, no engine, no builder.
+zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
