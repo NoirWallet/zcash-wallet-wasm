@@ -11,9 +11,20 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 frost-vault-core = { path = "../frost-vault-core" }
-# orchard without `circuit`: the signer verifies, it never proves.
+# `orchard` without `circuit`: the signer verifies, it never proves.
+# No builder/prover features here either — a signer that can construct transactions can be talked
+# into constructing the wrong one, so the ability simply is not linked.
 pczt = { path = "../../librustzcash/pczt", default-features = false, features = ["std", "orchard", "signer"] }
 zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
 
 [dev-dependencies]
-rand = "0.8"
+# Test-only: build one real Ironwood PCZT to run the flow end to end. These features stay out of
+# the library build.
+# Two RNG lines on purpose: librustzcash in this tree is on rand_core 0.10, while FROST
+# (via reddsa 0.5) is on rand_core 0.6. Both must be wired explicitly.
+rand = { version = "0.10", features = ["sys_rng"] }
+rand08 = { package = "rand", version = "0.8" }
+ff = "0.14"
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+zcash_primitives = { path = "../../librustzcash/zcash_primitives", default-features = false, features = ["std"] }
+pczt = { path = "../../librustzcash/pczt", default-features = false, features = ["std", "orchard", "signer", "zcp-builder", "io-finalizer"] }

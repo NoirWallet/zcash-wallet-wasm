@@ -135,7 +135,7 @@ pub fn bind_alphas(
 mod tests {
     use super::*;
     use frost_vault_core::threshold::run_dkg;
-    use rand::rngs::OsRng;
+    use rand08::rngs::OsRng;
 
     fn alpha(tag: u8) -> [u8; 32] {
         let mut a = [0u8; 32];
