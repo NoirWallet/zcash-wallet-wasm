@@ -2280,6 +2280,7 @@ dependencies = [
 name = "pczt-signer-core"
 version = "0.1.0"
 dependencies = [
+ "ff 0.14.0",
  "frost-vault-core",
  "orchard",
  "pczt",
@@ -3989,6 +3990,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "vault-wasm"
+version = "0.1.0"
+dependencies = [
+ "frost-vault-core",
+ "getrandom 0.2.16",
+ "js-sys",
+ "pczt",
+ "pczt-signer-core",
+ "rand_core 0.6.4",
+ "vault-deposit",
+ "vault-keyset",
+ "wasm-bindgen",
+ "zcash_address",
+ "zcash_protocol",
+]
+
+[[package]]
 name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4481,6 +4499,7 @@ dependencies = [
  "vault-deposit",
  "vault-keyset",
  "vault-pczt",
+ "vault-wasm",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-rayon",

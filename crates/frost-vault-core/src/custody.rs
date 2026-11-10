@@ -397,6 +397,67 @@ pub trait SessionStore {
     fn delete(&mut self, key: &str) -> Result<(), Self::Error>;
 }
 
+/// Encode a marker. Hosts that cannot implement [`SessionStore`] (anything behind a wasm boundary, for
+/// instance) just persist this blob and hand it back on the next start.
+pub fn marker_bytes(session_id: [u8; 16], progress: SessionProgress) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(18);
+    bytes.push(1u8);
+    bytes.extend_from_slice(&session_id);
+    bytes.push(match progress {
+        SessionProgress::Created => 0,
+        SessionProgress::Committed => 1,
+        SessionProgress::Consumed => 2,
+    });
+    bytes
+}
+
+/// Decode a persisted marker. `None` (nothing persisted) is the same as [`Recovery::Clean`].
+pub fn recover_from_marker(bytes: Option<&[u8]>) -> Result<Recovery, MarkerError> {
+    let Some(bytes) = bytes else {
+        return Ok(Recovery::Clean);
+    };
+    let (session_id, progress) = parse_marker(bytes)?;
+    Ok(match progress {
+        SessionProgress::Created => Recovery::Discardable {
+            session_id,
+            progress,
+        },
+        SessionProgress::Committed | SessionProgress::Consumed => Recovery::Burned {
+            session_id,
+            progress,
+        },
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerError {
+    Malformed,
+}
+
+impl core::fmt::Display for MarkerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("malformed session marker")
+    }
+}
+
+impl std::error::Error for MarkerError {}
+
+/// Decode the marker's fields.
+pub fn parse_marker(bytes: &[u8]) -> Result<([u8; 16], SessionProgress), MarkerError> {
+    if bytes.len() != 18 || bytes[0] != 1 {
+        return Err(MarkerError::Malformed);
+    }
+    let mut session_id = [0u8; 16];
+    session_id.copy_from_slice(&bytes[1..17]);
+    let progress = match bytes[17] {
+        0 => SessionProgress::Created,
+        1 => SessionProgress::Committed,
+        2 => SessionProgress::Consumed,
+        _ => return Err(MarkerError::Malformed),
+    };
+    Ok((session_id, progress))
+}
+
 /// Key under which the marker lives. One live session at a time is the rule, so one key suffices.
 pub const MARKER_KEY: &str = "noir-frost-vault/session-marker";
 
@@ -478,19 +539,7 @@ impl SessionGuard {
         let Some(bytes) = store.get(MARKER_KEY).map_err(GuardError::Store)? else {
             return Ok(Recovery::Clean);
         };
-        let (session_id, progress) = decode_marker(&bytes)?;
-        Ok(match progress {
-            // Nothing left the device, so the nonces are worthless but also unspent and unpublished.
-            SessionProgress::Created => Recovery::Discardable {
-                session_id,
-                progress,
-            },
-            // Commitments or shares went out; the nonces must be treated as burned.
-            SessionProgress::Committed | SessionProgress::Consumed => Recovery::Burned {
-                session_id,
-                progress,
-            },
-        })
+        recover_from_marker(Some(&bytes)).map_err(|_| GuardError::Malformed)
     }
 
     /// Clear a marker after the caller has dealt with it.
@@ -498,16 +547,15 @@ impl SessionGuard {
         store.delete(MARKER_KEY).map_err(GuardError::Store)
     }
 
+    /// The blob to persist. Same bytes the [`SessionStore`] path writes, so the two APIs interoperate.
+    pub fn marker(&self) -> Vec<u8> {
+        marker_bytes(self.session_id, self.progress)
+    }
+
     fn persist<S: SessionStore>(&self, store: &mut S) -> Result<(), GuardError<S::Error>> {
-        let mut bytes = Vec::with_capacity(18);
-        bytes.push(1u8);
-        bytes.extend_from_slice(&self.session_id);
-        bytes.push(match self.progress {
-            SessionProgress::Created => 0,
-            SessionProgress::Committed => 1,
-            SessionProgress::Consumed => 2,
-        });
-        store.put(MARKER_KEY, &bytes).map_err(GuardError::Store)
+        store
+            .put(MARKER_KEY, &self.marker())
+            .map_err(GuardError::Store)
     }
 }
 

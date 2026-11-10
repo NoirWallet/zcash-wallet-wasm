@@ -196,6 +196,140 @@ where
     })
 }
 
+// ---------------------------------------------------------------------------
+// DKG, one round at a time.
+//
+// `run_dkg` drives every participant in one process, which is only useful for tests. A device in the
+// field runs exactly one participant and moves serialized state across the wire between rounds, so
+// each round needs its own entry point and its own byte encoding.
+//
+// Slots are 0-based roster indices; the FROST identifier for a slot is `slot + 1`, matching
+// `run_dkg`. Keeping identifiers out of the API means a frontend never has to shuttle them around.
+// ---------------------------------------------------------------------------
+
+/// FROST identifier for a roster slot. Both the DKG rounds and the session use this mapping.
+pub fn slot_identifier(slot: u8) -> Result<Identifier, ThresholdError> {
+    if (slot as u16) >= MAX_PARTICIPANTS {
+        return Err(ThresholdError::UnsupportedMode {
+            participants: slot as u16 + 1,
+            threshold: 1,
+        });
+    }
+    Identifier::try_from(slot as u16 + 1).map_err(|_| ThresholdError::UnsupportedMode {
+        participants: slot as u16 + 1,
+        threshold: 1,
+    })
+}
+
+/// Round 1 output: a secret to keep and a broadcast to send everyone.
+pub struct DkgRound1 {
+    pub secret: Vec<u8>,
+    pub broadcast: Vec<u8>,
+}
+
+/// Round 2 output: a secret to keep and one package per peer, keyed by that peer's slot.
+pub struct DkgRound2 {
+    pub secret: Vec<u8>,
+    pub outgoing: BTreeMap<u8, Vec<u8>>,
+}
+
+/// Round 3 output: this device's key package and the group's public package.
+pub struct DkgFinal {
+    pub key_package: Vec<u8>,
+    pub public_key_package: Vec<u8>,
+}
+
+/// Round 1 of the DKG for one device.
+pub fn dkg_part1<R>(
+    participants: u16,
+    threshold: u16,
+    slot: u8,
+    rng: &mut R,
+) -> Result<DkgRound1, ThresholdError>
+where
+    R: CryptoRng + RngCore,
+{
+    if !SUPPORTED_MODES.contains(&(participants, threshold)) {
+        return Err(ThresholdError::UnsupportedMode {
+            participants,
+            threshold,
+        });
+    }
+    let identifier = slot_identifier(slot)?;
+    let (secret, package) =
+        frost_core::keys::dkg::part1(identifier, participants, threshold, &mut *rng)
+            .map_err(frost)?;
+    Ok(DkgRound1 {
+        secret: secret.serialize().map_err(frost)?,
+        broadcast: package.serialize().map_err(frost)?,
+    })
+}
+
+/// Round 2: produce one sealed package per peer from the round-1 broadcasts.
+pub fn dkg_part2(
+    secret: &[u8],
+    peer_broadcasts: &BTreeMap<u8, Vec<u8>>,
+) -> Result<DkgRound2, ThresholdError> {
+    let secret = frost_core::keys::dkg::round1::SecretPackage::<Suite>::deserialize(secret)
+        .map_err(frost)?;
+    let mut peers = BTreeMap::new();
+    for (slot, bytes) in peer_broadcasts {
+        let package =
+            frost_core::keys::dkg::round1::Package::<Suite>::deserialize(bytes).map_err(frost)?;
+        peers.insert(slot_identifier(*slot)?, package);
+    }
+    let (secret, outgoing) = frost_core::keys::dkg::part2(secret, &peers).map_err(frost)?;
+    let mut by_slot = BTreeMap::new();
+    for (identifier, package) in outgoing {
+        by_slot.insert(slot_of(identifier)?, package.serialize().map_err(frost)?);
+    }
+    Ok(DkgRound2 {
+        secret: secret.serialize().map_err(frost)?,
+        outgoing: by_slot,
+    })
+}
+
+/// Round 3: finalize with the broadcasts and the packages addressed to this device.
+pub fn dkg_part3(
+    secret: &[u8],
+    peer_broadcasts: &BTreeMap<u8, Vec<u8>>,
+    incoming: &BTreeMap<u8, Vec<u8>>,
+) -> Result<DkgFinal, ThresholdError> {
+    let secret = frost_core::keys::dkg::round2::SecretPackage::<Suite>::deserialize(secret)
+        .map_err(frost)?;
+    let mut broadcasts = BTreeMap::new();
+    for (slot, bytes) in peer_broadcasts {
+        let package =
+            frost_core::keys::dkg::round1::Package::<Suite>::deserialize(bytes).map_err(frost)?;
+        broadcasts.insert(slot_identifier(*slot)?, package);
+    }
+    let mut received = BTreeMap::new();
+    for (slot, bytes) in incoming {
+        let package =
+            frost_core::keys::dkg::round2::Package::<Suite>::deserialize(bytes).map_err(frost)?;
+        received.insert(slot_identifier(*slot)?, package);
+    }
+    let (key_package, public_key_package) =
+        frost_core::keys::dkg::part3(&secret, &broadcasts, &received).map_err(frost)?;
+    Ok(DkgFinal {
+        key_package: key_package.serialize().map_err(frost)?,
+        public_key_package: public_key_package.serialize().map_err(frost)?,
+    })
+}
+
+/// Inverse of [`slot_identifier`]: recover the roster slot from an identifier.
+pub fn slot_of(identifier: Identifier) -> Result<u8, ThresholdError> {
+    for slot in 0..MAX_PARTICIPANTS {
+        let slot_u8 = slot as u8;
+        if slot_identifier(slot_u8)? == identifier {
+            return Ok(slot_u8);
+        }
+    }
+    Err(ThresholdError::Frost(format!(
+        "identifier {identifier:?} is not a roster slot"
+    )))
+}
+
 /// One signer's round-1 output: its nonces (secret, local only) and commitments (broadcast).
 pub struct Commitment {
     pub identifier: Identifier,

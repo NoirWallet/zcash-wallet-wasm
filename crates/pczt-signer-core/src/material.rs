@@ -15,6 +15,7 @@
 //! exists — so there is nothing to derive; what a signer can and must do is check the relation.
 
 use frost_vault_core::threshold::randomized_verifying_key;
+use pczt::roles::verifier::Verifier;
 use pczt::Pczt;
 
 /// One Ironwood action's randomized verification key, as carried by the PCZT.
@@ -43,6 +44,8 @@ pub enum MaterialError {
     AlphaCount { actions: usize, alphas: usize },
     /// An action carries no `rk`, so nothing can be verified for it.
     MissingRk { action_index: u32 },
+    /// The PCZT could not be read by the verifier role.
+    Unreadable,
 }
 
 impl core::fmt::Display for MaterialError {
@@ -57,6 +60,7 @@ impl core::fmt::Display for MaterialError {
                 "{alphas} alpha value(s) supplied for {actions} ironwood action(s)"
             ),
             Self::MissingRk { action_index } => write!(f, "action {action_index}: no rk present"),
+            Self::Unreadable => f.write_str("PCZT could not be read by the verifier role"),
         }
     }
 }
@@ -103,6 +107,42 @@ pub fn ironwood_action_rks(pczt: &Pczt) -> Result<Vec<ActionRk>, MaterialError> 
         out.push(ActionRk { action_index, rk });
     }
     Ok(out)
+}
+
+/// Read each Ironwood action's randomizer from the PCZT.
+///
+/// This is the coordinator's half of the §8.6 correction: `alpha` is not derived from commitments, it
+/// is read from the transaction that was already built. The only way `pczt` exposes it is through the
+/// Verifier role's bundle accessor, which is why this lives here rather than next to the gate.
+pub fn extract_alphas(pczt: &Pczt) -> Result<Vec<[u8; 32]>, MaterialError> {
+    use ff::PrimeField;
+    let verifier = Verifier::new(pczt.clone());
+    let mut alphas = Vec::new();
+    verifier
+        .with_ironwood::<(), _>(|bundle| {
+            for action in bundle.actions() {
+                let alpha = action
+                    .spend()
+                    .alpha()
+                    .ok_or(pczt::roles::verifier::OrchardError::Custom(()))?;
+                alphas.push(alpha.to_repr());
+            }
+            Ok(())
+        })
+        .map_err(|_| MaterialError::Unreadable)?;
+    Ok(alphas)
+}
+
+/// Drop every zk proof, producing the transport copy.
+///
+/// A one-action Ironwood proof is 4992 bytes — larger than the rest of the PCZT — and a signer that
+/// verifies displayed amounts against note commitments does not need it.
+pub fn strip_proofs(pczt: Pczt) -> Pczt {
+    use pczt::roles::redactor::Redactor;
+    Redactor::new(pczt)
+        .redact_ironwood_with(|mut bundle| bundle.clear_zkproof())
+        .redact_orchard_with(|mut bundle| bundle.clear_zkproof())
+        .finish()
 }
 
 /// Pair coordinator-supplied `alpha` values with the PCZT's action `rk`s.

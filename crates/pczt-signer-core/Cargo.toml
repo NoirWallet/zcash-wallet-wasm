@@ -18,6 +18,7 @@ pczt = { path = "../../librustzcash/pczt", default-features = false, features = 
 zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
 # Needed only to name `orchard::ValuePool` when building a `SpendAuthSignature`; still no circuit.
 orchard = { version = "0.16", default-features = false, features = ["std"] }
+ff = "0.14"
 
 [dev-dependencies]
 # Test-only: build one real Ironwood PCZT to run the flow end to end. These features stay out of

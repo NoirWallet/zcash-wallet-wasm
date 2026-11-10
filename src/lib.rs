@@ -32,5 +32,13 @@ pub const PRUNING_DEPTH: usize = 100;
 #[cfg(feature = "wasm-parallel")]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
+/// FROST Secure Vault JS API: `Dkg`, `Coordinator`, `Signer`, `Keyset`, `ShareBackup`, `Canary`,
+/// `Deposit`, `Verification`, `MessageSet`, `SessionMarker`, `EnvelopeCodec`.
+///
+/// Re-exported rather than shipped as a second wasm module, so the frontend instantiates one package.
+/// Enable with `--features frost-vault`.
+#[cfg(feature = "frost-vault")]
+pub use vault_wasm::*;
+
 #[wasm_bindgen]
 pub struct BlockRange(pub u32, pub u32);

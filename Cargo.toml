@@ -24,6 +24,7 @@ frost-vault = [
     "dep:vault-keyset",
     "dep:vault-pczt",
     "dep:vault-deposit",
+    "dep:vault-wasm",
 ]
 
 [dependencies.frost-vault-core]
@@ -44,6 +45,12 @@ optional = true
 
 [dependencies.vault-deposit]
 path = "crates/vault-deposit"
+optional = true
+
+# The JS-facing vault API. Re-exported from lib.rs so the frontend gets one wasm module instead of
+# having to instantiate a second one.
+[dependencies.vault-wasm]
+path = "crates/vault-wasm"
 optional = true
 
 [dependencies.zcash_voting]

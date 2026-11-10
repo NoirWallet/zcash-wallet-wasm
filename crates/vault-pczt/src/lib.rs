@@ -204,8 +204,8 @@ pub mod fixture {
         let target_height = network.activation_height(NetworkUpgrade::Nu6_3)? + 1;
 
         let rho = Rho::from_bytes(&[1u8; 32]).into_option()?;
-        let rseed = (0u8..=255)
-            .find_map(|byte| RandomSeed::from_bytes([byte; 32], &rho).into_option())?;
+        let rseed =
+            (0u8..=255).find_map(|byte| RandomSeed::from_bytes([byte; 32], &rho).into_option())?;
         let note = Note::from_parts(
             recipient,
             orchard::value::NoteValue::from_raw(spend_value),
@@ -235,7 +235,9 @@ pub mod fixture {
         );
         match pool {
             ValuePool::Orchard => {
-                builder.add_orchard_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path).ok()?;
+                builder
+                    .add_orchard_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path)
+                    .ok()?;
             }
             ValuePool::Ironwood => {
                 builder
@@ -252,7 +254,9 @@ pub mod fixture {
             )
             .ok()?;
 
-        let parts = builder.build_for_pczt(rng, &zip317::FeeRule::standard()).ok()?;
+        let parts = builder
+            .build_for_pczt(rng, &zip317::FeeRule::standard())
+            .ok()?;
         let creator = Creator::build_from_parts(parts.pczt_parts)?;
         IoFinalizer::new(creator).finalize_io(rand::rng()).ok()
     }

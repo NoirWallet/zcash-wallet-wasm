@@ -237,3 +237,128 @@ fn unsupported_mode_is_refused() {
     assert!(run_dkg(1, 1, &mut rng).is_err());
     assert!(run_dkg(5, 3, &mut rng).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Per-round DKG, the way a device actually runs it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn per_round_dkg_agrees_with_the_single_process_ceremony() {
+    use frost_vault_core::threshold::{dkg_part1, dkg_part2, dkg_part3};
+
+    // Three devices, each holding only its own secret between rounds.
+    let (participants, threshold) = (3u16, 2u16);
+    let mut rng = OsRng;
+    let mut secrets = BTreeMap::new();
+    let mut broadcasts = BTreeMap::new();
+    for slot in 0..participants {
+        let r = dkg_part1(participants, threshold, slot as u8, &mut rng).expect("part1");
+        secrets.insert(slot as u8, r.secret);
+        broadcasts.insert(slot as u8, r.broadcast);
+    }
+
+    // Round 2: every device seals one package per peer; `inbox` is per recipient.
+    let mut round2_secrets = BTreeMap::new();
+    let mut inbox: BTreeMap<u8, BTreeMap<u8, Vec<u8>>> = BTreeMap::new();
+    for slot in 0..participants {
+        let slot = slot as u8;
+        let peers: BTreeMap<u8, Vec<u8>> = broadcasts
+            .iter()
+            .filter(|(peer, _)| **peer != slot)
+            .map(|(peer, bytes)| (*peer, bytes.clone()))
+            .collect();
+        let r = dkg_part2(&secrets[&slot], &peers).expect("part2");
+        round2_secrets.insert(slot, r.secret);
+        for (recipient, bytes) in r.outgoing {
+            inbox.entry(recipient).or_default().insert(slot, bytes);
+        }
+    }
+
+    // Round 3: each device finalizes with what it received.
+    let mut group_keys = Vec::new();
+    for slot in 0..participants {
+        let slot = slot as u8;
+        let peers: BTreeMap<u8, Vec<u8>> = broadcasts
+            .iter()
+            .filter(|(peer, _)| **peer != slot)
+            .map(|(peer, bytes)| (*peer, bytes.clone()))
+            .collect();
+        let f = dkg_part3(&round2_secrets[&slot], &peers, &inbox[&slot]).expect("part3");
+        let package: PublicKeyPackage =
+            frost_vault_core::threshold::PublicKeyPackage::deserialize(&f.public_key_package)
+                .expect("public package parses");
+        group_keys.push(package.verifying_key().serialize().unwrap());
+    }
+    // All three land on the same group key, and it is a usable `ak`.
+    assert_eq!(group_keys[0], group_keys[1]);
+    assert_eq!(group_keys[1], group_keys[2]);
+    assert_eq!(group_keys[0].len(), 32);
+
+    // And the resulting key packages sign: two of the three.
+    let mut key_packages = BTreeMap::new();
+    for slot in 0..participants {
+        let slot = slot as u8;
+        let peers: BTreeMap<u8, Vec<u8>> = broadcasts
+            .iter()
+            .filter(|(peer, _)| **peer != slot)
+            .map(|(peer, bytes)| (*peer, bytes.clone()))
+            .collect();
+        let f = dkg_part3(&round2_secrets[&slot], &peers, &inbox[&slot]).expect("part3");
+        key_packages.insert(
+            frost_vault_core::threshold::slot_identifier(slot).unwrap(),
+            frost_vault_core::threshold::KeyPackage::deserialize(&f.key_package).unwrap(),
+        );
+    }
+    let mut commitments = BTreeMap::new();
+    let mut round1 = Vec::new();
+    for slot in [0u8, 1u8] {
+        let id = frost_vault_core::threshold::slot_identifier(slot).unwrap();
+        let c = commit(&key_packages[&id], &mut rng);
+        commitments.insert(id, c.commitments);
+        round1.push(c);
+    }
+    let alpha = alpha(0x77);
+    let msg = message(0x88);
+    let mut shares = BTreeMap::new();
+    for c in &round1 {
+        shares.insert(
+            c.identifier,
+            sign_with_alpha(
+                &c.nonces,
+                &key_packages[&c.identifier],
+                &commitments,
+                &msg,
+                &alpha,
+            )
+            .expect("share"),
+        );
+    }
+    let group: PublicKeyPackage = frost_vault_core::threshold::PublicKeyPackage::deserialize(
+        &dkg_part3(
+            &round2_secrets[&0],
+            &{
+                let mut p = BTreeMap::new();
+                for (slot, bytes) in &broadcasts {
+                    if *slot != 0 {
+                        p.insert(*slot, bytes.clone());
+                    }
+                }
+                p
+            },
+            &inbox[&0],
+        )
+        .unwrap()
+        .public_key_package,
+    )
+    .unwrap();
+    let sig = aggregate_with_alpha(&group, &commitments, &msg, &alpha, &shares).expect("aggregate");
+    let ak: [u8; 32] = group_keys[0].as_slice().try_into().unwrap();
+    verify_with_group_key_and_alpha(&ak, &alpha, &msg, &sig).expect("verifies");
+}
+
+#[test]
+fn per_round_dkg_rejects_an_unsupported_mode() {
+    let mut rng = OsRng;
+    assert!(frost_vault_core::threshold::dkg_part1(3, 5, 0, &mut rng).is_err());
+    assert!(frost_vault_core::threshold::dkg_part1(2, 2, 3, &mut rng).is_err());
+}
