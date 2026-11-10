@@ -86,6 +86,9 @@ mod browser_fixture;
 mod confirmations_tests;
 #[cfg(test)]
 mod fee_tests;
+// Needs the vault crates, which are behind the optional feature.
+#[cfg(all(test, feature = "frost-vault"))]
+mod frost_vault_tests;
 const BATCH_SIZE: u32 = 10000;
 pub(crate) const DEFAULT_ZERO_INDEXER_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const STANDARD_FEE_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1071,6 +1074,35 @@ where
             AccountPurpose::Spending {
                 derivation: Some(derivation),
             },
+            key_source,
+        )
+        .await
+    }
+
+    /// Import a spending account from a UFVK that has **no** ZIP-32 derivation (FROST vault flow).
+    ///
+    /// A hardware wallet's UFVK carries the derivation it was derived from, so the PCZT can tell the
+    /// device which key to use. A FROST vault's FVK is `ak ‖ nk ‖ rivk` spliced together from a group
+    /// key and a recovery key; there is no seed and therefore no derivation path. Recording one would
+    /// be a lie that the signer might act on, so this account is imported with `derivation: None`.
+    ///
+    /// The account behaves like a hardware account in every other respect: it can receive, be synced
+    /// and be selected from, and PCZTs created from it come back unsigned for an external signer.
+    pub async fn create_account_ufvk_external(
+        &self,
+        account_name: &str,
+        ufvk_encoded: &str,
+        birthday_height: Option<u32>,
+        key_source: Option<&str>,
+    ) -> Result<AccountId, Error> {
+        let ufvk = UnifiedFullViewingKey::decode(&self.network, ufvk_encoded)
+            .map_err(|error| Error::KeyDecoding(error.to_string()))?;
+        tracing::info!("Importing UFVK account without a derivation (FROST vault)");
+        self.import_account_ufvk(
+            account_name,
+            &ufvk,
+            birthday_height,
+            AccountPurpose::Spending { derivation: None },
             key_source,
         )
         .await

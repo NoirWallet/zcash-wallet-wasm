@@ -1008,6 +1008,29 @@ impl WebWallet {
     /// (e.g. Keystone) can locate its keys. Serialize it with `Pczt.serialize()`
     /// before transporting via QR. `marginal_fee_zats` selects the ZIP-317 fee
     /// tier so hardware sends honor the same dynamic-fee tiers as software sends.
+    /// Import a spending account from a UFVK with no ZIP-32 derivation (FROST vault flow).
+    ///
+    /// Use this for a vault whose FVK was produced by a DKG rather than a seed. Unlike
+    /// [`Self::create_account_ufvk`] there is no `seed_fingerprint`/`account_hd_index` to pass, and
+    /// none is invented: the account is recorded as having no derivation.
+    pub async fn create_account_ufvk_external(
+        &self,
+        account_name: &str,
+        ufvk: &str,
+        birthday_height: Option<u32>,
+        key_source: Option<String>,
+    ) -> Result<u32, Error> {
+        self.inner
+            .create_account_ufvk_external(
+                account_name,
+                ufvk,
+                birthday_height,
+                key_source.as_deref(),
+            )
+            .await
+            .map(|id| *id)
+    }
+
     pub async fn pczt_create(
         &self,
         account_id: u32,
