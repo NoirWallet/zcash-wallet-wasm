@@ -49,11 +49,8 @@ fn vault_keyset() -> vault_keyset::VaultKeyset {
 fn a_vault_account_is_imported_without_a_derivation() {
     let keyset = vault_keyset();
     let mut db = test_db();
-    let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(
-        &NETWORK,
-        &keyset.ufvk,
-    )
-    .expect("vault ufvk decodes");
+    let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &keyset.ufvk)
+        .expect("vault ufvk decodes");
 
     let id = db
         .import_account_ufvk(
@@ -75,7 +72,10 @@ fn a_vault_account_is_imported_without_a_derivation() {
             purpose: AccountPurpose::Spending { derivation },
             key_source,
         } => {
-            assert!(derivation.is_none(), "a vault account must have no derivation");
+            assert!(
+                derivation.is_none(),
+                "a vault account must have no derivation"
+            );
             assert_eq!(key_source.as_deref(), Some("frost-dkg"));
         }
         other => panic!("unexpected account source: {other:?}"),
@@ -93,11 +93,7 @@ fn a_vault_account_address_is_shielded_only() {
     // P8: a transparent receiver would let someone send funds the threshold can never spend.
     let keyset = vault_keyset();
     let mut db = test_db();
-    let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(
-        &NETWORK,
-        &keyset.ufvk,
-    )
-    .unwrap();
+    let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &keyset.ufvk).unwrap();
     let id = db
         .import_account_ufvk(
             "frost-vault",
@@ -123,13 +119,15 @@ fn a_view_only_import_is_still_possible_for_the_same_keyset() {
     // read-only, which is what a watching device would do.
     let keyset = vault_keyset();
     let mut db = test_db();
-    let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(
-        &NETWORK,
-        &keyset.ufvk,
-    )
-    .unwrap();
+    let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &keyset.ufvk).unwrap();
     let id = db
-        .import_account_ufvk("vault-watch", &ufvk, &birthday(), AccountPurpose::ViewOnly, None)
+        .import_account_ufvk(
+            "vault-watch",
+            &ufvk,
+            &birthday(),
+            AccountPurpose::ViewOnly,
+            None,
+        )
         .unwrap()
         .id();
     let account = db.get_account(id).unwrap().unwrap();
@@ -158,7 +156,12 @@ fn the_wasm_import_rejects_a_malformed_ufvk_before_touching_the_network() {
         .build()
         .expect("runtime");
     let error = runtime
-        .block_on(wallet.create_account_ufvk_external("bad", "uview1not-a-key", Some(3_000_000), None))
+        .block_on(wallet.create_account_ufvk_external(
+            "bad",
+            "uview1not-a-key",
+            Some(3_000_000),
+            None,
+        ))
         .expect_err("must be refused");
     assert!(
         matches!(error, crate::error::Error::KeyDecoding(_)),
