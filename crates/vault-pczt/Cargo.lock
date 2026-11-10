@@ -1551,15 +1551,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "secrecy"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bd1c54ea06cfd2f6b63219704de0b9b4f72dcc2b8fdef820be6cd799780e91e"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1874,7 +1865,7 @@ version = "0.1.0"
 dependencies = [
  "orchard",
  "sha2 0.10.9",
- "zcash_keys",
+ "zcash_address",
  "zcash_protocol",
  "zeroize",
 ]
@@ -2009,30 +2000,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zcash_keys"
-version = "0.17.0"
-dependencies = [
- "bech32",
- "blake2b_simd",
- "bls12_381 0.9.1",
- "bs58",
- "corez",
- "group 0.14.0",
- "memuse",
- "nonempty",
- "orchard",
- "rand_core 0.10.1",
- "secrecy",
- "subtle",
- "tracing",
- "zcash_address",
- "zcash_encoding",
- "zcash_protocol",
- "zcash_transparent",
- "zip32",
-]
-
-[[package]]
 name = "zcash_note_encryption"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2076,7 +2043,9 @@ name = "zcash_protocol"
 version = "0.11.0"
 dependencies = [
  "corez",
+ "document-features",
  "hex",
+ "memuse",
  "zcash_encoding",
 ]
 

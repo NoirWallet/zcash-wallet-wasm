@@ -61,4 +61,15 @@ lint:
 check:
 	cargo check --target wasm32-unknown-unknown -Z build-std=panic_abort,std
 
-.PHONY: build lint check serve test-native build-wasm build-voting-wasm build-voting-sequential build-voting-proof build-frost-wasm build-all-wasm check-frost check-all test-frost test-voting-browser
+# Every Cargo target dir in this tree. `cargo clean` only knows about the root package: the crates
+# under `crates/` are standalone packages, not workspace members, so each keeps its own `target/`
+# and has to be removed by hand. The shared test dir lives under the root `target/`.
+clean-cargo:
+	cargo clean
+	rm -rf crates/*/target
+
+# Build outputs as well as target dirs: the wasm packages and the release staging directory.
+clean: clean-cargo
+	rm -rf pkg pkg-* wasm-dist
+
+.PHONY: clean clean-cargo build lint check serve test-native build-wasm build-voting-wasm build-voting-sequential build-voting-proof build-frost-wasm build-all-wasm check-frost check-all test-frost test-voting-browser
