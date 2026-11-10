@@ -237,17 +237,65 @@ function groupKey() {
   return finalRound[0].group_verifying_key();
 }
 
+// --- ceremonies for the other two modes ----------------------------------
+
+function runCeremony(participants, threshold) {
+  const ds = [];
+  for (let slot = 0; slot < participants; slot += 1) ds.push(new Dkg(participants, threshold, slot));
+
+  const r1 = [];
+  const bc = new MessageSet();
+  for (const d of ds) {
+    const r = d.part1();
+    r1.push(r.secret());
+    bc.set(d.slot(), r.broadcast());
+  }
+  const r2 = [];
+  const boxes = new Map();
+  for (let slot = 0; slot < participants; slot += 1) boxes.set(slot, new MessageSet());
+  for (const d of ds) {
+    const r = d.part2(r1[d.slot()], bc);
+    r2.push(r.secret());
+    const out = r.outgoing();
+    for (const to of out.slots()) boxes.get(to).set(d.slot(), out.get(to));
+  }
+  const packages = [];
+  let publicPackage = null;
+  for (const d of ds) {
+    const r = d.part3(r2[d.slot()], bc, boxes.get(d.slot()));
+    packages.push(r.key_package());
+    publicPackage = r.public_package ? r.public_package() : r.public_key_package();
+  }
+  return { keyPackages: packages, publicPackage };
+}
+
+const extraCeremonies = new Map();
+for (const mode of [[2, 2], [3, 3]]) {
+  check(`dkg: ${mode[1]}-of-${mode[0]} completes`, () => {
+    const ceremony = runCeremony(mode[0], mode[1]);
+    assert(ceremony.publicPackage.length > 0);
+    extraCeremonies.set(mode.join("-"), ceremony);
+  });
+}
+
 // --- signing session -----------------------------------------------------
 // Uses a synthetic sighash and alphas: the PCZT tier is not part of this package (it links a prover).
 // What this exercises is the whole message flow the frontend has to drive.
 
-function runSession() {
-  const signers = [0, 1];
-  const coordinator = new Coordinator(sessionId, PARTICIPANTS, THRESHOLD, signers, 1, publicPackages[0]);
-  const signerObjs = signers.map((slot) => new Signer(sessionId, slot, PARTICIPANTS, keyPackages[slot]));
+function runSessionFor(mode) {
+  const [participants, threshold] = mode;
+  const ceremony = extraCeremonies?.get(mode.join("-")) ?? null;
+  const signers = Array.from({ length: threshold }, (_, i) => i);
+  const pub = ceremony ? ceremony.publicPackage : publicPackages[0];
+  const packages = ceremony ? ceremony.keyPackages : keyPackages;
+  const coordinator = new Coordinator(sessionId, participants, threshold, signers, 1, pub);
+  const signerObjs = signers.map((slot) => new Signer(sessionId, slot, participants, packages[slot]));
 
   const inits = coordinator.init_all();
-  assert(inits.length === 2, `expected 2 init envelopes, got ${inits.length}`);
+  assert(
+    inits.length === threshold,
+    `expected ${threshold} init envelopes, got ${inits.length}`,
+  );
   const commitments = [];
   for (const [slot, envelope] of inits) {
     const idx = signers.indexOf(slot);
@@ -264,7 +312,7 @@ function runSession() {
   coordinator.prepare_payload(sighash, alphas);
 
   const payloads = coordinator.payloads();
-  assert(payloads.length === 2);
+  assert(payloads.length === threshold, `expected ${threshold} payloads`);
   for (const [slot, envelope] of payloads) {
     const idx = signers.indexOf(slot);
     const [gotSighash, gotAlphas] = signerObjs[idx].payload(envelope);
@@ -292,15 +340,17 @@ function runSession() {
   return { signatures, sighash, alphas };
 }
 
-check("session: 2-of-3 signs and aggregates", () => {
-  const { signatures } = runSession();
-  assert(signatures.length === 64);
+check("session: every supported mode signs and aggregates", () => {
+  for (const mode of [[2, 2], [3, 2], [3, 3]]) {
+    const { signatures } = runSessionFor(mode);
+    assert(signatures.length === 64, `${mode[1]}-of-${mode[0]}: ${signatures.length} bytes`);
+  }
 });
 
 // --- session marker ------------------------------------------------------
 
 check("session: the aggregate verifies against ak, and a tampered digest does not", () => {
-  const { signatures, sighash, alphas } = runSession();
+  const { signatures, sighash, alphas } = runSessionFor([3, 2]);
   Verification.verify_spend_auth(ak, alphas, sighash, signatures);
 
   const tampered = new Uint8Array(sighash);

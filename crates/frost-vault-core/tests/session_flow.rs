@@ -192,6 +192,74 @@ fn multi_action_signs_once_per_action_with_separate_nonces() {
 }
 
 #[test]
+fn three_of_three_needs_all_three() {
+    // t == n is a boundary: FROST needs every share, and the session must not consider itself ready
+    // with two of three.
+    let mut h = Harness::new(3, 3, vec![0, 1, 2], 1);
+    let payloads = h.run_to_verifying(1);
+    assert_eq!(payloads.len(), 3, "payload goes to every selected signer");
+
+    // Two of three shares: the coordinator must not proceed.
+    for env in payloads.iter().take(2) {
+        let slot = env.recipient;
+        let signer = h.signers.get_mut(&slot).unwrap();
+        signer.on_payload(env).unwrap();
+        signer.approve().unwrap();
+        let share = signer
+            .share(&h.dkg.key_packages[&h.identifiers[&slot]])
+            .unwrap();
+        h.coordinator.on_share(&share).unwrap();
+    }
+    assert_eq!(h.coordinator.phase(), SignPhase::Verifying);
+    assert!(
+        h.coordinator.aggregate().is_err(),
+        "2 of 3 must not aggregate"
+    );
+
+    // The third completes it.
+    let env = &payloads[2];
+    let slot = env.recipient;
+    let signer = h.signers.get_mut(&slot).unwrap();
+    signer.on_payload(env).unwrap();
+    signer.approve().unwrap();
+    let share = signer
+        .share(&h.dkg.key_packages[&h.identifiers[&slot]])
+        .unwrap();
+    h.coordinator.on_share(&share).unwrap();
+
+    let sigs = h.coordinator.aggregate().expect("3 of 3 aggregates");
+    let ak = h.dkg.group_verifying_key().unwrap();
+    verify_with_group_key_and_alpha(&ak, &alpha(b'a'), &sighash(), &sigs[0]).expect("verifies");
+}
+
+#[test]
+fn sessions_run_for_every_supported_mode() {
+    // 2-of-2, 2-of-3 and 3-of-3 differ only in how many shares must come back, but that difference is
+    // where an off-by-one in the collection logic would hide: each mode gets the same treatment here.
+    for (participants, threshold) in [(2u16, 2u16), (3, 2), (3, 3)] {
+        let slots: Vec<u8> = (0..threshold as u8).collect();
+        let mut h = Harness::new(participants, threshold, slots, 1);
+        let payloads = h.run_to_verifying(1);
+        assert_eq!(payloads.len(), threshold as usize);
+
+        for env in &payloads {
+            let slot = env.recipient;
+            let signer = h.signers.get_mut(&slot).unwrap();
+            signer.on_payload(env).unwrap();
+            signer.approve().unwrap();
+            let share = signer
+                .share(&h.dkg.key_packages[&h.identifiers[&slot]])
+                .unwrap();
+            h.coordinator.on_share(&share).unwrap();
+        }
+        let sigs = h.coordinator.aggregate().expect("aggregate");
+        let ak = h.dkg.group_verifying_key().unwrap();
+        verify_with_group_key_and_alpha(&ak, &alpha(b'a'), &sighash(), &sigs[0])
+            .unwrap_or_else(|e| panic!("{threshold}-of-{participants}: {e}"));
+    }
+}
+
+#[test]
 fn no_share_before_approval() {
     let mut h = Harness::new(2, 2, vec![0, 1], 1);
     let payloads = h.run_to_verifying(1);

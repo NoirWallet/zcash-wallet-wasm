@@ -243,11 +243,16 @@ fn unsupported_mode_is_refused() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn per_round_dkg_agrees_with_the_single_process_ceremony() {
+fn per_round_dkg_runs_for_every_supported_mode() {
+    for (participants, threshold) in [(2u16, 2u16), (3, 2), (3, 3)] {
+        per_round_dkg_once(participants, threshold);
+    }
+}
+
+fn per_round_dkg_once(participants: u16, threshold: u16) {
     use frost_vault_core::threshold::{dkg_part1, dkg_part2, dkg_part3};
 
-    // Three devices, each holding only its own secret between rounds.
-    let (participants, threshold) = (3u16, 2u16);
+    // Each device holds only its own secret between rounds.
     let mut rng = OsRng;
     let mut secrets = BTreeMap::new();
     let mut broadcasts = BTreeMap::new();
@@ -289,9 +294,10 @@ fn per_round_dkg_agrees_with_the_single_process_ceremony() {
                 .expect("public package parses");
         group_keys.push(package.verifying_key().serialize().unwrap());
     }
-    // All three land on the same group key, and it is a usable `ak`.
-    assert_eq!(group_keys[0], group_keys[1]);
-    assert_eq!(group_keys[1], group_keys[2]);
+    // Every participant lands on the same group key, and it is a usable `ak`.
+    for pair in group_keys.windows(2) {
+        assert_eq!(pair[0], pair[1], "participants disagree on the group key");
+    }
     assert_eq!(group_keys[0].len(), 32);
 
     // And the resulting key packages sign: two of the three.
@@ -311,7 +317,7 @@ fn per_round_dkg_agrees_with_the_single_process_ceremony() {
     }
     let mut commitments = BTreeMap::new();
     let mut round1 = Vec::new();
-    for slot in [0u8, 1u8] {
+    for slot in (0..threshold as u8).collect::<Vec<_>>() {
         let id = frost_vault_core::threshold::slot_identifier(slot).unwrap();
         let c = commit(&key_packages[&id], &mut rng);
         commitments.insert(id, c.commitments);
