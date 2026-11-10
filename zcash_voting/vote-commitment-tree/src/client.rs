@@ -456,14 +456,13 @@ impl TreeClient {
                 self.next_position += 1;
             }
 
-            let checkpoint_added =
-                self.inner
-                    .checkpoint(block.height)
-                    .map_err(|source| SyncError::TreeUpdate {
-                        height: block.height,
-                        operation: "checkpoint",
-                        source,
-                    })?;
+            let checkpoint_added = self.inner.checkpoint(block.height).map_err(|source| {
+                SyncError::TreeUpdate {
+                    height: block.height,
+                    operation: "checkpoint",
+                    source,
+                }
+            })?;
             if !checkpoint_added {
                 return Err(SyncError::CheckpointOutOfOrder {
                     previous: self.last_synced_height.unwrap_or(block.height),
@@ -513,14 +512,13 @@ impl TreeClient {
             });
         }
         if self.last_synced_height != Some(state.height) {
-            let checkpoint_added =
-                self.inner
-                    .checkpoint(state.height)
-                    .map_err(|source| SyncError::TreeUpdate {
-                        height: state.height,
-                        operation: "checkpoint",
-                        source,
-                    })?;
+            let checkpoint_added = self.inner.checkpoint(state.height).map_err(|source| {
+                SyncError::TreeUpdate {
+                    height: state.height,
+                    operation: "checkpoint",
+                    source,
+                }
+            })?;
             if !checkpoint_added {
                 return Err(SyncError::CheckpointOutOfOrder {
                     previous: self.last_synced_height.unwrap_or(state.height),
