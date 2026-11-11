@@ -14,6 +14,7 @@ import {
   Dkg,
   EnvelopeCodec,
   Keyset,
+  DkgRelay,
   MessageSet,
   PcztTools,
   SessionMarker,
@@ -237,6 +238,40 @@ function groupKey() {
   return finalRound[0].group_verifying_key();
 }
 
+check("envelope: the frontend never hardcodes message bytes", () => {
+  assert(EnvelopeCodec.msg_type("signInit") === 0x20);
+  assert(EnvelopeCodec.msg_type("signCommitments") === 0x21);
+  assert(EnvelopeCodec.msg_type("signPayload") === 0x22);
+  assert(EnvelopeCodec.msg_type("signShare") === 0x23);
+  let threw = false;
+  try {
+    EnvelopeCodec.msg_type("not-a-message");
+  } catch {
+    threw = true;
+  }
+  assert(threw, "an unknown name must be refused");
+});
+
+check("session ids are random, not counters", () => {
+  const a = EnvelopeCodec.new_session_id();
+  const b = EnvelopeCodec.new_session_id();
+  assert(a.length === 16);
+  assert(hex(a) !== hex(b), "two ids must differ");
+  assert(hex(a) !== hex(new Uint8Array(16)), "must not be all zero");
+});
+
+check("qsk: generated, canonical, and it drives the keyset", () => {
+  const qsk = Keyset.generate_qsk();
+  assert(qsk.length === 32);
+  // It must be usable as the `qsk` argument and therefore produce a canonical FVK.
+  const ak = groupKey();
+  const [fvk] = Keyset.derive(ak, qsk, false, 0);
+  assert(fvk.length === 96);
+  assert(hex(fvk.slice(0, 32)) === hex(ak));
+  // Two generated keys must differ.
+  assert(hex(Keyset.generate_qsk()) !== hex(qsk));
+});
+
 // --- ceremonies for the other two modes ----------------------------------
 
 function runCeremony(participants, threshold) {
@@ -383,6 +418,96 @@ check("marker: created, committed, burned", () => {
     threw = true;
   }
   assert(threw, "a malformed marker must be refused, not guessed");
+});
+
+// --- the same ceremony, but every DKG message goes through an envelope ----
+
+check("dkg over envelopes: the relay binds, forwards, and rejects replays", () => {
+  const participants = 3;
+  const threshold = 2;
+  const sid = EnvelopeCodec.new_session_id();
+  const ds = [];
+  for (let slot = 0; slot < participants; slot += 1) ds.push(new Dkg(participants, threshold, slot));
+  const relay = new DkgRelay(sid, participants);
+
+  // Round 1: each device sends an envelope to the relay; the relay validates and collects.
+  const r1Secrets = [];
+  const r1Payloads = [];
+  for (const d of ds) {
+    const r = d.part1();
+    r1Secrets.push(r.secret());
+    const env = r.broadcast_envelope(sid, 1, d.slot());
+    const [slot, payload] = relay.accept(env, "dkgR1");
+    assert(slot === d.slot(), `sender mismatch: ${slot}`);
+    r1Payloads.push(payload);
+  }
+
+  // A replay of the first envelope must be refused: the relay tracks per-sender sequence.
+  const replayed = ds[0].part1();
+  const staleEnv = replayed.broadcast_envelope(sid, 1, 0);
+  let threw = false;
+  try {
+    relay.accept(staleEnv, "dkgR1");
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a replayed round-1 envelope must be refused");
+
+  // An envelope from outside the roster must be refused.
+  const outsider = new Dkg(participants, threshold, 2);
+  const outsiderEnv = outsider.part1().broadcast_envelope(sid, 9, 2);
+  const narrow = new DkgRelay(sid, 2); // roster of two, sender 2 is outside it
+  let refused = false;
+  try {
+    narrow.accept(outsiderEnv, "dkgR1");
+  } catch {
+    refused = true;
+  }
+  assert(refused, "an out-of-roster sender must be refused");
+
+  // Forward the bundle of all round-1 broadcasts to each peer.
+  const bundleSet = MessageSet.from_bytes(
+    (() => {
+      const set = new MessageSet();
+      r1Payloads.forEach((p, slot) => set.set(slot, p));
+      return set.to_bytes();
+    })(),
+  );
+  assert(bundleSet.len() === participants);
+
+  // Round 2: each device computes its packages from the bundled broadcasts.
+  const r2Secrets = [];
+  const outgoing = [];
+  for (const d of ds) {
+    const env = relay.bundle(1, d.slot(), bundleSet);
+    const decoded = EnvelopeCodec.decode(env);
+    assert(decoded[1] === 1, "bundle is round 1");
+    assert(decoded[2] === EnvelopeCodec.coordinator_slot, "bundle comes from the coordinator");
+    assert(decoded[3] === d.slot(), "bundle is addressed to this device");
+    const set = MessageSet.from_bytes(decoded[6]);
+    assert(set.len() === participants, "bundle carries every broadcast");
+    const r = d.part2(r1Secrets[d.slot()], set);
+    r2Secrets.push(r.secret());
+    const env2 = r.outgoing_envelope(sid, 2, d.slot());
+    const [slot, batch] = relay.accept(env2, "dkgR2Batch");
+    outgoing.push([slot, MessageSet.from_bytes(batch)]);
+  }
+
+  // Round 3: relay the incoming packages and finalize.
+  const inboxes = new Map();
+  for (let slot = 0; slot < participants; slot += 1) inboxes.set(slot, new MessageSet());
+  for (const [from, set] of outgoing) {
+    for (const to of set.slots()) inboxes.get(to).set(from, set.get(to));
+  }
+  const groupKeys = [];
+  for (const d of ds) {
+    const env = relay.bundle(2, d.slot(), inboxes.get(d.slot()));
+    const set = MessageSet.from_bytes(EnvelopeCodec.decode(env)[6]);
+    const r = d.part3(r2Secrets[d.slot()], bundleSet, set);
+    groupKeys.push(hex(r.group_verifying_key()));
+  }
+  assert(groupKeys.every((k) => k === groupKeys[0]), "devices must agree on ak");
+  assert(groupKeys[0].length === 64);
 });
 
 // --- a real PCZT, end to end -------------------------------------------

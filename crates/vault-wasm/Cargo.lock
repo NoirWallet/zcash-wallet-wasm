@@ -1600,6 +1600,7 @@ dependencies = [
  "frost-vault-core",
  "getrandom",
  "js-sys",
+ "orchard",
  "pczt",
  "pczt-signer-core",
  "rand_core 0.6.4",

@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use frost_vault_core::custody;
-use frost_vault_core::protocol::{Envelope, MsgType, COORDINATOR_SLOT};
+use frost_vault_core::protocol::{self, Envelope, MsgType, COORDINATOR_SLOT};
 use frost_vault_core::session::{CoordinatorSession, SessionConfig, SignerSession};
 use frost_vault_core::state::{NonceState, SignPhase};
 use frost_vault_core::threshold::{
@@ -77,6 +77,21 @@ impl MessageSet {
 
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+
+    /// Pack for transport as one envelope payload.
+    pub fn to_bytes(&self) -> Result<js_sys::Uint8Array, JsError> {
+        Ok(to_js_bytes(
+            &protocol::pack_batch(&self.inner).map_err(err)?,
+        ))
+    }
+
+    /// Unpack an envelope payload back into a set.
+    #[wasm_bindgen]
+    pub fn from_bytes(bytes: &[u8]) -> Result<MessageSet, JsError> {
+        Ok(Self {
+            inner: protocol::unpack_batch(bytes).map_err(err)?,
+        })
     }
 }
 
@@ -143,6 +158,49 @@ impl EnvelopeCodec {
     pub fn coordinator_slot() -> u8 {
         COORDINATOR_SLOT
     }
+
+    /// A fresh 16-byte session id, from this module's OS-backed entropy.
+    ///
+    /// Use this rather than a counter or a timestamp: a repeated id would make a stale session
+    /// marker look like the current session after a restart, which is exactly the case the marker
+    /// exists to catch.
+    #[wasm_bindgen]
+    pub fn new_session_id() -> js_sys::Uint8Array {
+        to_js_bytes(&custody::new_session_id(&mut rng()))
+    }
+
+    /// Wire value of a message type by name, so the frontend never hardcodes magic bytes.
+    ///
+    /// Only `signInit` / `signCommitments` / `signPayload` / `signShare` currently have a defined
+    /// payload. `dkgR1` / `dkgR2Batch` carry this crate's own DKG bytes and are not enveloped yet;
+    /// the remaining names exist in the protocol table but have **no** payload format — do not
+    /// invent one and depend on it.
+    #[wasm_bindgen]
+    pub fn msg_type(name: &str) -> Result<u8, JsError> {
+        let msg_type = match name {
+            "pairInvite" => MsgType::PairInvite,
+            "pairResponse" => MsgType::PairResponse,
+            "rosterLock" => MsgType::RosterLock,
+            "dkgR1" => MsgType::DkgR1,
+            "dkgR1Bundle" => MsgType::DkgR1Bundle,
+            "dkgR1Echo" => MsgType::DkgR1Echo,
+            "dkgR1Cert" => MsgType::DkgR1Cert,
+            "dkgR2Batch" => MsgType::DkgR2Batch,
+            "dkgR2Inbox" => MsgType::DkgR2Inbox,
+            "keysetSetup" => MsgType::KeysetSetup,
+            "dkgFinal" => MsgType::DkgFinal,
+            "dkgActivate" => MsgType::DkgActivate,
+            "signInit" => MsgType::SignInit,
+            "signCommitments" => MsgType::SignCommitments,
+            "signPayload" => MsgType::SignPayload,
+            "signShare" => MsgType::SignShare,
+            "signReject" => MsgType::SignReject,
+            "signResult" => MsgType::SignResult,
+            "sessionAbort" => MsgType::SessionAbort,
+            other => return Err(JsError::new(&format!("unknown message type {other}"))),
+        };
+        Ok(msg_type.to_byte())
+    }
 }
 
 /// Round 1 of a distributed key generation: a secret to keep, a broadcast to send.
@@ -161,6 +219,27 @@ impl Dkg1 {
     /// Public broadcast for every other participant.
     pub fn broadcast(&self) -> js_sys::Uint8Array {
         to_js_bytes(&self.inner.broadcast)
+    }
+
+    /// The broadcast wrapped in a `DKGR1` envelope addressed to the coordinator.
+    ///
+    /// Use this instead of shipping the raw bytes: the envelope is what binds the payload to this
+    /// session, this sender and this round, and what lets the relay reject replays.
+    pub fn broadcast_envelope(
+        &self,
+        session_id: &[u8],
+        sequence: u32,
+        my_slot: u8,
+    ) -> Result<js_sys::Uint8Array, JsError> {
+        Ok(to_js_bytes(&dkg_envelope(
+            MsgType::DkgR1,
+            1,
+            my_slot,
+            COORDINATOR_SLOT,
+            sequence,
+            session_id,
+            self.inner.broadcast.clone(),
+        )?))
     }
 }
 
@@ -181,6 +260,25 @@ impl Dkg2 {
         MessageSet {
             inner: self.inner.outgoing.clone(),
         }
+    }
+
+    /// The whole batch wrapped in a `DKGR2BATCH` envelope addressed to the coordinator.
+    pub fn outgoing_envelope(
+        &self,
+        session_id: &[u8],
+        sequence: u32,
+        my_slot: u8,
+    ) -> Result<js_sys::Uint8Array, JsError> {
+        let payload = protocol::pack_batch(&self.inner.outgoing).map_err(err)?;
+        Ok(to_js_bytes(&dkg_envelope(
+            MsgType::DkgR2Batch,
+            2,
+            my_slot,
+            COORDINATOR_SLOT,
+            sequence,
+            session_id,
+            payload,
+        )?))
     }
 }
 
@@ -262,6 +360,116 @@ impl Dkg {
         let peers = strip_self(&broadcasts.inner, self.slot);
         let inner = threshold::dkg_part3(secret, &peers, &incoming.inner).map_err(err)?;
         Ok(Dkg3 { inner })
+    }
+}
+
+fn dkg_envelope(
+    msg_type: MsgType,
+    round: u8,
+    sender: u8,
+    recipient: u8,
+    sequence: u32,
+    session_id: &[u8],
+    payload: Vec<u8>,
+) -> Result<Vec<u8>, JsError> {
+    let session_id: [u8; 16] = session_id
+        .try_into()
+        .map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+    let envelope = Envelope::new(
+        msg_type, round, sender, recipient, sequence, session_id, payload,
+    )
+    .map_err(err)?;
+    Ok(envelope.encode())
+}
+
+/// The coordinator's side of the DKG message flow.
+///
+/// Signers send `DKGR1` / `DKGR2BATCH` envelopes; the coordinator validates who sent them and in what
+/// order, then forwards a `DKGR1BUNDLE` / `DKGR2INBOX` to each peer. This type exists so that the
+/// session binding, roster check and replay rejection are not left to the app to reimplement.
+///
+/// It does **not** make the round-2 packages confidential. They are still plaintext to whoever relays
+/// them — see the handoff note; per-recipient sealing is the next change.
+#[wasm_bindgen]
+pub struct DkgRelay {
+    session_id: [u8; 16],
+    participants: u16,
+    last_seq: BTreeMap<u8, u32>,
+    seq: u32,
+}
+
+#[wasm_bindgen]
+impl DkgRelay {
+    #[wasm_bindgen(constructor)]
+    pub fn new(session_id: &[u8], participants: u16) -> Result<DkgRelay, JsError> {
+        let session_id: [u8; 16] = session_id
+            .try_into()
+            .map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+        Ok(Self {
+            session_id,
+            participants,
+            last_seq: BTreeMap::new(),
+            seq: 0,
+        })
+    }
+
+    /// Validate an envelope from a signer and return `[senderSlot, payload]`.
+    ///
+    /// `expected` is the message type name (`"dkgR1"` or `"dkgR2Batch"`). Anything that is not from a
+    /// roster slot, not addressed to the coordinator, not the expected type, or not newer than the
+    /// last message from that sender is refused.
+    pub fn accept(&mut self, envelope: &[u8], expected: &str) -> Result<js_sys::Array, JsError> {
+        let want = MsgType::from_byte(EnvelopeCodec::msg_type(expected)?)
+            .ok_or_else(|| JsError::new("unknown message type"))?;
+        let env = Envelope::decode(envelope).map_err(err)?;
+        if env.session_id != self.session_id {
+            return Err(JsError::new("envelope belongs to another session"));
+        }
+        if env.recipient != COORDINATOR_SLOT {
+            return Err(JsError::new("envelope is not addressed to the coordinator"));
+        }
+        if env.msg_type != want {
+            return Err(JsError::new("unexpected message type"));
+        }
+        if env.sender as u16 >= self.participants {
+            return Err(JsError::new("sender is outside the roster"));
+        }
+        if let Some(last) = self.last_seq.get(&env.sender) {
+            if env.sequence <= *last {
+                return Err(JsError::new("replayed or out-of-order envelope"));
+            }
+        }
+        self.last_seq.insert(env.sender, env.sequence);
+
+        let out = js_sys::Array::new();
+        out.push(&JsValue::from(env.sender));
+        out.push(&to_js_bytes(&env.payload));
+        Ok(out)
+    }
+
+    /// Forward a bundle to one recipient: `DKGR1BUNDLE` in round 1, `DKGR2INBOX` in round 2.
+    pub fn bundle(
+        &mut self,
+        round: u8,
+        recipient: u8,
+        messages: &MessageSet,
+    ) -> Result<js_sys::Uint8Array, JsError> {
+        let msg_type = match round {
+            1 => MsgType::DkgR1Bundle,
+            2 => MsgType::DkgR2Inbox,
+            other => return Err(JsError::new(&format!("no bundle type for round {other}"))),
+        };
+        let payload = protocol::pack_batch(&messages.inner).map_err(err)?;
+        self.seq = self.seq.wrapping_add(1);
+        Ok(to_js_bytes(&dkg_envelope(
+            msg_type,
+            round,
+            COORDINATOR_SLOT,
+            recipient,
+            self.seq,
+            &self.session_id,
+            payload,
+        )?))
     }
 }
 
@@ -651,6 +859,29 @@ impl Keyset {
         out.push(&to_js_bytes(&keyset.raw_address));
         out.push(&to_js_bytes(&keyset.fingerprint));
         Ok(out)
+    }
+
+    /// A fresh `qsk`: the `nk`/`rivk` source, and the ZIP-2005 recovery candidate.
+    ///
+    /// Generate it **once**, on one device, then deliver it to every other device over a
+    /// confidential, authenticated channel — the same one the DKG round-2 packages need. Every
+    /// device must pass the identical `qsk` to [`Self::derive`] or they will land on different
+    /// addresses for the same group.
+    ///
+    /// It cannot spend: spend authorization is `ak`, which lives only in the FROST shares. Holding
+    /// `qsk` does not weaken the threshold, which is why backing it up is cheap insurance.
+    #[wasm_bindgen]
+    pub fn generate_qsk() -> js_sys::Uint8Array {
+        let mut bytes = [0u8; 32];
+        rand_core::RngCore::fill_bytes(&mut rng(), &mut bytes);
+        // A spending key must be a canonical scalar; retry rather than shipping a rejected one.
+        while orchard::keys::SpendingKey::from_bytes(bytes)
+            .into_option()
+            .is_none()
+        {
+            rand_core::RngCore::fill_bytes(&mut rng(), &mut bytes);
+        }
+        to_js_bytes(&bytes)
     }
 
     /// Whether the derived address carries only an Orchard receiver. Must always be true; the

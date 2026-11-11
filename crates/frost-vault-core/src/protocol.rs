@@ -348,6 +348,98 @@ impl Envelope {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Message batches
+//
+// DKG rounds are all-to-all, so one envelope usually carries several small payloads: every peer's
+// round-1 broadcast, or every peer's round-2 package. The batch format below is the payload of such
+// an envelope, and it is deliberately as strict as the envelope itself.
+// ---------------------------------------------------------------------------
+
+/// Largest number of entries a batch may carry: one per roster slot.
+pub const MAX_BATCH: usize = crate::threshold::MAX_PARTICIPANTS as usize;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchError {
+    /// More entries than there are roster slots.
+    TooMany(usize),
+    /// Slot byte outside the roster.
+    BadSlot(u8),
+    /// Two entries for one slot.
+    Duplicate(u8),
+    /// Length field disagrees with the bytes present, or the encoding is truncated.
+    Malformed,
+}
+
+impl core::fmt::Display for BatchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TooMany(n) => write!(f, "{n} entries exceeds the roster size"),
+            Self::BadSlot(s) => write!(f, "slot {s} is outside the roster"),
+            Self::Duplicate(s) => write!(f, "slot {s} appears twice"),
+            Self::Malformed => f.write_str("malformed message batch"),
+        }
+    }
+}
+
+impl std::error::Error for BatchError {}
+
+/// `count:u8 || count * (slot:u8 || len:u16 || bytes)`, slots ascending.
+pub fn pack_batch(
+    messages: &std::collections::BTreeMap<u8, Vec<u8>>,
+) -> Result<Vec<u8>, BatchError> {
+    if messages.len() > MAX_BATCH {
+        return Err(BatchError::TooMany(messages.len()));
+    }
+    let mut out = Vec::new();
+    out.push(messages.len() as u8);
+    for (slot, bytes) in messages {
+        if (*slot as usize) >= MAX_BATCH {
+            return Err(BatchError::BadSlot(*slot));
+        }
+        let len = u16::try_from(bytes.len()).map_err(|_| BatchError::Malformed)?;
+        out.push(*slot);
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(bytes);
+    }
+    Ok(out)
+}
+
+/// Strict inverse of [`pack_batch`]: no trailing bytes, no duplicates, bounded count.
+pub fn unpack_batch(bytes: &[u8]) -> Result<std::collections::BTreeMap<u8, Vec<u8>>, BatchError> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut pos = 0usize;
+    let take = |pos: &mut usize, n: usize| -> Result<&[u8], BatchError> {
+        let end = pos.checked_add(n).ok_or(BatchError::Malformed)?;
+        if end > bytes.len() {
+            return Err(BatchError::Malformed);
+        }
+        let slice = &bytes[*pos..end];
+        *pos = end;
+        Ok(slice)
+    };
+    let count = take(&mut pos, 1)?[0] as usize;
+    if count > MAX_BATCH {
+        return Err(BatchError::TooMany(count));
+    }
+    for _ in 0..count {
+        let slot = take(&mut pos, 1)?[0];
+        if (slot as usize) >= MAX_BATCH {
+            return Err(BatchError::BadSlot(slot));
+        }
+        let len_bytes = take(&mut pos, 2)?;
+        let len = u16::from_le_bytes([len_bytes[0], len_bytes[1]]) as usize;
+        let payload = take(&mut pos, len)?.to_vec();
+        if out.insert(slot, payload).is_some() {
+            return Err(BatchError::Duplicate(slot));
+        }
+    }
+    if pos != bytes.len() {
+        return Err(BatchError::Malformed);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +550,41 @@ mod tests {
         // Orchard is refused by name, not treated as an unknown tag: it is a decision, not a gap.
         assert_eq!(ValuePool::from_byte(0), Err(PoolError::OrchardNotSupported));
         assert_eq!(ValuePool::from_byte(9), Err(PoolError::UnknownTag(9)));
+    }
+
+    #[test]
+    fn a_batch_round_trips() {
+        let mut messages = std::collections::BTreeMap::new();
+        messages.insert(0u8, vec![1, 2, 3]);
+        messages.insert(2u8, vec![]);
+        let packed = super::pack_batch(&messages).unwrap();
+        assert_eq!(super::unpack_batch(&packed).unwrap(), messages);
+    }
+
+    #[test]
+    fn a_batch_is_strict() {
+        use super::{pack_batch, unpack_batch, BatchError};
+        let mut messages = std::collections::BTreeMap::new();
+        messages.insert(0u8, vec![9, 9]);
+        let packed = pack_batch(&messages).unwrap();
+
+        // Trailing byte.
+        let mut longer = packed.clone();
+        longer.push(0);
+        assert_eq!(unpack_batch(&longer), Err(BatchError::Malformed));
+        // Truncation.
+        assert_eq!(
+            unpack_batch(&packed[..packed.len() - 1]),
+            Err(BatchError::Malformed)
+        );
+        // Slot outside the roster.
+        assert_eq!(unpack_batch(&[1u8, 7, 0, 0]), Err(BatchError::BadSlot(7)));
+        // Duplicate slot.
+        assert_eq!(
+            unpack_batch(&[2u8, 0, 1, 0, 7, 0, 1, 0, 8]),
+            Err(BatchError::Duplicate(0))
+        );
+        // Empty batch is legal (a round with nothing to forward).
+        assert_eq!(unpack_batch(&[0u8]).unwrap().len(), 0);
     }
 }
