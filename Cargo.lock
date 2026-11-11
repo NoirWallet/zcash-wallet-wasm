@@ -4079,10 +4079,12 @@ version = "0.1.0"
 dependencies = [
  "frost-vault-core",
  "getrandom 0.2.16",
+ "getrandom 0.4.3",
  "js-sys",
  "orchard",
  "pczt",
  "pczt-signer-core",
+ "rand 0.10.3",
  "rand_core 0.6.4",
  "vault-deposit",
  "vault-keyset",

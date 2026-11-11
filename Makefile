@@ -57,7 +57,7 @@ test-frost:
 # The vault JS API on its own, as a node package, plus the JS checks that drive it. Fast (~15 s),
 # unlike the wallet bundle, so this is the loop to use while working on the vault layer.
 build-vault-wasm:
-	cd crates/vault-wasm && wasm-pack build --target nodejs --release --out-dir pkg-node
+	cd crates/vault-wasm && wasm-pack build --target nodejs --release --out-dir pkg-node --features test-fixtures
 
 test-vault-wasm: build-vault-wasm
 	node crates/vault-wasm/test/basic.mjs

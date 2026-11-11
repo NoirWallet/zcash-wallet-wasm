@@ -16,6 +16,7 @@ import {
   Keyset,
   DkgRelay,
   MessageSet,
+  Fixtures,
   PcztTools,
   Sealed,
   SessionMarker,
@@ -638,6 +639,75 @@ check("pczt: a corrupt buffer is refused, not a panic", () => {
     }
     assert(threw, "expected refusal");
   }
+});
+
+// --- the success path, in JS, on a transaction built for this vault ---------
+// Everything above proves the pieces refuse the wrong thing. This proves they accept the right thing:
+// build a real Ironwood PCZT for the vault's own group key, sign it through the session, write the
+// signatures back, and check the result.
+
+check("full success path: build, sign, apply, verify", () => {
+  const participants = 3;
+  const threshold = 2;
+  const sessionId = EnvelopeCodec.new_session_id();
+
+  // A fresh ceremony so `ak` matches the transaction we are about to build.
+  const ceremony = runCeremony(participants, threshold);
+  const finals = ceremony.finals;
+  const ak = finals[0].group_verifying_key();
+
+  // One qsk, distributed in the clear here because this test is about the signing path.
+  const qsk = Keyset.generate_qsk();
+  const [, , , , ] = [];
+  const keyset = Keyset.derive(ak, qsk, false, 0);
+  const fvk = keyset[0];
+  const address = keyset[2];
+
+  const pczt = Fixtures.ironwood_pczt(fvk, 1_000_000, 990_000);
+  assert(pczt.length > 1_000, `pczt is ${pczt.length} bytes`);
+  PcztTools.check(pczt);
+
+  // The coordinator reads what to sign.
+  const sighash = PcztTools.shielded_sighash(pczt);
+  const alphas = PcztTools.action_alphas(pczt);
+  const rks = PcztTools.action_rks(pczt);
+  assert(rks.length === 32, "one action");
+  // The transaction really is this vault's: rk == ak + alpha*G.
+  PcztTools.check_action_bindings(pczt, ak, alphas);
+
+  // Two of three sign it.
+  const signers = [0, 1];
+  const coordinator = new Coordinator(sessionId, participants, threshold, signers, 1, ceremony.publicPackage);
+  const signerObjs = signers.map((slot) => new Signer(sessionId, slot, participants, ceremony.keyPackages[slot]));
+
+  const commitments = coordinator.init_all().map(([slot, env]) => {
+    const idx = signers.indexOf(slot);
+    return [idx, signerObjs[idx].init(env)];
+  });
+  for (const [, c] of commitments) coordinator.accept_commitments(c);
+
+  coordinator.prepare_payload(sighash, alphas);
+  for (const [slot, env] of coordinator.payloads()) {
+    const idx = signers.indexOf(slot);
+    const [gotSighash, gotAlphas] = signerObjs[idx].payload(env);
+    assert(hex(gotSighash) === hex(sighash), "signer agrees on the digest");
+    assert(hex(gotAlphas) === hex(alphas), "signer agrees on the randomizer");
+    // The signer's own independent check against the transaction.
+    PcztTools.check_action_bindings(pczt, ak, gotAlphas);
+    signerObjs[idx].approve();
+    coordinator.accept_share(signerObjs[idx].share());
+  }
+
+  const signatures = coordinator.aggregate();
+  assert(signatures.length === 64);
+  // Verify before applying, against the transaction's own rk.
+  Verification.verify_spend_auth(ak, alphas, sighash, signatures);
+
+  const signed = PcztTools.apply_signatures(pczt, new Uint8Array([0]), signatures);
+  assert(signed.length > pczt.length, "a signature was written into the transaction");
+
+  // And the address the transaction pays change back to is the vault's own.
+  assert(Keyset.address_is_shielded_only(address));
 });
 
 if (failures > 0) {

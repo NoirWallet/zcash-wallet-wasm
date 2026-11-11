@@ -9,6 +9,11 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Synthetic PCZT construction, for the JS test harness only. Off by default: it links the transaction
+# builder, which production does not need here (the wallet has its own).
+test-fixtures = ["dep:vault-fixtures"]
+
 [dependencies]
 frost-vault-core = { path = "../frost-vault-core" }
 vault-keyset = { path = "../vault-keyset" }
@@ -27,4 +32,11 @@ js-sys = "0.3"
 # `getrandom 0.2` with `js` is what backs `rand_core::OsRng` in the browser; the alias keeps the
 # version explicit because the tree has several.
 rand_core = { version = "0.6", features = ["getrandom"] }
+rand = { version = "0.10", features = ["sys_rng"], optional = false }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# rand 0.10 pulls getrandom 0.4, whose wasm backend needs to be selected explicitly.
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[dependencies.vault-fixtures]
+path = "../vault-fixtures"
+optional = true

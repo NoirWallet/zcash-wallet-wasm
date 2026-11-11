@@ -1,0 +1,19 @@
+[package]
+name = "vault-fixtures"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Synthetic vault transactions for tests, without a prover"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# Deliberately no `circuits`: this crate builds unproven PCZTs, so it must not drag Halo2 in. That is
+# what lets the JS test harness include it without doubling the wasm module.
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+pczt = { path = "../../librustzcash/pczt", default-features = false, features = ["std", "orchard", "io-finalizer", "zcp-builder"] }
+zcash_primitives = { path = "../../librustzcash/zcash_primitives", default-features = false, features = ["std"] }
+zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
+rand = { version = "0.10", features = ["sys_rng"] }
