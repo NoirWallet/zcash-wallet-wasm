@@ -170,38 +170,117 @@ impl EnvelopeCodec {
         to_js_bytes(&custody::new_session_id(&mut rng()))
     }
 
-    /// Wire value of a message type by name, so the frontend never hardcodes magic bytes.
+    /// Wire value of a message type **whose payload this crate defines**.
     ///
-    /// Only `signInit` / `signCommitments` / `signPayload` / `signShare` currently have a defined
-    /// payload. `dkgR1` / `dkgR2Batch` carry this crate's own DKG bytes and are not enveloped yet;
-    /// the remaining names exist in the protocol table but have **no** payload format — do not
-    /// invent one and depend on it.
+    /// Eight types qualify today: the four signing messages, whose payloads the session produces, and
+    /// the four DKG messages, whose payloads are this crate's own DKG bytes and packed batches.
+    ///
+    /// The protocol table also reserves numbers for messages that have no payload format yet —
+    /// `PAIR_INVITE`, `ROSTER_LOCK`, `KEYSET_SETUP` and others. Those are deliberately refused here so
+    /// that an undefined type cannot become a de-facto contract by accident; use
+    /// [`Self::reserved_msg_type`] if you genuinely need the number, and know that nothing defines
+    /// what goes in it.
     #[wasm_bindgen]
     pub fn msg_type(name: &str) -> Result<u8, JsError> {
-        let msg_type = match name {
-            "pairInvite" => MsgType::PairInvite,
-            "pairResponse" => MsgType::PairResponse,
-            "rosterLock" => MsgType::RosterLock,
-            "dkgR1" => MsgType::DkgR1,
-            "dkgR1Bundle" => MsgType::DkgR1Bundle,
-            "dkgR1Echo" => MsgType::DkgR1Echo,
-            "dkgR1Cert" => MsgType::DkgR1Cert,
-            "dkgR2Batch" => MsgType::DkgR2Batch,
-            "dkgR2Inbox" => MsgType::DkgR2Inbox,
-            "keysetSetup" => MsgType::KeysetSetup,
-            "dkgFinal" => MsgType::DkgFinal,
-            "dkgActivate" => MsgType::DkgActivate,
-            "signInit" => MsgType::SignInit,
-            "signCommitments" => MsgType::SignCommitments,
-            "signPayload" => MsgType::SignPayload,
-            "signShare" => MsgType::SignShare,
-            "signReject" => MsgType::SignReject,
-            "signResult" => MsgType::SignResult,
-            "sessionAbort" => MsgType::SessionAbort,
-            other => return Err(JsError::new(&format!("unknown message type {other}"))),
-        };
-        Ok(msg_type.to_byte())
+        match defined_msg_type(name) {
+            Some(msg_type) => Ok(msg_type.to_byte()),
+            None => match reserved_msg_type(name) {
+                Some(_) => Err(JsError::new(&format!(
+                    "{name} is reserved: its payload format is not defined yet"
+                ))),
+                None => Err(JsError::new(&format!("unknown message type {name}"))),
+            },
+        }
     }
+
+    /// Wire value of a **reserved** type: the number exists in the protocol table, but no payload
+    /// format is defined for it. Prefer [`Self::msg_type`]; this exists so a caller can decode a
+    /// message it received rather than invent one it should not send.
+    #[wasm_bindgen]
+    pub fn reserved_msg_type(name: &str) -> Result<u8, JsError> {
+        reserved_msg_type(name)
+            .map(|msg_type| msg_type.to_byte())
+            .ok_or_else(|| JsError::new(&format!("{name} is not a reserved message type")))
+    }
+
+    /// The type names that have a defined payload.
+    #[wasm_bindgen]
+    pub fn defined_msg_types() -> js_sys::Array {
+        let out = js_sys::Array::new();
+        for name in DEFINED_MSG_TYPES {
+            out.push(&JsValue::from(*name));
+        }
+        out
+    }
+
+    /// The type names that are reserved without a payload format.
+    #[wasm_bindgen]
+    pub fn reserved_msg_types() -> js_sys::Array {
+        let out = js_sys::Array::new();
+        for name in RESERVED_MSG_TYPES {
+            out.push(&JsValue::from(*name));
+        }
+        out
+    }
+}
+
+/// Message types whose payload this crate defines.
+const DEFINED_MSG_TYPES: &[&str] = &[
+    "dkgR1",
+    "dkgR1Bundle",
+    "dkgR2Batch",
+    "dkgR2Inbox",
+    "signInit",
+    "signCommitments",
+    "signPayload",
+    "signShare",
+];
+
+/// Types that appear in the protocol table with no payload format. Named here so the split is
+/// visible from the API rather than only from documentation.
+const RESERVED_MSG_TYPES: &[&str] = &[
+    "pairInvite",
+    "pairResponse",
+    "rosterLock",
+    "dkgR1Echo",
+    "dkgR1Cert",
+    "keysetSetup",
+    "dkgFinal",
+    "dkgActivate",
+    "signReject",
+    "signResult",
+    "sessionAbort",
+];
+
+fn defined_msg_type(name: &str) -> Option<MsgType> {
+    Some(match name {
+        "dkgR1" => MsgType::DkgR1,
+        "dkgR1Bundle" => MsgType::DkgR1Bundle,
+        "dkgR2Batch" => MsgType::DkgR2Batch,
+        "dkgR2Inbox" => MsgType::DkgR2Inbox,
+        "signInit" => MsgType::SignInit,
+        "signCommitments" => MsgType::SignCommitments,
+        "signPayload" => MsgType::SignPayload,
+        "signShare" => MsgType::SignShare,
+        _ => return None,
+    })
+}
+
+fn reserved_msg_type(name: &str) -> Option<MsgType> {
+    Some(match name {
+        "pairInvite" => MsgType::PairInvite,
+        "pairResponse" => MsgType::PairResponse,
+        "rosterLock" => MsgType::RosterLock,
+        "dkgR1Echo" => MsgType::DkgR1Echo,
+        "dkgR1Cert" => MsgType::DkgR1Cert,
+        "keysetSetup" => MsgType::KeysetSetup,
+        "dkgFinal" => MsgType::DkgFinal,
+        "dkgActivate" => MsgType::DkgActivate,
+        "signReject" => MsgType::SignReject,
+        "signResult" => MsgType::SignResult,
+        "sessionAbort" => MsgType::SessionAbort,
+        _ => return None,
+    })
 }
 
 /// Round 1 of a distributed key generation: a secret to keep, a broadcast to send.

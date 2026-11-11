@@ -240,18 +240,48 @@ function groupKey() {
   return finalRound[0].group_verifying_key();
 }
 
-check("envelope: the frontend never hardcodes message bytes", () => {
+check("envelope: defined and reserved message types are kept apart", () => {
+  // Defined: the four signing messages and the four DKG messages.
   assert(EnvelopeCodec.msg_type("signInit") === 0x20);
   assert(EnvelopeCodec.msg_type("signCommitments") === 0x21);
   assert(EnvelopeCodec.msg_type("signPayload") === 0x22);
   assert(EnvelopeCodec.msg_type("signShare") === 0x23);
+  assert(EnvelopeCodec.msg_type("dkgR1") === 0x10);
+  assert(EnvelopeCodec.msg_type("dkgR2Batch") === 0x14);
+
+  const defined = EnvelopeCodec.defined_msg_types();
+  const reserved = EnvelopeCodec.reserved_msg_types();
+  assert(defined.length === 8, `defined: ${defined.length}`);
+  assert(reserved.length === 11, `reserved: ${reserved.length}`);
+
+  // A reserved type has a number but no payload: asking for it as a defined type is an error, so an
+  // undefined message cannot become a contract by accident.
   let threw = false;
   try {
-    EnvelopeCodec.msg_type("not-a-message");
-  } catch {
-    threw = true;
+    EnvelopeCodec.msg_type("keysetSetup");
+  } catch (e) {
+    threw = String(e).includes("reserved");
   }
-  assert(threw, "an unknown name must be refused");
+  assert(threw, "keysetSetup must be refused as undefined");
+  assert(EnvelopeCodec.reserved_msg_type("keysetSetup") === 0x16);
+
+  // Unknown names fail in both spaces.
+  for (const bad of ["not-a-message", ""]) {
+    let a = false;
+    try {
+      EnvelopeCodec.msg_type(bad);
+    } catch {
+      a = true;
+    }
+    assert(a, `msg_type(${bad}) must be refused`);
+    let b = false;
+    try {
+      EnvelopeCodec.reserved_msg_type(bad);
+    } catch {
+      b = true;
+    }
+    assert(b, `reserved_msg_type(${bad}) must be refused`);
+  }
 });
 
 check("session ids are random, not counters", () => {
