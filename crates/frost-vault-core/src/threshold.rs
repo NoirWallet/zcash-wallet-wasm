@@ -62,6 +62,12 @@ impl std::fmt::Display for ThresholdError {
 
 impl std::error::Error for ThresholdError {}
 
+impl From<crate::seal::SealError> for ThresholdError {
+    fn from(e: crate::seal::SealError) -> Self {
+        ThresholdError::Frost(e.to_string())
+    }
+}
+
 fn frost<E: std::fmt::Debug>(e: E) -> ThresholdError {
     ThresholdError::Frost(format!("{e:?}"))
 }
@@ -221,6 +227,105 @@ pub fn slot_identifier(slot: u8) -> Result<Identifier, ThresholdError> {
     })
 }
 
+// Wire framing. Every DKG blob starts with a version byte so a future format change is detectable
+// rather than silently mis-parsed.
+//
+//   round-1 secret:  1 || my_slot(1) || static_sk(32) || static_pk(32) || len(u16) || frost_secret
+//   round-1 broadcast: 1 || static_pk(32) || frost_round1_package
+//   round-2 secret:  1 || my_slot(1) || static_sk(32) || static_pk(32) || len(u16) || frost_secret
+//   round-2 package: sealed with Noise (self-framing)
+const DKG_WIRE_VERSION: u8 = 1;
+
+fn put_len(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ThresholdError> {
+    let len = u16::try_from(bytes.len())
+        .map_err(|_| ThresholdError::Frost("DKG blob too large".into()))?;
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn take_len<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<&'a [u8], ThresholdError> {
+    let end = pos
+        .checked_add(2)
+        .ok_or_else(|| ThresholdError::Frost("malformed DKG blob".into()))?;
+    if end > bytes.len() {
+        return Err(ThresholdError::Frost("malformed DKG blob".into()));
+    }
+    let len = u16::from_le_bytes([bytes[*pos], bytes[*pos + 1]]) as usize;
+    *pos = end;
+    let end = pos
+        .checked_add(len)
+        .ok_or_else(|| ThresholdError::Frost("malformed DKG blob".into()))?;
+    if end > bytes.len() {
+        return Err(ThresholdError::Frost("malformed DKG blob".into()));
+    }
+    let out = &bytes[*pos..end];
+    *pos = end;
+    Ok(out)
+}
+
+struct SecretEnvelope {
+    slot: u8,
+    static_sk: Vec<u8>,
+    static_pk: Vec<u8>,
+    frost: Vec<u8>,
+}
+
+fn unpack_secret(bytes: &[u8]) -> Result<SecretEnvelope, ThresholdError> {
+    if bytes.len() < 67 || bytes[0] != DKG_WIRE_VERSION {
+        return Err(ThresholdError::Frost(
+            "unsupported DKG secret format".into(),
+        ));
+    }
+    let slot = bytes[1];
+    let static_sk = bytes[2..34].to_vec();
+    let static_pk = bytes[34..66].to_vec();
+    let mut pos = 66;
+    let frost = take_len(bytes, &mut pos)?.to_vec();
+    if pos != bytes.len() {
+        return Err(ThresholdError::Frost("trailing bytes in DKG secret".into()));
+    }
+    Ok(SecretEnvelope {
+        slot,
+        static_sk,
+        static_pk,
+        frost,
+    })
+}
+
+fn pack_secret(
+    slot: u8,
+    static_sk: &[u8],
+    static_pk: &[u8],
+    frost: &[u8],
+) -> Result<Vec<u8>, ThresholdError> {
+    let mut out = Vec::with_capacity(68 + frost.len());
+    out.push(DKG_WIRE_VERSION);
+    out.push(slot);
+    out.extend_from_slice(static_sk);
+    out.extend_from_slice(static_pk);
+    put_len(&mut out, frost)?;
+    Ok(out)
+}
+
+/// A peer's round-1 broadcast: its static key plus the FROST package.
+fn unpack_broadcast(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ThresholdError> {
+    if bytes.len() < 33 || bytes[0] != DKG_WIRE_VERSION {
+        return Err(ThresholdError::Frost(
+            "unsupported DKG broadcast format".into(),
+        ));
+    }
+    Ok((bytes[1..33].to_vec(), bytes[33..].to_vec()))
+}
+
+fn pack_broadcast(static_pk: &[u8], frost: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(33 + frost.len());
+    out.push(DKG_WIRE_VERSION);
+    out.extend_from_slice(static_pk);
+    out.extend_from_slice(frost);
+    out
+}
+
 /// Round 1 output: a secret to keep and a broadcast to send everyone.
 pub struct DkgRound1 {
     pub secret: Vec<u8>,
@@ -259,9 +364,18 @@ where
     let (secret, package) =
         frost_core::keys::dkg::part1(identifier, participants, threshold, &mut *rng)
             .map_err(frost)?;
+    // A static X25519 keypair for this ceremony. Its public half travels in the broadcast so peers
+    // can seal their round-2 packages to it; the secret half stays in the local secret blob and is
+    // carried forward into round 2.
+    let (static_sk, static_pk) = crate::seal::generate_keypair()?;
     Ok(DkgRound1 {
-        secret: secret.serialize().map_err(frost)?,
-        broadcast: package.serialize().map_err(frost)?,
+        secret: pack_secret(
+            slot,
+            &static_sk,
+            &static_pk,
+            &secret.serialize().map_err(frost)?,
+        )?,
+        broadcast: pack_broadcast(&static_pk, &package.serialize().map_err(frost)?),
     })
 }
 
@@ -270,21 +384,54 @@ pub fn dkg_part2(
     secret: &[u8],
     peer_broadcasts: &BTreeMap<u8, Vec<u8>>,
 ) -> Result<DkgRound2, ThresholdError> {
-    let secret = frost_core::keys::dkg::round1::SecretPackage::<Suite>::deserialize(secret)
-        .map_err(frost)?;
+    let mine = unpack_secret(secret)?;
+    let round1_secret =
+        frost_core::keys::dkg::round1::SecretPackage::<Suite>::deserialize(&mine.frost)
+            .map_err(frost)?;
+
+    // Decode every broadcast once: the FROST package for the ceremony, the static key for both the
+    // prologue and the sealing.
     let mut peers = BTreeMap::new();
+    let mut statics = vec![(mine.slot, mine.static_pk.clone())];
     for (slot, bytes) in peer_broadcasts {
-        let package =
-            frost_core::keys::dkg::round1::Package::<Suite>::deserialize(bytes).map_err(frost)?;
+        let (static_pk, frost_bytes) = unpack_broadcast(bytes)?;
+        let package = frost_core::keys::dkg::round1::Package::<Suite>::deserialize(&frost_bytes)
+            .map_err(frost)?;
         peers.insert(slot_identifier(*slot)?, package);
+        statics.push((*slot, static_pk));
     }
-    let (secret, outgoing) = frost_core::keys::dkg::part2(secret, &peers).map_err(frost)?;
+    // The ceremony is the prologue: a coordinator that shows different rosters to different devices
+    // produces different key schedules, and the sealed packages do not open.
+    let prologue = crate::seal::ceremony_prologue(&statics);
+    let statics_by_slot: BTreeMap<u8, Vec<u8>> = statics.into_iter().collect();
+
+    let (round2_secret, outgoing) =
+        frost_core::keys::dkg::part2(round1_secret, &peers).map_err(frost)?;
+
     let mut by_slot = BTreeMap::new();
     for (identifier, package) in outgoing {
-        by_slot.insert(slot_of(identifier)?, package.serialize().map_err(frost)?);
+        let recipient = slot_of(identifier)?;
+        let recipient_pk = statics_by_slot
+            .get(&recipient)
+            .ok_or_else(|| ThresholdError::Frost("missing static key for peer".into()))?;
+        // Sealed to the recipient alone: this is what stops a relaying coordinator from learning
+        // the shares it forwards.
+        let sealed = crate::seal::seal(
+            &mine.static_sk,
+            recipient_pk,
+            &prologue,
+            &package.serialize().map_err(frost)?,
+        )?;
+        by_slot.insert(recipient, sealed);
     }
+
     Ok(DkgRound2 {
-        secret: secret.serialize().map_err(frost)?,
+        secret: pack_secret(
+            mine.slot,
+            &mine.static_sk,
+            &mine.static_pk,
+            &round2_secret.serialize().map_err(frost)?,
+        )?,
         outgoing: by_slot,
     })
 }
@@ -295,22 +442,37 @@ pub fn dkg_part3(
     peer_broadcasts: &BTreeMap<u8, Vec<u8>>,
     incoming: &BTreeMap<u8, Vec<u8>>,
 ) -> Result<DkgFinal, ThresholdError> {
-    let secret = frost_core::keys::dkg::round2::SecretPackage::<Suite>::deserialize(secret)
-        .map_err(frost)?;
+    let mine = unpack_secret(secret)?;
+    let round2_secret =
+        frost_core::keys::dkg::round2::SecretPackage::<Suite>::deserialize(&mine.frost)
+            .map_err(frost)?;
+
     let mut broadcasts = BTreeMap::new();
+    let mut statics = vec![(mine.slot, mine.static_pk.clone())];
     for (slot, bytes) in peer_broadcasts {
-        let package =
-            frost_core::keys::dkg::round1::Package::<Suite>::deserialize(bytes).map_err(frost)?;
+        let (static_pk, frost_bytes) = unpack_broadcast(bytes)?;
+        let package = frost_core::keys::dkg::round1::Package::<Suite>::deserialize(&frost_bytes)
+            .map_err(frost)?;
         broadcasts.insert(slot_identifier(*slot)?, package);
+        statics.push((*slot, static_pk));
     }
+    let prologue = crate::seal::ceremony_prologue(&statics);
+    let statics_by_slot: BTreeMap<u8, Vec<u8>> = statics.into_iter().collect();
+
     let mut received = BTreeMap::new();
     for (slot, bytes) in incoming {
+        let sender_pk = statics_by_slot
+            .get(slot)
+            .ok_or_else(|| ThresholdError::Frost("missing static key for sender".into()))?;
+        // Only this device's static secret opens it.
+        let opened = crate::seal::open(&mine.static_sk, sender_pk, &prologue, bytes)?;
         let package =
-            frost_core::keys::dkg::round2::Package::<Suite>::deserialize(bytes).map_err(frost)?;
+            frost_core::keys::dkg::round2::Package::<Suite>::deserialize(&opened).map_err(frost)?;
         received.insert(slot_identifier(*slot)?, package);
     }
+
     let (key_package, public_key_package) =
-        frost_core::keys::dkg::part3(&secret, &broadcasts, &received).map_err(frost)?;
+        frost_core::keys::dkg::part3(&round2_secret, &broadcasts, &received).map_err(frost)?;
     Ok(DkgFinal {
         key_package: key_package.serialize().map_err(frost)?,
         public_key_package: public_key_package.serialize().map_err(frost)?,

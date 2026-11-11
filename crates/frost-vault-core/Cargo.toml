@@ -17,6 +17,13 @@ reddsa = { version = "0.5.2", features = ["frost"] }
 frost-rerandomized = { version = "=3.0.0" }
 zeroize = { version = "1", features = ["derive"] }
 sha2 = { version = "0.10", default-features = false }
+# DKG round-2 packages are secret shares: whoever relays them must not be able to read them. Noise
+# with both static keys known in advance is a single message, which is what makes it usable over a QR
+# ceremony. Same pattern ZF's frost-client uses; the pure-Rust resolver keeps it wasm-compatible.
+snow = { version = "0.9", default-features = false, features = ["default-resolver"] }
+# `snow` needs entropy for ephemeral keys; on wasm32-unknown-unknown getrandom 0.2 requires the js
+# backend. Harmless on native, so it is unconditional rather than a feature the host must remember.
+getrandom = { version = "0.2", features = ["js"] }
 # Traits only (RngCore/CryptoRng). No `getrandom` feature here on purpose: the entropy source is
 # wired by the final artifact (js feature for wasm, OsRng for native). A library that quietly pins
 # an RNG feature is how a deterministic nonce stream reaches FROST.

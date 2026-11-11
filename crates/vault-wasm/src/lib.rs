@@ -388,8 +388,8 @@ fn dkg_envelope(
 /// order, then forwards a `DKGR1BUNDLE` / `DKGR2INBOX` to each peer. This type exists so that the
 /// session binding, roster check and replay rejection are not left to the app to reimplement.
 ///
-/// It does **not** make the round-2 packages confidential. They are still plaintext to whoever relays
-/// them — see the handoff note; per-recipient sealing is the next change.
+/// Round-2 packages are sealed to their recipient inside the DKG implementation (Noise, single
+/// message, ceremony as prologue), so a relay can forward them but cannot read them.
 #[wasm_bindgen]
 pub struct DkgRelay {
     session_id: [u8; 16],

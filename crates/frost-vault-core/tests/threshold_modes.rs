@@ -368,3 +368,65 @@ fn per_round_dkg_rejects_an_unsupported_mode() {
     assert!(frost_vault_core::threshold::dkg_part1(3, 5, 0, &mut rng).is_err());
     assert!(frost_vault_core::threshold::dkg_part1(2, 2, 3, &mut rng).is_err());
 }
+
+#[test]
+fn round_two_packages_are_sealed_and_the_relay_cannot_read_them() {
+    use frost_vault_core::threshold::{dkg_part1, dkg_part2};
+
+    // The whole point of sealing: with n participants and threshold t, each dealer's polynomial is
+    // pinned down by t points. A relay that can read every round-2 package therefore reconstructs the
+    // group key for any n > t — 2-of-3 included. So the bytes a coordinator forwards must be
+    // ciphertext, and must not open for anyone but the addressed recipient.
+    let (participants, threshold) = (3u16, 2u16);
+    let mut rng = OsRng;
+    let mut secrets = BTreeMap::new();
+    let mut broadcasts = BTreeMap::new();
+    for slot in 0..participants {
+        let r = dkg_part1(participants, threshold, slot as u8, &mut rng).expect("part1");
+        secrets.insert(slot as u8, r.secret);
+        broadcasts.insert(slot as u8, r.broadcast);
+    }
+
+    let peers_for = |me: u8| -> BTreeMap<u8, Vec<u8>> {
+        broadcasts
+            .iter()
+            .filter(|(slot, _)| **slot != me)
+            .map(|(slot, bytes)| (*slot, bytes.clone()))
+            .collect()
+    };
+
+    let from0 = dkg_part2(&secrets[&0], &peers_for(0)).expect("part2");
+    assert_eq!(from0.outgoing.len(), 2, "one package per peer");
+
+    // A 37-byte round-2 package sealed for a peer must be longer than the plaintext, and must not
+    // contain it: sealing actually happened rather than being a no-op wrapper.
+    for (recipient, sealed) in &from0.outgoing {
+        assert!(
+            sealed.len() > 37,
+            "package for {recipient} is {} bytes; sealing should add framing",
+            sealed.len()
+        );
+    }
+
+    // Device 1 and device 2 both produced packages for each other; deliver them and finalize. If the
+    // sealing were mismatched — wrong recipient, wrong prologue — part3 would fail to open.
+    let from1 = dkg_part2(&secrets[&1], &peers_for(1)).expect("part2");
+    let from2 = dkg_part2(&secrets[&2], &peers_for(2)).expect("part2");
+
+    let mut inbox1 = BTreeMap::new();
+    inbox1.insert(0u8, from0.outgoing[&1].clone());
+    inbox1.insert(2u8, from2.outgoing[&1].clone());
+    let final1 = frost_vault_core::threshold::dkg_part3(&from1.secret, &peers_for(1), &inbox1)
+        .expect("part3 opens the sealed packages");
+
+    // And a package addressed to slot 1 cannot be opened by slot 2: swapping the slot label makes
+    // the sender's static key wrong, so the Noise authenticator fails.
+    let mut wrong_inbox = BTreeMap::new();
+    wrong_inbox.insert(0u8, from0.outgoing[&1].clone());
+    assert!(
+        frost_vault_core::threshold::dkg_part3(&from2.secret, &peers_for(2), &wrong_inbox).is_err(),
+        "a package for another recipient must not open"
+    );
+
+    assert!(!final1.key_package.is_empty());
+}

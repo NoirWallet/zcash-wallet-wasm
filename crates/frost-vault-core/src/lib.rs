@@ -25,6 +25,7 @@
 
 pub mod custody;
 pub mod protocol;
+pub mod seal;
 pub mod session;
 pub mod state;
 pub mod threshold;
