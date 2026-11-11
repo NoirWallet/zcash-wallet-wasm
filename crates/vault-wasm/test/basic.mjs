@@ -17,6 +17,7 @@ import {
   DkgRelay,
   MessageSet,
   PcztTools,
+  Sealed,
   SessionMarker,
   ShareBackup,
   Signer,
@@ -295,13 +296,15 @@ function runCeremony(participants, threshold) {
     for (const to of out.slots()) boxes.get(to).set(d.slot(), out.get(to));
   }
   const packages = [];
+  const finals = [];
   let publicPackage = null;
   for (const d of ds) {
     const r = d.part3(r2[d.slot()], bc, boxes.get(d.slot()));
     packages.push(r.key_package());
-    publicPackage = r.public_package ? r.public_package() : r.public_key_package();
+    finals.push(r);
+    publicPackage = r.public_key_package();
   }
-  return { keyPackages: packages, publicPackage };
+  return { keyPackages: packages, publicPackage, finals };
 }
 
 const extraCeremonies = new Map();
@@ -508,6 +511,63 @@ check("dkg over envelopes: the relay binds, forwards, and rejects replays", () =
   }
   assert(groupKeys.every((k) => k === groupKeys[0]), "devices must agree on ak");
   assert(groupKeys[0].length === 64);
+});
+
+check("keyset setup: the qsk travels sealed and every device lands on one keyset", () => {
+  // Coordinator generates the qsk once; each peer gets it sealed to its own static key. If a peer
+  // could read another peer's copy, or if the roster differed, opening would fail.
+  const ceremony = runCeremony(3, 2);
+  const finals = ceremony.finals;
+  const statics = new MessageSet();
+  finals.forEach((f, slot) => statics.set(slot, f.static_public()));
+  const prologue = Sealed.prologue(statics);
+
+  // ak is the same for everyone; take it from slot 0.
+  const ak = finals[0].group_verifying_key();
+  const qsk = Keyset.generate_qsk();
+
+  // Coordinator (slot 0) seals the qsk to slots 1 and 2.
+  const sealedFor = finals.map((f, slot) => {
+    if (slot === 0) return null;
+    return Sealed.seal(finals[0].static_secret(), f.static_public(), prologue, qsk);
+  });
+
+  // Each recipient opens it and derives the keyset; all three must match.
+  const derived = finals.map((f, slot) => {
+    const material = slot === 0 ? qsk : Sealed.open(f.static_secret(), finals[0].static_public(), prologue, sealedFor[slot]);
+    assert(hex(material) === hex(qsk), `slot ${slot} received the same qsk`);
+    return Keyset.derive(ak, material, false, 0);
+  });
+
+  const fingerprint = hex(derived[0][4]);
+  const address = derived[0][2];
+  for (const d of derived) {
+    assert(hex(d[4]) === fingerprint, "fingerprints must agree");
+    assert(d[2] === address, "addresses must agree");
+  }
+  assert(Keyset.address_is_shielded_only(address));
+
+  // A peer cannot open a package addressed to someone else.
+  let threw = false;
+  try {
+    Sealed.open(finals[2].static_secret(), finals[0].static_public(), prologue, sealedFor[1]);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a package for another recipient must not open");
+
+  // And a different roster produces a different prologue, so the same ciphertext does not open.
+  const otherRoster = new MessageSet();
+  otherRoster.set(0, finals[0].static_public());
+  otherRoster.set(1, finals[1].static_public());
+  const otherPrologue = Sealed.prologue(otherRoster);
+  threw = false;
+  try {
+    Sealed.open(finals[1].static_secret(), finals[0].static_public(), otherPrologue, sealedFor[1]);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a different participant set must not open the same ciphertext");
 });
 
 // --- a real PCZT, end to end -------------------------------------------

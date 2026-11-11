@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 use frost_vault_core::custody;
 use frost_vault_core::protocol::{self, Envelope, MsgType, COORDINATOR_SLOT};
+use frost_vault_core::seal;
 use frost_vault_core::session::{CoordinatorSession, SessionConfig, SignerSession};
 use frost_vault_core::state::{NonceState, SignPhase};
 use frost_vault_core::threshold::{
@@ -306,6 +307,74 @@ impl Dkg3 {
         let package = PublicKeyPackage::deserialize(&self.inner.public_key_package).map_err(err)?;
         let bytes = package.verifying_key().serialize().map_err(err)?;
         Ok(to_js_bytes(&bytes))
+    }
+
+    /// This ceremony's static public key. Publish it (it already travels in the round-1 broadcast).
+    pub fn static_public(&self) -> js_sys::Uint8Array {
+        to_js_bytes(&self.inner.static_public)
+    }
+
+    /// The matching static secret, for sealing later ceremony messages (KEYSET_SETUP) to peers.
+    ///
+    /// Keep it on the device. It cannot spend; it only lets peers send this device a message nobody
+    /// else can read.
+    pub fn static_secret(&self) -> js_sys::Uint8Array {
+        to_js_bytes(&self.inner.static_secret)
+    }
+}
+
+/// Sealed, authenticated messages between ceremony participants.
+///
+/// The DKG needs this for its round-2 packages (handled internally), and KEYSET_SETUP needs it for
+/// the `qsk`, which is the `nk`/`rivk` source and therefore a scanning secret: whoever relays it must
+/// not read it.
+///
+/// Both parties' static keys are known from the DKG, so sealing is a single message with no round
+/// trip. `prologue` binds the participant set: a device that is shown a different roster derives a
+/// different key schedule and cannot open the message.
+#[wasm_bindgen]
+pub struct Sealed;
+
+#[wasm_bindgen]
+impl Sealed {
+    /// The prologue for a participant set, given their static public keys by slot.
+    #[wasm_bindgen]
+    pub fn prologue(statics: &MessageSet) -> Result<js_sys::Uint8Array, JsError> {
+        let pairs: Vec<(u8, Vec<u8>)> = statics
+            .inner
+            .iter()
+            .map(|(slot, key)| (*slot, key.clone()))
+            .collect();
+        if pairs.is_empty() {
+            return Err(JsError::new("prologue needs at least one participant"));
+        }
+        Ok(to_js_bytes(&seal::ceremony_prologue(&pairs)))
+    }
+
+    /// Seal `plaintext` so only the holder of `recipient_public` can read it.
+    #[wasm_bindgen]
+    pub fn seal(
+        sender_secret: &[u8],
+        recipient_public: &[u8],
+        prologue: &[u8],
+        plaintext: &[u8],
+    ) -> Result<js_sys::Uint8Array, JsError> {
+        let sealed =
+            seal::seal(sender_secret, recipient_public, prologue, plaintext).map_err(err)?;
+        Ok(to_js_bytes(&sealed))
+    }
+
+    /// Open a message from `sender_public`. Fails if the pair, the ceremony or the bytes are wrong.
+    #[wasm_bindgen]
+    pub fn open(
+        recipient_secret: &[u8],
+        sender_public: &[u8],
+        prologue: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<js_sys::Uint8Array, JsError> {
+        let opened =
+            seal::open(recipient_secret, sender_public, prologue, ciphertext).map_err(err)?;
+        Ok(to_js_bytes(&opened))
     }
 }
 

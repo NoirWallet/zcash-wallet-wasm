@@ -338,10 +338,18 @@ pub struct DkgRound2 {
     pub outgoing: BTreeMap<u8, Vec<u8>>,
 }
 
-/// Round 3 output: this device's key package and the group's public package.
+/// Round 3 output: this device's key package, the group's public package, and the ceremony's static
+/// keypair.
+///
+/// The static keypair is returned because KEYSET_SETUP runs immediately after the DKG and has to move
+/// a secret (the `qsk`) between the same devices. Reusing the ceremony's keys avoids inventing a
+/// second identity layer before §3.1's Device Identity Key exists; when that lands, this is the seam
+/// to replace.
 pub struct DkgFinal {
     pub key_package: Vec<u8>,
     pub public_key_package: Vec<u8>,
+    pub static_secret: Vec<u8>,
+    pub static_public: Vec<u8>,
 }
 
 /// Round 1 of the DKG for one device.
@@ -476,6 +484,8 @@ pub fn dkg_part3(
     Ok(DkgFinal {
         key_package: key_package.serialize().map_err(frost)?,
         public_key_package: public_key_package.serialize().map_err(frost)?,
+        static_secret: mine.static_sk,
+        static_public: mine.static_pk,
     })
 }
 
