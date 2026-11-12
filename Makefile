@@ -61,6 +61,7 @@ build-vault-wasm:
 
 test-vault-wasm: build-vault-wasm
 	node crates/vault-wasm/test/basic.mjs
+	node crates/vault-wasm/test/device-view.mjs
 
 test-voting-browser:
 	npm test
