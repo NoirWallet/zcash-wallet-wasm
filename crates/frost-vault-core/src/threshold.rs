@@ -308,6 +308,15 @@ fn pack_secret(
     Ok(out)
 }
 
+/// The static public key inside a round-1 broadcast.
+///
+/// Exposed because a coordinator handling one device at a time — over QR, say — has the broadcast as
+/// bytes and needs the peer's key to seal later ceremony messages to it. Going through this function
+/// keeps the framing inside the crate.
+pub fn static_public_of_broadcast(broadcast: &[u8]) -> Result<Vec<u8>, ThresholdError> {
+    Ok(unpack_broadcast(broadcast)?.0)
+}
+
 /// A peer's round-1 broadcast: its static key plus the FROST package.
 fn unpack_broadcast(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ThresholdError> {
     if bytes.len() < 33 || bytes[0] != DKG_WIRE_VERSION {
@@ -330,12 +339,19 @@ fn pack_broadcast(static_pk: &[u8], frost: &[u8]) -> Vec<u8> {
 pub struct DkgRound1 {
     pub secret: Vec<u8>,
     pub broadcast: Vec<u8>,
+    /// This device's static public key, also carried inside `broadcast`. Exposed separately so a
+    /// caller never has to take the framing apart.
+    pub static_public: Vec<u8>,
 }
 
 /// Round 2 output: a secret to keep and one package per peer, keyed by that peer's slot.
 pub struct DkgRound2 {
     pub secret: Vec<u8>,
     pub outgoing: BTreeMap<u8, Vec<u8>>,
+    /// Every participant's static public key, learned from the round-1 broadcasts — including this
+    /// device's own. This is what later ceremony steps (KEYSET_SETUP) seal to, so it must come out of
+    /// the crate rather than be parsed out of the wire format by a caller.
+    pub statics: BTreeMap<u8, Vec<u8>>,
 }
 
 /// Round 3 output: this device's key package, the group's public package, and the ceremony's static
@@ -350,6 +366,8 @@ pub struct DkgFinal {
     pub public_key_package: Vec<u8>,
     pub static_secret: Vec<u8>,
     pub static_public: Vec<u8>,
+    /// Every participant's static public key, including this device's own.
+    pub statics: BTreeMap<u8, Vec<u8>>,
 }
 
 /// Round 1 of the DKG for one device.
@@ -384,6 +402,7 @@ where
             &secret.serialize().map_err(frost)?,
         )?,
         broadcast: pack_broadcast(&static_pk, &package.serialize().map_err(frost)?),
+        static_public: static_pk,
     })
 }
 
@@ -441,6 +460,7 @@ pub fn dkg_part2(
             &round2_secret.serialize().map_err(frost)?,
         )?,
         outgoing: by_slot,
+        statics: statics_by_slot,
     })
 }
 
@@ -486,6 +506,7 @@ pub fn dkg_part3(
         public_key_package: public_key_package.serialize().map_err(frost)?,
         static_secret: mine.static_sk,
         static_public: mine.static_pk,
+        statics: statics_by_slot,
     })
 }
 

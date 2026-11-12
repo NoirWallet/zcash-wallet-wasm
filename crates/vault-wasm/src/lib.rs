@@ -301,6 +301,11 @@ impl Dkg1 {
         to_js_bytes(&self.inner.broadcast)
     }
 
+    /// This device's static public key. Publish it; peers seal later ceremony messages to it.
+    pub fn static_public(&self) -> js_sys::Uint8Array {
+        to_js_bytes(&self.inner.static_public)
+    }
+
     /// The broadcast wrapped in a `DKGR1` envelope addressed to the coordinator.
     ///
     /// Use this instead of shipping the raw bytes: the envelope is what binds the payload to this
@@ -339,6 +344,15 @@ impl Dkg2 {
     pub fn outgoing(&self) -> MessageSet {
         MessageSet {
             inner: self.inner.outgoing.clone(),
+        }
+    }
+
+    /// Every participant's static public key, by slot, including this device's — learned from the
+    /// round-1 broadcasts. This is what KEYSET_SETUP seals to; there is no need to parse the broadcast
+    /// framing to get it.
+    pub fn statics(&self) -> MessageSet {
+        MessageSet {
+            inner: self.inner.statics.clone(),
         }
     }
 
@@ -391,6 +405,13 @@ impl Dkg3 {
     /// This ceremony's static public key. Publish it (it already travels in the round-1 broadcast).
     pub fn static_public(&self) -> js_sys::Uint8Array {
         to_js_bytes(&self.inner.static_public)
+    }
+
+    /// Every participant's static public key, by slot, including this device's own.
+    pub fn statics(&self) -> MessageSet {
+        MessageSet {
+            inner: self.inner.statics.clone(),
+        }
     }
 
     /// The matching static secret, for sealing later ceremony messages (KEYSET_SETUP) to peers.
@@ -496,6 +517,17 @@ impl Dkg {
         let peers = strip_self(&broadcasts.inner, self.slot);
         let inner = threshold::dkg_part2(secret, &peers).map_err(err)?;
         Ok(Dkg2 { inner })
+    }
+
+    /// The static public key carried inside a round-1 broadcast.
+    ///
+    /// A coordinator that handles one device at a time has each broadcast as bytes and needs the
+    /// sender's key in order to seal KEYSET_SETUP to it. Use this rather than taking the framing apart.
+    #[wasm_bindgen]
+    pub fn static_public_of_broadcast(broadcast: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        Ok(to_js_bytes(
+            &threshold::static_public_of_broadcast(broadcast).map_err(err)?,
+        ))
     }
 
     /// Round 3: finalize with the broadcasts and the packages addressed to this device.

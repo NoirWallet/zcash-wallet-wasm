@@ -335,7 +335,7 @@ function runCeremony(participants, threshold) {
     finals.push(r);
     publicPackage = r.public_key_package();
   }
-  return { keyPackages: packages, publicPackage, finals };
+  return { keyPackages: packages, publicPackage, finals, broadcasts: bc };
 }
 
 const extraCeremonies = new Map();
@@ -549,9 +549,18 @@ check("keyset setup: the qsk travels sealed and every device lands on one keyset
   // could read another peer's copy, or if the roster differed, opening would fail.
   const ceremony = runCeremony(3, 2);
   const finals = ceremony.finals;
-  const statics = new MessageSet();
-  finals.forEach((f, slot) => statics.set(slot, f.static_public()));
+  // Each device learns the whole roster's static keys from the broadcasts it was handed — no device
+  // reaches into another's object, which is what the frontend can actually do.
+  const statics = finals[0].statics();
+  assert(statics.len() === 3, `statics: ${statics.len()}`);
   const prologue = Sealed.prologue(statics);
+
+  // And a coordinator holding a single round-1 broadcast can read the sender's key out of it.
+  const fromBroadcast = Dkg.static_public_of_broadcast(
+    ceremony.broadcasts.get(2),
+  );
+  assert(hex(fromBroadcast) === hex(statics.get(2)), "broadcast carries the same key");
+  assert(hex(finals[0].statics().get(0)) === hex(finals[0].static_public()), "includes self");
 
   // ak is the same for everyone; take it from slot 0.
   const ak = finals[0].group_verifying_key();
