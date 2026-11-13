@@ -28,12 +28,7 @@ struct Messages {
 fn measure(actions: usize) -> Messages {
     let mut rng = FrostRng;
     let dkg = run_dkg(3, 2, &mut rng).expect("dkg");
-    let identifiers: BTreeMap<u8, Identifier> = dkg
-        .identifiers
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (i as u8, *id))
-        .collect();
+    let identifiers: BTreeMap<u8, Identifier> = dkg.identifiers.iter().enumerate().map(|(i, id)| (i as u8, *id)).collect();
     let cfg = SessionConfig {
         session_id: SESSION,
         participants: 3,
@@ -41,8 +36,7 @@ fn measure(actions: usize) -> Messages {
         signers: vec![0, 1],
         identifiers: identifiers.clone(),
     };
-    let mut coordinator =
-        CoordinatorSession::new(cfg, dkg.pubkeys.clone(), actions).expect("coordinator");
+    let mut coordinator = CoordinatorSession::new(cfg, dkg.pubkeys.clone(), actions).expect("coordinator");
 
     let mut out = Messages {
         init: 0,
@@ -60,9 +54,7 @@ fn measure(actions: usize) -> Messages {
     for env in &inits {
         let slot = env.recipient;
         let mut signer = SignerSession::new(SESSION, slot, identifiers.clone());
-        let commitments = signer
-            .on_init(env, &dkg.key_packages[&identifiers[&slot]], &mut rng)
-            .expect("commitments");
+        let commitments = signer.on_init(env, &dkg.key_packages[&identifiers[&slot]], &mut rng).expect("commitments");
         out.commitments = commitments.encode().len();
         coordinator.on_commitments(&commitments).expect("collect");
         signers.insert(slot, signer);
@@ -76,9 +68,7 @@ fn measure(actions: usize) -> Messages {
             a
         })
         .collect();
-    coordinator
-        .prepare_payload([0x5Au8; 32], alphas)
-        .expect("prepare");
+    coordinator.prepare_payload([0x5Au8; 32], alphas).expect("prepare");
     let payloads = coordinator.payloads().expect("payloads");
     out.payload = payloads[0].encode().len();
 
@@ -87,9 +77,7 @@ fn measure(actions: usize) -> Messages {
         let signer = signers.get_mut(&slot).expect("signer");
         signer.on_payload(env).expect("payload");
         signer.approve().expect("approve");
-        let share = signer
-            .share(&dkg.key_packages[&identifiers[&slot]])
-            .expect("share");
+        let share = signer.share(&dkg.key_packages[&identifiers[&slot]]).expect("share");
         out.share = share.encode().len();
         coordinator.on_share(&share).expect("collect share");
     }
@@ -108,11 +96,7 @@ fn session_messages_fit_in_a_small_number_of_frames() {
     for actions in 1..=3 {
         let m = measure(actions);
         assert!(m.init < 400, "init {actions}: {}", m.init);
-        assert!(
-            m.commitments < 400,
-            "commitments {actions}: {}",
-            m.commitments
-        );
+        assert!(m.commitments < 400, "commitments {actions}: {}", m.commitments);
         // The payload carries the whole commitment grid, so it grows with signers × actions.
         assert!(m.payload < 2_000, "payload {actions}: {}", m.payload);
         assert!(m.share < 400, "share {actions}: {}", m.share);
@@ -129,10 +113,7 @@ fn metrics_report() {
     println!("| --- | --- | --- | --- | --- |");
     for actions in 1..=3 {
         let m = measure(actions);
-        println!(
-            "| {actions} | {} B | {} B | {} B | {} B |",
-            m.init, m.commitments, m.payload, m.share
-        );
+        println!("| {actions} | {} B | {} B | {} B | {} B |", m.init, m.commitments, m.payload, m.share);
     }
 
     // PCZT sizes, measured elsewhere in this workspace on a real one-action Ironwood transaction:
@@ -143,10 +124,7 @@ fn metrics_report() {
     println!("\nPCZT direction (1 action, measured on a real proven transaction)\n");
     println!("| payload | bytes | frames @200 | @400 | @800 | @2953 |");
     println!("| --- | --- | --- | --- | --- | --- |");
-    for (name, len) in [
-        ("proven (coordinator keeps)", proven),
-        ("stripped (transport)", stripped),
-    ] {
+    for (name, len) in [("proven (coordinator keeps)", proven), ("stripped (transport)", stripped)] {
         println!(
             "| {name} | {len} | {} | {} | {} | {} |",
             frames(len, 200),

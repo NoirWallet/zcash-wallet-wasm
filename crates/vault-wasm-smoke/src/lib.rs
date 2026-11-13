@@ -25,15 +25,7 @@ pub extern "C" fn fv_usize_bits() -> u32 {
 #[no_mangle]
 pub extern "C" fn fv_envelope_roundtrip() -> u32 {
     let payload: Vec<u8> = (0..64u8).collect();
-    let Ok(env) = Envelope::new(
-        MsgType::SignPayload,
-        3,
-        COORDINATOR_SLOT,
-        1,
-        7,
-        [0x42u8; 16],
-        payload.clone(),
-    ) else {
+    let Ok(env) = Envelope::new(MsgType::SignPayload, 3, COORDINATOR_SLOT, 1, 7, [0x42u8; 16], payload.clone()) else {
         return 1;
     };
     let bytes = env.encode();
@@ -46,15 +38,7 @@ pub extern "C" fn fv_envelope_roundtrip() -> u32 {
 /// A truncated envelope must be refused, not panic.
 #[no_mangle]
 pub extern "C" fn fv_truncated_envelope_refused() -> u32 {
-    let Ok(env) = Envelope::new(
-        MsgType::SignCommitments,
-        1,
-        0,
-        COORDINATOR_SLOT,
-        1,
-        [0x11u8; 16],
-        vec![7u8; 40],
-    ) else {
+    let Ok(env) = Envelope::new(MsgType::SignCommitments, 1, 0, COORDINATOR_SLOT, 1, [0x11u8; 16], vec![7u8; 40]) else {
         return 1;
     };
     let mut bytes = env.encode();
@@ -68,17 +52,9 @@ pub extern "C" fn fv_truncated_envelope_refused() -> u32 {
 /// Envelope size, so the metric baseline can be checked from inside wasm too.
 #[no_mangle]
 pub extern "C" fn fv_envelope_len() -> u32 {
-    Envelope::new(
-        MsgType::SignInit,
-        1,
-        COORDINATOR_SLOT,
-        0,
-        1,
-        [0u8; 16],
-        vec![0u8; 16],
-    )
-    .map(|e| e.encode().len() as u32)
-    .unwrap_or(0)
+    Envelope::new(MsgType::SignInit, 1, COORDINATOR_SLOT, 0, 1, [0u8; 16], vec![0u8; 16])
+        .map(|e| e.encode().len() as u32)
+        .unwrap_or(0)
 }
 
 /// Number of canonical outputs a deposit of `amount` zatoshi needs.
@@ -93,17 +69,13 @@ pub extern "C" fn fv_plan_outputs(amount: u64) -> u32 {
 /// Total value that would actually move.
 #[no_mangle]
 pub extern "C" fn fv_plan_total(amount: u64) -> u64 {
-    vault_deposit::plan_deposit(amount)
-        .map(|p| p.total)
-        .unwrap_or(0)
+    vault_deposit::plan_deposit(amount).map(|p| p.total).unwrap_or(0)
 }
 
 /// Residual left behind.
 #[no_mangle]
 pub extern "C" fn fv_plan_residual(amount: u64) -> u64 {
-    vault_deposit::plan_deposit(amount)
-        .map(|p| p.residual)
-        .unwrap_or(0)
+    vault_deposit::plan_deposit(amount).map(|p| p.residual).unwrap_or(0)
 }
 
 /// Whether every output is canonical.
@@ -124,13 +96,7 @@ pub extern "C" fn fv_canary_blocks_bulk() -> u32 {
     }
     let bulk_refused = !canary.allows(vault_deposit::COIN);
     let canary_allowed = canary.allows(vault_deposit::CANARY_AMOUNT_ZATS);
-    let still_refused_after_arrival = {
-        canary.arrival_confirmed().is_ok() && !canary.allows(vault_deposit::COIN)
-    };
-    let allowed_after_spend = {
-        canary.spend_confirmed().is_ok() && canary.allows(vault_deposit::COIN)
-    };
-    u32::from(
-        bulk_refused && canary_allowed && still_refused_after_arrival && allowed_after_spend,
-    )
+    let still_refused_after_arrival = { canary.arrival_confirmed().is_ok() && !canary.allows(vault_deposit::COIN) };
+    let allowed_after_spend = { canary.spend_confirmed().is_ok() && canary.allows(vault_deposit::COIN) };
+    u32::from(bulk_refused && canary_allowed && still_refused_after_arrival && allowed_after_spend)
 }

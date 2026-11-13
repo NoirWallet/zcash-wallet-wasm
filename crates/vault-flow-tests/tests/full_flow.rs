@@ -8,9 +8,7 @@
 use std::collections::BTreeMap;
 
 use frost_vault_core::protocol::COORDINATOR_SLOT;
-use frost_vault_core::session::{
-    CoordinatorSession, SessionConfig, SessionError, SignerSession, SESSION_ID_LEN,
-};
+use frost_vault_core::session::{CoordinatorSession, SessionConfig, SessionError, SignerSession, SESSION_ID_LEN};
 use frost_vault_core::state::SignPhase;
 use frost_vault_core::threshold::{run_dkg, Identifier};
 use orchard::ValuePool;
@@ -40,14 +38,7 @@ fn coordinator_side(participants: u16, threshold: u16) -> (DkgOut, VaultKeyset, 
     let ak = dkg.group_verifying_key().expect("ak");
     let keyset = VaultKeyset::derive(&ak, &qsk(), Network::TestNetwork, 0).expect("keyset");
 
-    let unproven = vault_pczt::fixture::ironwood_pczt(
-        &keyset.fvk,
-        ValuePool::Ironwood,
-        1_000_000,
-        990_000,
-        UnwrapErr(SysRng),
-    )
-    .expect("build");
+    let unproven = vault_pczt::fixture::ironwood_pczt(&keyset.fvk, ValuePool::Ironwood, 1_000_000, 990_000, UnwrapErr(SysRng)).expect("build");
     let proven = prove_ironwood(unproven, UnwrapErr(SysRng)).expect("prove");
     let prepared = prepare(proven).expect("prepare");
 
@@ -69,11 +60,7 @@ struct DkgOut {
 }
 
 fn roster(identifiers: &[Identifier]) -> BTreeMap<u8, Identifier> {
-    identifiers
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (i as u8, *id))
-        .collect()
+    identifiers.iter().enumerate().map(|(i, id)| (i as u8, *id)).collect()
 }
 
 #[test]
@@ -92,19 +79,12 @@ fn a_full_vault_transaction_round_trips_through_every_tier() {
     assert_eq!(shape.orchard_actions, 0);
 
     // 2. The signer independently recomputes the sighash and compares it to the coordinator's.
-    let sighash = verify_shielded_sighash(transport.clone(), &prepared.sighash)
-        .expect("signer recomputes the same sighash");
+    let sighash = verify_shielded_sighash(transport.clone(), &prepared.sighash).expect("signer recomputes the same sighash");
 
     // 3. And checks every action's rk against the group key and the supplied alpha.
-    let material = bind_alphas(
-        &ironwood_action_rks(&transport).expect("rks"),
-        &prepared.alphas,
-    )
-    .expect("bind");
+    let material = bind_alphas(&ironwood_action_rks(&transport).expect("rks"), &prepared.alphas).expect("bind");
     assert_eq!(material.len(), 1);
-    material[0]
-        .verify_rk(ak)
-        .expect("rk is the group key randomized by alpha");
+    material[0].verify_rk(ak).expect("rk is the group key randomized by alpha");
 
     // --- Session: 2-of-3, slots 0 and 1. ---
     let config = SessionConfig {
@@ -114,8 +94,7 @@ fn a_full_vault_transaction_round_trips_through_every_tier() {
         signers: vec![0, 1],
         identifiers: by_slot.clone(),
     };
-    let mut coordinator =
-        CoordinatorSession::new(config, dkg.pubkeys.clone(), 1).expect("coordinator");
+    let mut coordinator = CoordinatorSession::new(config, dkg.pubkeys.clone(), 1).expect("coordinator");
     let mut signers: BTreeMap<u8, SignerSession> = [0u8, 1]
         .iter()
         .map(|slot| (*slot, SignerSession::new(SESSION, *slot, by_slot.clone())))
@@ -126,15 +105,11 @@ fn a_full_vault_transaction_round_trips_through_every_tier() {
         assert_eq!(env.sender, COORDINATOR_SLOT);
         let slot = env.recipient;
         let signer = signers.get_mut(&slot).expect("signer");
-        let commitments = signer
-            .on_init(&env, &dkg.key_packages[&by_slot[&slot]], &mut rng)
-            .expect("commitments");
+        let commitments = signer.on_init(&env, &dkg.key_packages[&by_slot[&slot]], &mut rng).expect("commitments");
         coordinator.on_commitments(&commitments).expect("collect");
     }
 
-    coordinator
-        .prepare_payload(sighash, prepared.alphas.clone())
-        .expect("prepare payload");
+    coordinator.prepare_payload(sighash, prepared.alphas.clone()).expect("prepare payload");
     let payloads = coordinator.payloads().expect("payloads");
 
     for env in &payloads {
@@ -146,9 +121,7 @@ fn a_full_vault_transaction_round_trips_through_every_tier() {
         assert_eq!(material.alphas, prepared.alphas);
 
         signer.approve().expect("approve");
-        let share = signer
-            .share(&dkg.key_packages[&by_slot[&slot]])
-            .expect("share");
+        let share = signer.share(&dkg.key_packages[&by_slot[&slot]]).expect("share");
         coordinator.on_share(&share).expect("collect share");
     }
 
@@ -159,19 +132,14 @@ fn a_full_vault_transaction_round_trips_through_every_tier() {
     // --- Back on the coordinator: land the aggregate on the proven copy. ---
     let signed = apply_material(prepared.kept, &material, &signatures).expect("apply");
     assert_eq!(
-        signed.ironwood().actions()[material[0].action_index as usize]
-            .spend()
-            .spend_auth_sig(),
+        signed.ironwood().actions()[material[0].action_index as usize].spend().spend_auth_sig(),
         &Some(signatures[0])
     );
     // The signed transaction is the proven one: stripping was transport-only.
     assert!(signed.ironwood().zkproof().is_some(), "proof must survive");
     // Applying a signature adds exactly one 64-byte spend auth signature per action; nothing else
     // about the transaction changes.
-    assert_eq!(
-        signed.clone().serialize().expect("ser").len(),
-        prepared.proven_len + 64
-    );
+    assert_eq!(signed.clone().serialize().expect("ser").len(), prepared.proven_len + 64);
 }
 
 #[test]
@@ -200,11 +168,7 @@ fn a_payload_bound_to_another_transaction_is_caught_by_the_sighash_check() {
     assert!(verify_shielded_sighash(transport, &prepared_b.sighash).is_err());
 
     // And the alphas of the other transaction must not match either.
-    let material = bind_alphas(
-        &ironwood_action_rks(&Pczt::parse(&prepared_a.transport).unwrap()).unwrap(),
-        &prepared_b.alphas,
-    )
-    .unwrap();
+    let material = bind_alphas(&ironwood_action_rks(&Pczt::parse(&prepared_a.transport).unwrap()).unwrap(), &prepared_b.alphas).unwrap();
     // Two independent transactions have unrelated randomizers, so rk cannot match.
     assert!(material[0].verify_rk(&keyset.group_verifying_key).is_err());
 }
@@ -231,9 +195,7 @@ fn a_signer_outside_the_selection_cannot_join_the_session() {
     let mut forged = inits[0].clone();
     forged.recipient = 2;
     forged.sequence = 50;
-    let err = signer2
-        .on_init(&forged, &dkg.key_packages[&dkg.identifiers[2]], &mut rng)
-        .unwrap_err();
+    let err = signer2.on_init(&forged, &dkg.key_packages[&dkg.identifiers[2]], &mut rng).unwrap_err();
     assert_eq!(err, SessionError::UnknownSender(2));
     let _ = prepared;
 }
@@ -255,11 +217,7 @@ fn the_finalized_transaction_verifies_as_a_real_transaction() {
     let by_slot = roster(&dkg.identifiers);
 
     let transport = Pczt::parse(&prepared.transport).expect("transport parses");
-    let material = bind_alphas(
-        &ironwood_action_rks(&transport).expect("rks"),
-        &prepared.alphas,
-    )
-    .expect("bind");
+    let material = bind_alphas(&ironwood_action_rks(&transport).expect("rks"), &prepared.alphas).expect("bind");
     material[0].verify_rk(ak).expect("rk");
 
     // Sign with both participants, as the flow test does.
@@ -270,8 +228,7 @@ fn the_finalized_transaction_verifies_as_a_real_transaction() {
         signers: vec![0, 1],
         identifiers: by_slot.clone(),
     };
-    let mut coordinator =
-        CoordinatorSession::new(config, dkg.pubkeys.clone(), 1).expect("coordinator");
+    let mut coordinator = CoordinatorSession::new(config, dkg.pubkeys.clone(), 1).expect("coordinator");
     let mut signers: BTreeMap<u8, SignerSession> = [0u8, 1]
         .iter()
         .map(|slot| (*slot, SignerSession::new(SESSION, *slot, by_slot.clone())))
@@ -287,17 +244,13 @@ fn the_finalized_transaction_verifies_as_a_real_transaction() {
             .expect("commitments");
         coordinator.on_commitments(&commitments).expect("collect");
     }
-    coordinator
-        .prepare_payload(prepared.sighash, prepared.alphas.clone())
-        .expect("prepare");
+    coordinator.prepare_payload(prepared.sighash, prepared.alphas.clone()).expect("prepare");
     for env in coordinator.payloads().expect("payloads") {
         let slot = env.recipient;
         let signer = signers.get_mut(&slot).unwrap();
         signer.on_payload(&env).expect("payload");
         signer.approve().expect("approve");
-        let share = signer
-            .share(&dkg.key_packages[&by_slot[&slot]])
-            .expect("share");
+        let share = signer.share(&dkg.key_packages[&by_slot[&slot]]).expect("share");
         coordinator.on_share(&share).expect("collect");
     }
     let signatures = coordinator.aggregate().expect("aggregate");
@@ -317,23 +270,15 @@ fn the_finalized_transaction_verifies_as_a_real_transaction() {
     let bundle_ref = tx.ironwood_bundle();
     let bundle = bundle_ref.as_ref().expect("ironwood bundle");
     assert_eq!(bundle.actions().len(), 1);
-    let rk_bytes: [u8; 32] = bundle.actions()[material[0].action_index as usize]
-        .rk()
-        .into();
-    assert_eq!(
-        rk_bytes, material[0].rk,
-        "the extracted transaction carries the rk we authorized"
-    );
+    let rk_bytes: [u8; 32] = bundle.actions()[material[0].action_index as usize].rk().into();
+    assert_eq!(rk_bytes, material[0].rk, "the extracted transaction carries the rk we authorized");
 
     // The transaction round-trips through its own consensus encoding.
     let mut bytes = Vec::new();
     tx.write(&mut bytes).expect("serialize");
     assert!(bytes.len() > 1_000, "transaction is {} bytes", bytes.len());
-    let parsed = zcash_primitives::transaction::Transaction::read(
-        bytes.as_slice(),
-        zcash_protocol::consensus::BranchId::Nu6_3,
-    )
-    .expect("the extracted transaction parses back");
+    let parsed = zcash_primitives::transaction::Transaction::read(bytes.as_slice(), zcash_protocol::consensus::BranchId::Nu6_3)
+        .expect("the extracted transaction parses back");
     let mut again = Vec::new();
     parsed.write(&mut again).expect("reserialize");
     assert_eq!(again, bytes);
