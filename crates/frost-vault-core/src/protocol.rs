@@ -224,18 +224,12 @@ impl core::fmt::Display for EnvelopeError {
                 write!(f, "unsupported envelope version {v} (expected {VERSION})")
             }
             Self::UnknownMsgType(t) => write!(f, "unknown message type 0x{t:02x}"),
-            Self::BadSlot(i) => write!(
-                f,
-                "slot byte 0x{i:02x} is neither a roster index nor the coordinator"
-            ),
+            Self::BadSlot(i) => write!(f, "slot byte 0x{i:02x} is neither a roster index nor the coordinator"),
             Self::PayloadTooLarge(n) => {
                 write!(f, "declared payload length {n} exceeds {MAX_PAYLOAD}")
             }
             Self::LengthMismatch { declared, actual } => {
-                write!(
-                    f,
-                    "declared payload length {declared} but {actual} bytes present"
-                )
+                write!(f, "declared payload length {declared} but {actual} bytes present")
             }
         }
     }
@@ -246,15 +240,7 @@ impl std::error::Error for EnvelopeError {}
 impl Envelope {
     /// A fresh envelope. `sender` must be a valid roster slot; everything else is the caller's
     /// session bookkeeping.
-    pub fn new(
-        msg_type: MsgType,
-        round: u8,
-        sender: u8,
-        recipient: u8,
-        sequence: u32,
-        session_id: [u8; 16],
-        payload: Vec<u8>,
-    ) -> Result<Self, EnvelopeError> {
+    pub fn new(msg_type: MsgType, round: u8, sender: u8, recipient: u8, sequence: u32, session_id: [u8; 16], payload: Vec<u8>) -> Result<Self, EnvelopeError> {
         if !valid_slot(sender) {
             return Err(EnvelopeError::BadSlot(sender));
         }
@@ -311,8 +297,7 @@ impl Envelope {
         if version != VERSION {
             return Err(EnvelopeError::UnsupportedVersion(version));
         }
-        let msg_type =
-            MsgType::from_byte(bytes[1]).ok_or(EnvelopeError::UnknownMsgType(bytes[1]))?;
+        let msg_type = MsgType::from_byte(bytes[1]).ok_or(EnvelopeError::UnknownMsgType(bytes[1]))?;
         let round = bytes[2];
         let sender = bytes[3];
         let recipient = bytes[4];
@@ -331,10 +316,7 @@ impl Envelope {
         }
         let body = &bytes[HEADER_LEN..];
         if body.len() != declared as usize {
-            return Err(EnvelopeError::LengthMismatch {
-                declared,
-                actual: body.len(),
-            });
+            return Err(EnvelopeError::LengthMismatch { declared, actual: body.len() });
         }
         Ok(Self {
             msg_type,
@@ -385,9 +367,7 @@ impl core::fmt::Display for BatchError {
 impl std::error::Error for BatchError {}
 
 /// `count:u8 || count * (slot:u8 || len:u16 || bytes)`, slots ascending.
-pub fn pack_batch(
-    messages: &std::collections::BTreeMap<u8, Vec<u8>>,
-) -> Result<Vec<u8>, BatchError> {
+pub fn pack_batch(messages: &std::collections::BTreeMap<u8, Vec<u8>>) -> Result<Vec<u8>, BatchError> {
     if messages.len() > MAX_BATCH {
         return Err(BatchError::TooMany(messages.len()));
     }
@@ -445,16 +425,7 @@ mod tests {
     use super::*;
 
     fn sample() -> Envelope {
-        Envelope::new(
-            MsgType::SignCommitments,
-            2,
-            1,
-            COORDINATOR_SLOT,
-            7,
-            [9u8; 16],
-            vec![1, 2, 3, 4],
-        )
-        .unwrap()
+        Envelope::new(MsgType::SignCommitments, 2, 1, COORDINATOR_SLOT, 7, [9u8; 16], vec![1, 2, 3, 4]).unwrap()
     }
 
     #[test]
@@ -479,34 +450,19 @@ mod tests {
     fn rejects_wrong_version() {
         let mut bytes = sample().encode();
         bytes[0] = 2;
-        assert_eq!(
-            Envelope::decode(&bytes),
-            Err(EnvelopeError::UnsupportedVersion(2))
-        );
+        assert_eq!(Envelope::decode(&bytes), Err(EnvelopeError::UnsupportedVersion(2)));
     }
 
     #[test]
     fn rejects_unknown_msg_type() {
         let mut bytes = sample().encode();
         bytes[1] = 0x99;
-        assert_eq!(
-            Envelope::decode(&bytes),
-            Err(EnvelopeError::UnknownMsgType(0x99))
-        );
+        assert_eq!(Envelope::decode(&bytes), Err(EnvelopeError::UnknownMsgType(0x99)));
     }
 
     #[test]
     fn accepts_the_coordinator_slot() {
-        let env = Envelope::new(
-            MsgType::SignInit,
-            1,
-            COORDINATOR_SLOT,
-            2,
-            1,
-            [3u8; 16],
-            vec![],
-        )
-        .unwrap();
+        let env = Envelope::new(MsgType::SignInit, 1, COORDINATOR_SLOT, 2, 1, [3u8; 16], vec![]).unwrap();
         assert_eq!(Envelope::decode(&env.encode()).unwrap(), env);
     }
 
@@ -521,26 +477,14 @@ mod tests {
     fn rejects_length_lies() {
         let mut bytes = sample().encode();
         bytes[25] = 9; // claim nine payload bytes, only four present
-        assert_eq!(
-            Envelope::decode(&bytes),
-            Err(EnvelopeError::LengthMismatch {
-                declared: 9,
-                actual: 4
-            })
-        );
+        assert_eq!(Envelope::decode(&bytes), Err(EnvelopeError::LengthMismatch { declared: 9, actual: 4 }));
     }
 
     #[test]
     fn rejects_trailing_bytes() {
         let mut bytes = sample().encode();
         bytes.push(0);
-        assert_eq!(
-            Envelope::decode(&bytes),
-            Err(EnvelopeError::LengthMismatch {
-                declared: 4,
-                actual: 5
-            })
-        );
+        assert_eq!(Envelope::decode(&bytes), Err(EnvelopeError::LengthMismatch { declared: 4, actual: 5 }));
     }
 
     #[test]
@@ -573,17 +517,11 @@ mod tests {
         longer.push(0);
         assert_eq!(unpack_batch(&longer), Err(BatchError::Malformed));
         // Truncation.
-        assert_eq!(
-            unpack_batch(&packed[..packed.len() - 1]),
-            Err(BatchError::Malformed)
-        );
+        assert_eq!(unpack_batch(&packed[..packed.len() - 1]), Err(BatchError::Malformed));
         // Slot outside the roster.
         assert_eq!(unpack_batch(&[1u8, 7, 0, 0]), Err(BatchError::BadSlot(7)));
         // Duplicate slot.
-        assert_eq!(
-            unpack_batch(&[2u8, 0, 1, 0, 7, 0, 1, 0, 8]),
-            Err(BatchError::Duplicate(0))
-        );
+        assert_eq!(unpack_batch(&[2u8, 0, 1, 0, 7, 0, 1, 0, 8]), Err(BatchError::Duplicate(0)));
         // Empty batch is legal (a round with nothing to forward).
         assert_eq!(unpack_batch(&[0u8]).unwrap().len(), 0);
     }

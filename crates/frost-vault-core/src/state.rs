@@ -250,14 +250,8 @@ mod tests {
         assert!(nonce.may_sign());
         nonce.consume().unwrap();
         assert!(!nonce.may_sign());
-        assert_eq!(
-            nonce.consume(),
-            Err(TransitionError::NonceUnusable(NonceState::Consumed))
-        );
-        assert_eq!(
-            nonce.advance(),
-            Err(TransitionError::NonceUnusable(NonceState::Consumed))
-        );
+        assert_eq!(nonce.consume(), Err(TransitionError::NonceUnusable(NonceState::Consumed)));
+        assert_eq!(nonce.advance(), Err(TransitionError::NonceUnusable(NonceState::Consumed)));
     }
 
     #[test]
@@ -265,9 +259,6 @@ mod tests {
         let mut nonce = NonceState::Committed;
         nonce = nonce.destroy();
         assert!(!nonce.may_sign());
-        assert_eq!(
-            nonce.consume(),
-            Err(TransitionError::NonceUnusable(NonceState::Destroyed))
-        );
+        assert_eq!(nonce.consume(), Err(TransitionError::NonceUnusable(NonceState::Destroyed)));
     }
 }

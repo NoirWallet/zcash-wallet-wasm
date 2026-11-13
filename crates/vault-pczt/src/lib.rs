@@ -69,10 +69,7 @@ pub fn ironwood_proving_key() -> &'static ProvingKey {
 }
 
 /// Prove every Ironwood action of an unproven PCZT.
-pub fn prove_ironwood<R: rand::Rng + rand::CryptoRng>(
-    pczt: Pczt,
-    rng: R,
-) -> Result<Pczt, CreateError> {
+pub fn prove_ironwood<R: rand::Rng + rand::CryptoRng>(pczt: Pczt, rng: R) -> Result<Pczt, CreateError> {
     let prover = Prover::new(pczt);
     if !prover.requires_ironwood_proof() {
         return Ok(prover.finish());
@@ -99,10 +96,7 @@ pub fn extract_alphas(pczt: &Pczt) -> Result<Vec<[u8; 32]>, CreateError> {
     verifier
         .with_ironwood::<(), _>(|bundle| {
             for action in bundle.actions() {
-                let alpha = action
-                    .spend()
-                    .alpha()
-                    .ok_or(pczt::roles::verifier::OrchardError::Custom(()))?;
+                let alpha = action.spend().alpha().ok_or(pczt::roles::verifier::OrchardError::Custom(()))?;
                 // The scalar type belongs to orchard's `pasta_curves`, which is not re-exported;
                 // `PrimeField` is in scope so `to_repr` resolves without naming it.
                 alphas.push(alpha.to_repr());
@@ -115,9 +109,7 @@ pub fn extract_alphas(pczt: &Pczt) -> Result<Vec<[u8; 32]>, CreateError> {
 
 /// The shielded sighash of a PCZT, recomputed by the Signer role.
 pub fn shielded_sighash(pczt: Pczt) -> Result<[u8; 32], CreateError> {
-    Ok(Signer::new(pczt)
-        .map_err(|_| CreateError::Unreadable)?
-        .shielded_sighash())
+    Ok(Signer::new(pczt).map_err(|_| CreateError::Unreadable)?.shielded_sighash())
 }
 
 /// Turn a proven PCZT into what the coordinator sends and what it keeps.
@@ -127,17 +119,10 @@ pub fn shielded_sighash(pczt: Pczt) -> Result<[u8; 32], CreateError> {
 pub fn prepare(proven: Pczt) -> Result<Prepared, CreateError> {
     let sighash = shielded_sighash(proven.clone())?;
     let alphas = extract_alphas(&proven)?;
-    let proven_len = proven
-        .clone()
-        .serialize()
-        .map_err(|_| CreateError::Proving)?
-        .len();
+    let proven_len = proven.clone().serialize().map_err(|_| CreateError::Proving)?.len();
 
     let stripped = strip_proofs(proven.clone());
-    let transport = stripped
-        .clone()
-        .serialize()
-        .map_err(|_| CreateError::Proving)?;
+    let transport = stripped.clone().serialize().map_err(|_| CreateError::Proving)?;
 
     let stripped_sighash = shielded_sighash(stripped)?;
     if stripped_sighash != sighash {
@@ -191,29 +176,15 @@ pub mod fixture {
     ///
     /// Uses unpadded bundling so the transaction contains exactly one action, which keeps the
     /// arithmetic in tests obvious.
-    pub fn ironwood_pczt<R: rand::Rng + rand::CryptoRng>(
-        fvk_bytes: &[u8; 96],
-        pool: ValuePool,
-        spend_value: u64,
-        pay_value: u64,
-        rng: R,
-    ) -> Option<Pczt> {
+    pub fn ironwood_pczt<R: rand::Rng + rand::CryptoRng>(fvk_bytes: &[u8; 96], pool: ValuePool, spend_value: u64, pay_value: u64, rng: R) -> Option<Pczt> {
         let network = Network::TestNetwork;
         let fvk = FullViewingKey::from_bytes(fvk_bytes)?;
         let recipient = fvk.address_at(0u32, Scope::External);
         let target_height = network.activation_height(NetworkUpgrade::Nu6_3)? + 1;
 
         let rho = Rho::from_bytes(&[1u8; 32]).into_option()?;
-        let rseed =
-            (0u8..=255).find_map(|byte| RandomSeed::from_bytes([byte; 32], &rho).into_option())?;
-        let note = Note::from_parts(
-            recipient,
-            orchard::value::NoteValue::from_raw(spend_value),
-            rho,
-            rseed,
-            NoteVersion::V3,
-        )
-        .into_option()?;
+        let rseed = (0u8..=255).find_map(|byte| RandomSeed::from_bytes([byte; 32], &rho).into_option())?;
+        let note = Note::from_parts(recipient, orchard::value::NoteValue::from_raw(spend_value), rho, rseed, NoteVersion::V3).into_option()?;
 
         let zero = MerkleHashOrchard::from_bytes(&[0; 32]).into_option()?;
         let merkle_path = MerklePath::from_parts(0, [zero; 32]);
@@ -235,14 +206,10 @@ pub mod fixture {
         );
         match pool {
             ValuePool::Orchard => {
-                builder
-                    .add_orchard_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path)
-                    .ok()?;
+                builder.add_orchard_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path).ok()?;
             }
             ValuePool::Ironwood => {
-                builder
-                    .add_ironwood_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path)
-                    .ok()?;
+                builder.add_ironwood_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path).ok()?;
             }
         }
         builder
@@ -254,9 +221,7 @@ pub mod fixture {
             )
             .ok()?;
 
-        let parts = builder
-            .build_for_pczt(rng, &zip317::FeeRule::standard())
-            .ok()?;
+        let parts = builder.build_for_pczt(rng, &zip317::FeeRule::standard()).ok()?;
         let creator = Creator::build_from_parts(parts.pczt_parts)?;
         IoFinalizer::new(creator).finalize_io(rand::rng()).ok()
     }

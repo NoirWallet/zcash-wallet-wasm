@@ -48,15 +48,9 @@ pub enum DepositError {
 impl core::fmt::Display for DepositError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::BelowMinimum { minimum } => write!(
-                f,
-                "amount is below the smallest sendable denomination ({minimum} zatoshi)"
-            ),
+            Self::BelowMinimum { minimum } => write!(f, "amount is below the smallest sendable denomination ({minimum} zatoshi)"),
             Self::TooManyOutputs { outputs, max } => {
-                write!(
-                    f,
-                    "{outputs} outputs exceeds the per-transaction limit of {max}"
-                )
+                write!(f, "{outputs} outputs exceeds the per-transaction limit of {max}")
             }
         }
     }
@@ -93,9 +87,7 @@ pub const MAX_OUTPUTS: usize = 16;
 /// outputs is reached by the greedy choice first.
 pub fn plan_deposit(amount: u64) -> Result<DepositPlan, DepositError> {
     if amount < MAX_RESIDUAL_ZATS {
-        return Err(DepositError::BelowMinimum {
-            minimum: MAX_RESIDUAL_ZATS,
-        });
+        return Err(DepositError::BelowMinimum { minimum: MAX_RESIDUAL_ZATS });
     }
 
     let mut remaining = amount;
@@ -118,9 +110,7 @@ pub fn plan_deposit(amount: u64) -> Result<DepositPlan, DepositError> {
     }
 
     if outputs.is_empty() {
-        return Err(DepositError::BelowMinimum {
-            minimum: MAX_RESIDUAL_ZATS,
-        });
+        return Err(DepositError::BelowMinimum { minimum: MAX_RESIDUAL_ZATS });
     }
 
     let total = outputs.iter().sum();
@@ -133,9 +123,7 @@ pub fn plan_deposit(amount: u64) -> Result<DepositPlan, DepositError> {
 
 /// Whether a value is one of the canonical denominations.
 pub fn is_canonical(value: u64) -> bool {
-    value >= MAX_RESIDUAL_ZATS
-        && value <= DENOM_CAP_ZATS
-        && largest_one_two_five(value, MAX_RESIDUAL_ZATS) == value
+    value >= MAX_RESIDUAL_ZATS && value <= DENOM_CAP_ZATS && largest_one_two_five(value, MAX_RESIDUAL_ZATS) == value
 }
 
 // ---------------------------------------------------------------------------
@@ -161,20 +149,14 @@ pub enum CanaryError {
     /// The canary amount is not a small canonical denomination.
     BadAmount { amount: u64, max: u64 },
     /// The step does not follow from the current phase.
-    WrongPhase {
-        expected: CanaryPhase,
-        actual: CanaryPhase,
-    },
+    WrongPhase { expected: CanaryPhase, actual: CanaryPhase },
 }
 
 impl core::fmt::Display for CanaryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::AlreadyStarted(p) => write!(f, "canary already started ({p:?})"),
-            Self::BadAmount { amount, max } => write!(
-                f,
-                "canary amount {amount} must be a canonical denomination no larger than {max}"
-            ),
+            Self::BadAmount { amount, max } => write!(f, "canary amount {amount} must be a canonical denomination no larger than {max}"),
             Self::WrongPhase { expected, actual } => {
                 write!(f, "expected phase {expected:?}, currently {actual:?}")
             }
@@ -251,19 +233,14 @@ impl Canary {
     pub fn allows(&self, amount: u64) -> bool {
         match self.phase {
             CanaryPhase::NotStarted => false,
-            CanaryPhase::AwaitingArrival | CanaryPhase::AwaitingSpend => {
-                Some(amount) == self.amount
-            }
+            CanaryPhase::AwaitingArrival | CanaryPhase::AwaitingSpend => Some(amount) == self.amount,
             CanaryPhase::Proven => amount >= MAX_RESIDUAL_ZATS,
         }
     }
 
     fn expect(&self, expected: CanaryPhase) -> Result<(), CanaryError> {
         if self.phase != expected {
-            return Err(CanaryError::WrongPhase {
-                expected,
-                actual: self.phase,
-            });
+            return Err(CanaryError::WrongPhase { expected, actual: self.phase });
         }
         Ok(())
     }

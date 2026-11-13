@@ -1,8 +1,8 @@
 //! Deposit policy: canonical denominations and the canary gate.
 
 use vault_deposit::{
-    is_canonical, plan_deposit, zip318_caps_agree, Canary, CanaryError, CanaryPhase, DepositError,
-    CANARY_AMOUNT_ZATS, COIN, DENOM_CAP_ZATS, MAX_OUTPUTS, MAX_RESIDUAL_ZATS,
+    is_canonical, plan_deposit, zip318_caps_agree, Canary, CanaryError, CanaryPhase, DepositError, CANARY_AMOUNT_ZATS, COIN, DENOM_CAP_ZATS, MAX_OUTPUTS,
+    MAX_RESIDUAL_ZATS,
 };
 
 fn zec(n: u64) -> u64 {
@@ -11,10 +11,7 @@ fn zec(n: u64) -> u64 {
 
 #[test]
 fn the_caps_still_match_zip318() {
-    assert!(
-        zip318_caps_agree(),
-        "ZIP 318 constants moved; revisit this crate"
-    );
+    assert!(zip318_caps_agree(), "ZIP 318 constants moved; revisit this crate");
     assert_eq!(DENOM_CAP_ZATS, zec(10_000));
     assert_eq!(MAX_RESIDUAL_ZATS, COIN / 100);
 }
@@ -60,16 +57,9 @@ fn nothing_larger_than_the_cap_is_ever_emitted() {
 fn below_the_smallest_denomination_nothing_happens() {
     assert_eq!(
         plan_deposit(MAX_RESIDUAL_ZATS - 1),
-        Err(DepositError::BelowMinimum {
-            minimum: MAX_RESIDUAL_ZATS
-        })
+        Err(DepositError::BelowMinimum { minimum: MAX_RESIDUAL_ZATS })
     );
-    assert_eq!(
-        plan_deposit(0),
-        Err(DepositError::BelowMinimum {
-            minimum: MAX_RESIDUAL_ZATS
-        })
-    );
+    assert_eq!(plan_deposit(0), Err(DepositError::BelowMinimum { minimum: MAX_RESIDUAL_ZATS }));
     // Exactly the minimum is sendable.
     let plan = plan_deposit(MAX_RESIDUAL_ZATS).expect("plan");
     assert_eq!(plan.outputs, vec![MAX_RESIDUAL_ZATS]);
@@ -90,10 +80,7 @@ fn a_deposit_that_would_need_too_many_outputs_is_refused() {
             _ => {}
         }
     }
-    assert!(
-        !caused,
-        "no amount this small needs more than {MAX_OUTPUTS} outputs"
-    );
+    assert!(!caused, "no amount this small needs more than {MAX_OUTPUTS} outputs");
     // And the invariant holds for a large spread of amounts.
     for k in 1..5000u64 {
         let amount = MAX_RESIDUAL_ZATS * (1 + k);
@@ -164,10 +151,7 @@ fn the_canary_amount_must_be_small_and_canonical() {
         })
     );
     // 0.007 ZEC is not in the canonical set.
-    assert!(matches!(
-        canary.begin(7_000_000),
-        Err(CanaryError::BadAmount { .. })
-    ));
+    assert!(matches!(canary.begin(7_000_000), Err(CanaryError::BadAmount { .. })));
     assert_eq!(canary.phase(), CanaryPhase::NotStarted);
 }
 
@@ -198,8 +182,5 @@ fn the_steps_cannot_be_skipped() {
 fn a_canary_cannot_be_restarted() {
     let mut canary = Canary::new();
     canary.begin(CANARY_AMOUNT_ZATS).unwrap();
-    assert_eq!(
-        canary.begin(CANARY_AMOUNT_ZATS),
-        Err(CanaryError::AlreadyStarted(CanaryPhase::AwaitingArrival))
-    );
+    assert_eq!(canary.begin(CANARY_AMOUNT_ZATS), Err(CanaryError::AlreadyStarted(CanaryPhase::AwaitingArrival)));
 }

@@ -15,8 +15,7 @@ use pczt_signer_core::material::ironwood_action_rks;
 use pczt_signer_core::sighash::shielded_sighash;
 
 fn fixture_bytes() -> Vec<u8> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/ironwood_1action.hex");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ironwood_1action.hex");
     let hexed = std::fs::read_to_string(&path).expect("fixture present");
     hex::decode(hexed.trim()).expect("fixture is hex")
 }

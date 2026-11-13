@@ -8,13 +8,9 @@
 use std::collections::BTreeMap;
 
 use frost_vault_core::protocol::{Envelope, MsgType};
-use frost_vault_core::session::{
-    CoordinatorSession, SessionConfig, SessionError, SignerSession, SESSION_ID_LEN,
-};
+use frost_vault_core::session::{CoordinatorSession, SessionConfig, SessionError, SignerSession, SESSION_ID_LEN};
 use frost_vault_core::state::{NonceState, SignPhase};
-use frost_vault_core::threshold::{
-    randomized_verifying_key, run_dkg, verify_with_group_key_and_alpha, Identifier,
-};
+use frost_vault_core::threshold::{randomized_verifying_key, run_dkg, verify_with_group_key_and_alpha, Identifier};
 use rand::rngs::OsRng;
 
 const SESSION: [u8; SESSION_ID_LEN] = [0x5Au8; SESSION_ID_LEN];
@@ -59,17 +55,11 @@ impl Harness {
             signers: signers_wanted.clone(),
             identifiers: identifiers.clone(),
         };
-        let coordinator =
-            CoordinatorSession::new(cfg, dkg.pubkeys.clone(), actions).expect("coord");
+        let coordinator = CoordinatorSession::new(cfg, dkg.pubkeys.clone(), actions).expect("coord");
 
         let signers = signers_wanted
             .iter()
-            .map(|slot| {
-                (
-                    *slot,
-                    SignerSession::new(SESSION, *slot, identifiers.clone()),
-                )
-            })
+            .map(|slot| (*slot, SignerSession::new(SESSION, *slot, identifiers.clone())))
             .collect();
 
         Self {
@@ -91,15 +81,11 @@ impl Harness {
             let signer = self.signers.get_mut(&slot).expect("signer");
             let kp = &self.dkg.key_packages[&self.identifiers[&slot]];
             let commitments = signer.on_init(env, kp, &mut rng).expect("on_init");
-            self.coordinator
-                .on_commitments(&commitments)
-                .expect("on_commitments");
+            self.coordinator.on_commitments(&commitments).expect("on_commitments");
         }
 
         let alphas: Vec<[u8; 32]> = (0..actions).map(|i| alpha(b'a' + i as u8)).collect();
-        self.coordinator
-            .prepare_payload(sighash(), alphas)
-            .expect("prepare_payload");
+        self.coordinator.prepare_payload(sighash(), alphas).expect("prepare_payload");
         payloads_out.extend(self.coordinator.payloads().expect("payloads"));
         payloads_out
     }
@@ -121,9 +107,7 @@ fn two_of_three_completes_and_verifies() {
             randomized_verifying_key(&ak, a).expect("alpha is a valid randomizer");
         }
         signer.approve().expect("approve");
-        let share = signer
-            .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-            .expect("share");
+        let share = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).expect("share");
         assert_eq!(share.msg_type, MsgType::SignShare);
         h.coordinator.on_share(&share).expect("on_share");
     }
@@ -133,8 +117,7 @@ fn two_of_three_completes_and_verifies() {
     assert_eq!(h.coordinator.phase(), SignPhase::Aggregated);
 
     let ak = h.dkg.group_verifying_key().unwrap();
-    verify_with_group_key_and_alpha(&ak, &alpha(b'a'), &sighash(), &sigs[0])
-        .expect("aggregate verifies against rk");
+    verify_with_group_key_and_alpha(&ak, &alpha(b'a'), &sighash(), &sigs[0]).expect("aggregate verifies against rk");
 }
 
 #[test]
@@ -147,9 +130,7 @@ fn two_of_three_recovery_subset_b_c() {
         let signer = h.signers.get_mut(&slot).unwrap();
         signer.on_payload(env).unwrap();
         signer.approve().unwrap();
-        let share = signer
-            .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-            .unwrap();
+        let share = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap();
         h.coordinator.on_share(&share).unwrap();
     }
     let sigs = h.coordinator.aggregate().unwrap();
@@ -167,27 +148,17 @@ fn multi_action_signs_once_per_action_with_separate_nonces() {
         let material = signer.on_payload(env).unwrap();
         assert_eq!(material.alphas.len(), 3);
         signer.approve().unwrap();
-        let share = signer
-            .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-            .unwrap();
+        let share = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap();
         h.coordinator.on_share(&share).unwrap();
         // All three nonce sets are consumed.
-        assert_eq!(
-            signer.nonce_states(),
-            &[
-                NonceState::Consumed,
-                NonceState::Consumed,
-                NonceState::Consumed
-            ]
-        );
+        assert_eq!(signer.nonce_states(), &[NonceState::Consumed, NonceState::Consumed, NonceState::Consumed]);
     }
     let sigs = h.coordinator.aggregate().unwrap();
     assert_eq!(sigs.len(), 3);
 
     let ak = h.dkg.group_verifying_key().unwrap();
     for (i, sig) in sigs.iter().enumerate() {
-        verify_with_group_key_and_alpha(&ak, &alpha(b'a' + i as u8), &sighash(), sig)
-            .unwrap_or_else(|e| panic!("action {i}: {e}"));
+        verify_with_group_key_and_alpha(&ak, &alpha(b'a' + i as u8), &sighash(), sig).unwrap_or_else(|e| panic!("action {i}: {e}"));
     }
 }
 
@@ -205,16 +176,11 @@ fn three_of_three_needs_all_three() {
         let signer = h.signers.get_mut(&slot).unwrap();
         signer.on_payload(env).unwrap();
         signer.approve().unwrap();
-        let share = signer
-            .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-            .unwrap();
+        let share = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap();
         h.coordinator.on_share(&share).unwrap();
     }
     assert_eq!(h.coordinator.phase(), SignPhase::Verifying);
-    assert!(
-        h.coordinator.aggregate().is_err(),
-        "2 of 3 must not aggregate"
-    );
+    assert!(h.coordinator.aggregate().is_err(), "2 of 3 must not aggregate");
 
     // The third completes it.
     let env = &payloads[2];
@@ -222,9 +188,7 @@ fn three_of_three_needs_all_three() {
     let signer = h.signers.get_mut(&slot).unwrap();
     signer.on_payload(env).unwrap();
     signer.approve().unwrap();
-    let share = signer
-        .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-        .unwrap();
+    let share = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap();
     h.coordinator.on_share(&share).unwrap();
 
     let sigs = h.coordinator.aggregate().expect("3 of 3 aggregates");
@@ -247,15 +211,12 @@ fn sessions_run_for_every_supported_mode() {
             let signer = h.signers.get_mut(&slot).unwrap();
             signer.on_payload(env).unwrap();
             signer.approve().unwrap();
-            let share = signer
-                .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-                .unwrap();
+            let share = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap();
             h.coordinator.on_share(&share).unwrap();
         }
         let sigs = h.coordinator.aggregate().expect("aggregate");
         let ak = h.dkg.group_verifying_key().unwrap();
-        verify_with_group_key_and_alpha(&ak, &alpha(b'a'), &sighash(), &sigs[0])
-            .unwrap_or_else(|e| panic!("{threshold}-of-{participants}: {e}"));
+        verify_with_group_key_and_alpha(&ak, &alpha(b'a'), &sighash(), &sigs[0]).unwrap_or_else(|e| panic!("{threshold}-of-{participants}: {e}"));
     }
 }
 
@@ -267,9 +228,7 @@ fn no_share_before_approval() {
     let signer = h.signers.get_mut(&slot).unwrap();
     signer.on_payload(&payloads[0]).unwrap();
     assert_eq!(signer.phase(), SignPhase::Verifying);
-    let err = signer
-        .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-        .unwrap_err();
+    let err = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap_err();
     assert_eq!(err, SessionError::NotApproved);
 }
 
@@ -281,13 +240,9 @@ fn a_signer_cannot_share_twice() {
     let signer = h.signers.get_mut(&slot).unwrap();
     signer.on_payload(&payloads[0]).unwrap();
     signer.approve().unwrap();
-    signer
-        .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-        .unwrap();
+    signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap();
     // Second call: phase has moved on, and the nonces are consumed.
-    let err = signer
-        .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-        .unwrap_err();
+    let err = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap_err();
     assert_eq!(err, SessionError::NotApproved);
     assert_eq!(signer.nonce_states(), &[NonceState::Consumed]);
 }
@@ -305,21 +260,15 @@ fn a_failed_share_still_burns_the_nonce() {
 
     // Deliberately sign with the wrong participant's key package so the call fails.
     let wrong = if slot == 0 { 1u8 } else { 0u8 };
-    let err = signer
-        .share(&h.dkg.key_packages[&h.identifiers[&wrong]])
-        .unwrap_err();
+    let err = signer.share(&h.dkg.key_packages[&h.identifiers[&wrong]]).unwrap_err();
     assert!(matches!(err, SessionError::Frost(_)), "{err:?}");
     assert_eq!(signer.nonce_states(), &[NonceState::Consumed]);
 
     // And the nonce really is gone: retrying with the right package cannot reuse it.
-    let err = signer
-        .share(&h.dkg.key_packages[&h.identifiers[&slot]])
-        .unwrap_err();
+    let err = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap_err();
     assert_eq!(
         err,
-        SessionError::State(frost_vault_core::state::TransitionError::NonceUnusable(
-            NonceState::Consumed
-        ))
+        SessionError::State(frost_vault_core::state::TransitionError::NonceUnusable(NonceState::Consumed))
     );
 }
 
@@ -331,19 +280,11 @@ fn replayed_commitments_are_refused() {
     let env = &inits[0];
     let slot = env.recipient;
     let kp = &h.dkg.key_packages[&h.identifiers[&slot]];
-    let commitments = h
-        .signers
-        .get_mut(&slot)
-        .unwrap()
-        .on_init(env, kp, &mut rng)
-        .unwrap();
+    let commitments = h.signers.get_mut(&slot).unwrap().on_init(env, kp, &mut rng).unwrap();
     h.coordinator.on_commitments(&commitments).unwrap();
     // Same envelope again: sequence has not advanced.
     let err = h.coordinator.on_commitments(&commitments).unwrap_err();
-    assert!(
-        matches!(err, SessionError::SequenceRewind { .. }),
-        "{err:?}"
-    );
+    assert!(matches!(err, SessionError::SequenceRewind { .. }), "{err:?}");
 }
 
 #[test]
@@ -354,12 +295,7 @@ fn wrong_session_id_is_refused() {
     let env = &inits[0];
     let slot = env.recipient;
     let kp = &h.dkg.key_packages[&h.identifiers[&slot]];
-    let commitments = h
-        .signers
-        .get_mut(&slot)
-        .unwrap()
-        .on_init(env, kp, &mut rng)
-        .unwrap();
+    let commitments = h.signers.get_mut(&slot).unwrap().on_init(env, kp, &mut rng).unwrap();
 
     let mut forged = commitments.clone();
     forged.session_id = [0xEEu8; SESSION_ID_LEN];
@@ -378,12 +314,7 @@ fn sender_outside_the_selection_is_refused() {
     let env = &inits[0];
     let slot = env.recipient;
     let kp = &h.dkg.key_packages[&h.identifiers[&slot]];
-    let c = h
-        .signers
-        .get_mut(&slot)
-        .unwrap()
-        .on_init(env, kp, &mut rng)
-        .unwrap();
+    let c = h.signers.get_mut(&slot).unwrap().on_init(env, kp, &mut rng).unwrap();
     let mut forged = c.clone();
     forged.sender = 2;
 
@@ -417,18 +348,11 @@ fn a_signer_cannot_be_selected_twice() {
     let c = signer.on_init(env, kp, &mut rng).unwrap();
     coord.on_commitments(&c).unwrap();
     let err = coord.on_commitments(&c).unwrap_err();
-    assert!(matches!(
-        err,
-        SessionError::Duplicate(_) | SessionError::SequenceRewind { .. }
-    ));
+    assert!(matches!(err, SessionError::Duplicate(_) | SessionError::SequenceRewind { .. }));
 }
 
 fn coord_identifiers(dkg: &frost_vault_core::threshold::DkgOutput) -> BTreeMap<u8, Identifier> {
-    dkg.identifiers
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (i as u8, *id))
-        .collect()
+    dkg.identifiers.iter().enumerate().map(|(i, id)| (i as u8, *id)).collect()
 }
 
 #[test]
@@ -444,12 +368,7 @@ fn wrong_recipient_is_refused() {
     // of the associated data precisely so a message cannot be re-targeted.
     let mut misaddressed = env.clone();
     misaddressed.recipient = 1 - slot;
-    let err = h
-        .signers
-        .get_mut(&slot)
-        .unwrap()
-        .on_init(&misaddressed, kp, &mut rng)
-        .unwrap_err();
+    let err = h.signers.get_mut(&slot).unwrap().on_init(&misaddressed, kp, &mut rng).unwrap_err();
     assert_eq!(err, SessionError::WrongRecipient(1 - slot));
 }
 
@@ -462,20 +381,11 @@ fn a_payload_that_omits_this_signer_is_refused() {
 
     let mut alien = Harness::new(3, 2, vec![1, 2], 1);
     let alien_payloads = alien.run_to_verifying(1);
-    let mut smuggled = alien_payloads
-        .iter()
-        .find(|e| e.recipient == 1)
-        .unwrap()
-        .clone();
+    let mut smuggled = alien_payloads.iter().find(|e| e.recipient == 1).unwrap().clone();
     smuggled.recipient = 0;
     smuggled.sequence = 99; // ahead of anything the victim's session has seen
 
-    let err = victim
-        .signers
-        .get_mut(&0)
-        .unwrap()
-        .on_payload(&smuggled)
-        .unwrap_err();
+    let err = victim.signers.get_mut(&0).unwrap().on_payload(&smuggled).unwrap_err();
     assert_eq!(err, SessionError::UnknownSender(0));
 }
 

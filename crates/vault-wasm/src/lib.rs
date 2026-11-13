@@ -21,9 +21,7 @@ use frost_vault_core::protocol::{self, Envelope, MsgType, COORDINATOR_SLOT};
 use frost_vault_core::seal;
 use frost_vault_core::session::{CoordinatorSession, SessionConfig, SignerSession};
 use frost_vault_core::state::{NonceState, SignPhase};
-use frost_vault_core::threshold::{
-    self, DkgFinal, DkgRound1, DkgRound2, KeyPackage, PublicKeyPackage,
-};
+use frost_vault_core::threshold::{self, DkgFinal, DkgRound1, DkgRound2, KeyPackage, PublicKeyPackage};
 use rand_core::OsRng;
 use wasm_bindgen::prelude::*;
 
@@ -54,9 +52,7 @@ pub struct MessageSet {
 impl MessageSet {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        Self {
-            inner: BTreeMap::new(),
-        }
+        Self { inner: BTreeMap::new() }
     }
 
     /// Add or replace the payload for a peer.
@@ -82,9 +78,7 @@ impl MessageSet {
 
     /// Pack for transport as one envelope payload.
     pub fn to_bytes(&self) -> Result<js_sys::Uint8Array, JsError> {
-        Ok(to_js_bytes(
-            &protocol::pack_batch(&self.inner).map_err(err)?,
-        ))
+        Ok(to_js_bytes(&protocol::pack_batch(&self.inner).map_err(err)?))
     }
 
     /// Unpack an envelope payload back into a set.
@@ -111,30 +105,10 @@ pub struct EnvelopeCodec;
 impl EnvelopeCodec {
     /// Build a `SIGN_INIT`-shaped envelope. Mostly useful for transport tests.
     #[wasm_bindgen]
-    pub fn build(
-        msg_type: u8,
-        round: u8,
-        sender: u8,
-        recipient: u8,
-        sequence: u32,
-        session_id: &[u8],
-        payload: &[u8],
-    ) -> Result<js_sys::Uint8Array, JsError> {
-        let session_id: [u8; 16] = session_id
-            .try_into()
-            .map_err(|_| JsError::new("session_id must be 16 bytes"))?;
-        let msg_type =
-            MsgType::from_byte(msg_type).ok_or_else(|| JsError::new("unknown msg_type"))?;
-        let env = Envelope::new(
-            msg_type,
-            round,
-            sender,
-            recipient,
-            sequence,
-            session_id,
-            payload.to_vec(),
-        )
-        .map_err(err)?;
+    pub fn build(msg_type: u8, round: u8, sender: u8, recipient: u8, sequence: u32, session_id: &[u8], payload: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        let session_id: [u8; 16] = session_id.try_into().map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+        let msg_type = MsgType::from_byte(msg_type).ok_or_else(|| JsError::new("unknown msg_type"))?;
+        let env = Envelope::new(msg_type, round, sender, recipient, sequence, session_id, payload.to_vec()).map_err(err)?;
         Ok(to_js_bytes(&env.encode()))
     }
 
@@ -185,9 +159,7 @@ impl EnvelopeCodec {
         match defined_msg_type(name) {
             Some(msg_type) => Ok(msg_type.to_byte()),
             None => match reserved_msg_type(name) {
-                Some(_) => Err(JsError::new(&format!(
-                    "{name} is reserved: its payload format is not defined yet"
-                ))),
+                Some(_) => Err(JsError::new(&format!("{name} is reserved: its payload format is not defined yet"))),
                 None => Err(JsError::new(&format!("unknown message type {name}"))),
             },
         }
@@ -310,12 +282,7 @@ impl Dkg1 {
     ///
     /// Use this instead of shipping the raw bytes: the envelope is what binds the payload to this
     /// session, this sender and this round, and what lets the relay reject replays.
-    pub fn broadcast_envelope(
-        &self,
-        session_id: &[u8],
-        sequence: u32,
-        my_slot: u8,
-    ) -> Result<js_sys::Uint8Array, JsError> {
+    pub fn broadcast_envelope(&self, session_id: &[u8], sequence: u32, my_slot: u8) -> Result<js_sys::Uint8Array, JsError> {
         Ok(to_js_bytes(&dkg_envelope(
             MsgType::DkgR1,
             1,
@@ -357,12 +324,7 @@ impl Dkg2 {
     }
 
     /// The whole batch wrapped in a `DKGR2BATCH` envelope addressed to the coordinator.
-    pub fn outgoing_envelope(
-        &self,
-        session_id: &[u8],
-        sequence: u32,
-        my_slot: u8,
-    ) -> Result<js_sys::Uint8Array, JsError> {
+    pub fn outgoing_envelope(&self, session_id: &[u8], sequence: u32, my_slot: u8) -> Result<js_sys::Uint8Array, JsError> {
         let payload = protocol::pack_batch(&self.inner.outgoing).map_err(err)?;
         Ok(to_js_bytes(&dkg_envelope(
             MsgType::DkgR2Batch,
@@ -440,11 +402,7 @@ impl Sealed {
     /// The prologue for a participant set, given their static public keys by slot.
     #[wasm_bindgen]
     pub fn prologue(statics: &MessageSet) -> Result<js_sys::Uint8Array, JsError> {
-        let pairs: Vec<(u8, Vec<u8>)> = statics
-            .inner
-            .iter()
-            .map(|(slot, key)| (*slot, key.clone()))
-            .collect();
+        let pairs: Vec<(u8, Vec<u8>)> = statics.inner.iter().map(|(slot, key)| (*slot, key.clone())).collect();
         if pairs.is_empty() {
             return Err(JsError::new("prologue needs at least one participant"));
         }
@@ -453,27 +411,15 @@ impl Sealed {
 
     /// Seal `plaintext` so only the holder of `recipient_public` can read it.
     #[wasm_bindgen]
-    pub fn seal(
-        sender_secret: &[u8],
-        recipient_public: &[u8],
-        prologue: &[u8],
-        plaintext: &[u8],
-    ) -> Result<js_sys::Uint8Array, JsError> {
-        let sealed =
-            seal::seal(sender_secret, recipient_public, prologue, plaintext).map_err(err)?;
+    pub fn seal(sender_secret: &[u8], recipient_public: &[u8], prologue: &[u8], plaintext: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        let sealed = seal::seal(sender_secret, recipient_public, prologue, plaintext).map_err(err)?;
         Ok(to_js_bytes(&sealed))
     }
 
     /// Open a message from `sender_public`. Fails if the pair, the ceremony or the bytes are wrong.
     #[wasm_bindgen]
-    pub fn open(
-        recipient_secret: &[u8],
-        sender_public: &[u8],
-        prologue: &[u8],
-        ciphertext: &[u8],
-    ) -> Result<js_sys::Uint8Array, JsError> {
-        let opened =
-            seal::open(recipient_secret, sender_public, prologue, ciphertext).map_err(err)?;
+    pub fn open(recipient_secret: &[u8], sender_public: &[u8], prologue: &[u8], ciphertext: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        let opened = seal::open(recipient_secret, sender_public, prologue, ciphertext).map_err(err)?;
         Ok(to_js_bytes(&opened))
     }
 }
@@ -494,11 +440,7 @@ impl Dkg {
             return Err(JsError::new("slot is outside the roster"));
         }
         threshold::slot_identifier(slot).map_err(err)?;
-        Ok(Self {
-            participants,
-            threshold,
-            slot,
-        })
+        Ok(Self { participants, threshold, slot })
     }
 
     pub fn slot(&self) -> u8 {
@@ -507,8 +449,7 @@ impl Dkg {
 
     /// Round 1: generate this device's contribution.
     pub fn part1(&self) -> Result<Dkg1, JsError> {
-        let inner = threshold::dkg_part1(self.participants, self.threshold, self.slot, &mut rng())
-            .map_err(err)?;
+        let inner = threshold::dkg_part1(self.participants, self.threshold, self.slot, &mut rng()).map_err(err)?;
         Ok(Dkg1 { inner })
     }
 
@@ -525,40 +466,20 @@ impl Dkg {
     /// sender's key in order to seal KEYSET_SETUP to it. Use this rather than taking the framing apart.
     #[wasm_bindgen]
     pub fn static_public_of_broadcast(broadcast: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
-        Ok(to_js_bytes(
-            &threshold::static_public_of_broadcast(broadcast).map_err(err)?,
-        ))
+        Ok(to_js_bytes(&threshold::static_public_of_broadcast(broadcast).map_err(err)?))
     }
 
     /// Round 3: finalize with the broadcasts and the packages addressed to this device.
-    pub fn part3(
-        &self,
-        secret: &[u8],
-        broadcasts: &MessageSet,
-        incoming: &MessageSet,
-    ) -> Result<Dkg3, JsError> {
+    pub fn part3(&self, secret: &[u8], broadcasts: &MessageSet, incoming: &MessageSet) -> Result<Dkg3, JsError> {
         let peers = strip_self(&broadcasts.inner, self.slot);
         let inner = threshold::dkg_part3(secret, &peers, &incoming.inner).map_err(err)?;
         Ok(Dkg3 { inner })
     }
 }
 
-fn dkg_envelope(
-    msg_type: MsgType,
-    round: u8,
-    sender: u8,
-    recipient: u8,
-    sequence: u32,
-    session_id: &[u8],
-    payload: Vec<u8>,
-) -> Result<Vec<u8>, JsError> {
-    let session_id: [u8; 16] = session_id
-        .try_into()
-        .map_err(|_| JsError::new("session_id must be 16 bytes"))?;
-    let envelope = Envelope::new(
-        msg_type, round, sender, recipient, sequence, session_id, payload,
-    )
-    .map_err(err)?;
+fn dkg_envelope(msg_type: MsgType, round: u8, sender: u8, recipient: u8, sequence: u32, session_id: &[u8], payload: Vec<u8>) -> Result<Vec<u8>, JsError> {
+    let session_id: [u8; 16] = session_id.try_into().map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+    let envelope = Envelope::new(msg_type, round, sender, recipient, sequence, session_id, payload).map_err(err)?;
     Ok(envelope.encode())
 }
 
@@ -582,9 +503,7 @@ pub struct DkgRelay {
 impl DkgRelay {
     #[wasm_bindgen(constructor)]
     pub fn new(session_id: &[u8], participants: u16) -> Result<DkgRelay, JsError> {
-        let session_id: [u8; 16] = session_id
-            .try_into()
-            .map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+        let session_id: [u8; 16] = session_id.try_into().map_err(|_| JsError::new("session_id must be 16 bytes"))?;
         Ok(Self {
             session_id,
             participants,
@@ -599,8 +518,7 @@ impl DkgRelay {
     /// roster slot, not addressed to the coordinator, not the expected type, or not newer than the
     /// last message from that sender is refused.
     pub fn accept(&mut self, envelope: &[u8], expected: &str) -> Result<js_sys::Array, JsError> {
-        let want = MsgType::from_byte(EnvelopeCodec::msg_type(expected)?)
-            .ok_or_else(|| JsError::new("unknown message type"))?;
+        let want = MsgType::from_byte(EnvelopeCodec::msg_type(expected)?).ok_or_else(|| JsError::new("unknown message type"))?;
         let env = Envelope::decode(envelope).map_err(err)?;
         if env.session_id != self.session_id {
             return Err(JsError::new("envelope belongs to another session"));
@@ -628,12 +546,7 @@ impl DkgRelay {
     }
 
     /// Forward a bundle to one recipient: `DKGR1BUNDLE` in round 1, `DKGR2INBOX` in round 2.
-    pub fn bundle(
-        &mut self,
-        round: u8,
-        recipient: u8,
-        messages: &MessageSet,
-    ) -> Result<js_sys::Uint8Array, JsError> {
+    pub fn bundle(&mut self, round: u8, recipient: u8, messages: &MessageSet) -> Result<js_sys::Uint8Array, JsError> {
         let msg_type = match round {
             1 => MsgType::DkgR1Bundle,
             2 => MsgType::DkgR2Inbox,
@@ -683,13 +596,7 @@ impl ShareBackup {
     /// Wrap a key package for storage. `device_id` and `vault_id` are opaque to the wasm and must be
     /// stable across restores.
     #[wasm_bindgen(constructor)]
-    pub fn new(
-        key_package: &[u8],
-        slot: u8,
-        device_id: &[u8],
-        vault_id: &[u8],
-        group_verifying_key: &[u8],
-    ) -> Result<ShareBackup, JsError> {
+    pub fn new(key_package: &[u8], slot: u8, device_id: &[u8], vault_id: &[u8], group_verifying_key: &[u8]) -> Result<ShareBackup, JsError> {
         let key_package = KeyPackage::deserialize(key_package).map_err(err)?;
         let group: [u8; 32] = group_verifying_key
             .try_into()
@@ -718,20 +625,11 @@ impl ShareBackup {
 
     /// Bytes for the host to seal and store. The wasm does not encrypt.
     pub fn to_bytes(&self) -> Result<js_sys::Uint8Array, JsError> {
-        Ok(to_js_bytes(
-            &self
-                .inner
-                .to_bytes()
-                .map_err(|e| JsError::new(&format!("{e:?}")))?,
-        ))
+        Ok(to_js_bytes(&self.inner.to_bytes().map_err(|e| JsError::new(&format!("{e:?}")))?))
     }
 
     /// Load and validate against the expected group and slot.
-    pub fn from_bytes(
-        bytes: &[u8],
-        group_verifying_key: &[u8],
-        expected_slot: u8,
-    ) -> Result<ShareBackup, JsError> {
+    pub fn from_bytes(bytes: &[u8], group_verifying_key: &[u8], expected_slot: u8) -> Result<ShareBackup, JsError> {
         let group: [u8; 32] = group_verifying_key
             .try_into()
             .map_err(|_| JsError::new("group_verifying_key must be 32 bytes"))?;
@@ -778,25 +676,15 @@ impl SessionMarker {
     /// Build the marker to persist right after a session starts.
     #[wasm_bindgen]
     pub fn created(session_id: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
-        let id: [u8; 16] = session_id
-            .try_into()
-            .map_err(|_| JsError::new("session_id must be 16 bytes"))?;
-        Ok(to_js_bytes(&custody::marker_bytes(
-            id,
-            custody::SessionProgress::Created,
-        )))
+        let id: [u8; 16] = session_id.try_into().map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+        Ok(to_js_bytes(&custody::marker_bytes(id, custody::SessionProgress::Created)))
     }
 
     /// Advance a marker once commitments have left the device.
     #[wasm_bindgen]
     pub fn committed(session_id: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
-        let id: [u8; 16] = session_id
-            .try_into()
-            .map_err(|_| JsError::new("session_id must be 16 bytes"))?;
-        Ok(to_js_bytes(&custody::marker_bytes(
-            id,
-            custody::SessionProgress::Committed,
-        )))
+        let id: [u8; 16] = session_id.try_into().map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+        Ok(to_js_bytes(&custody::marker_bytes(id, custody::SessionProgress::Committed)))
     }
 
     /// What to do about a persisted marker: `"clean"`, `"discardable"` or `"burned"`.
@@ -836,15 +724,10 @@ impl Coordinator {
         actions: usize,
         public_key_package: &[u8],
     ) -> Result<Coordinator, JsError> {
-        let session_id: [u8; 16] = session_id
-            .try_into()
-            .map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+        let session_id: [u8; 16] = session_id.try_into().map_err(|_| JsError::new("session_id must be 16 bytes"))?;
         let mut identifiers = BTreeMap::new();
         for slot in 0..participants {
-            identifiers.insert(
-                slot as u8,
-                threshold::slot_identifier(slot as u8).map_err(err)?,
-            );
+            identifiers.insert(slot as u8, threshold::slot_identifier(slot as u8).map_err(err)?);
         }
         let config = SessionConfig {
             session_id,
@@ -873,16 +756,11 @@ impl Coordinator {
 
     /// Hand over the sighash and per-action alphas read from the built transaction.
     pub fn prepare_payload(&mut self, sighash: &[u8], alphas: &[u8]) -> Result<(), JsError> {
-        let sighash: [u8; 32] = sighash
-            .try_into()
-            .map_err(|_| JsError::new("sighash must be 32 bytes"))?;
+        let sighash: [u8; 32] = sighash.try_into().map_err(|_| JsError::new("sighash must be 32 bytes"))?;
         if alphas.len() % 32 != 0 {
             return Err(JsError::new("alphas must be a multiple of 32 bytes"));
         }
-        let alphas: Vec<[u8; 32]> = alphas
-            .chunks_exact(32)
-            .map(|c| c.try_into().expect("chunk size checked"))
-            .collect();
+        let alphas: Vec<[u8; 32]> = alphas.chunks_exact(32).map(|c| c.try_into().expect("chunk size checked")).collect();
         self.inner.prepare_payload(sighash, alphas).map_err(err)
     }
 
@@ -927,21 +805,11 @@ pub struct Signer {
 #[wasm_bindgen]
 impl Signer {
     #[wasm_bindgen(constructor)]
-    pub fn new(
-        session_id: &[u8],
-        my_slot: u8,
-        participants: u16,
-        key_package: &[u8],
-    ) -> Result<Signer, JsError> {
-        let session_id: [u8; 16] = session_id
-            .try_into()
-            .map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+    pub fn new(session_id: &[u8], my_slot: u8, participants: u16, key_package: &[u8]) -> Result<Signer, JsError> {
+        let session_id: [u8; 16] = session_id.try_into().map_err(|_| JsError::new("session_id must be 16 bytes"))?;
         let mut identifiers = BTreeMap::new();
         for slot in 0..participants {
-            identifiers.insert(
-                slot as u8,
-                threshold::slot_identifier(slot as u8).map_err(err)?,
-            );
+            identifiers.insert(slot as u8, threshold::slot_identifier(slot as u8).map_err(err)?);
         }
         let key_package = KeyPackage::deserialize(key_package).map_err(err)?;
         Ok(Self {
@@ -953,10 +821,7 @@ impl Signer {
     /// Consume `SIGN_INIT`, produce the `SIGN_COMMITMENTS` envelope to send back.
     pub fn init(&mut self, envelope: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
         let env = Envelope::decode(envelope).map_err(err)?;
-        let out = self
-            .inner
-            .on_init(&env, &self.key_package, &mut rng())
-            .map_err(err)?;
+        let out = self.inner.on_init(&env, &self.key_package, &mut rng()).map_err(err)?;
         Ok(to_js_bytes(&out.encode()))
     }
 
@@ -1013,25 +878,17 @@ pub struct Keyset;
 impl Keyset {
     /// Returns `[fvk(96), ufvk, address, rawAddress(43), fingerprint(32)]`.
     #[wasm_bindgen]
-    pub fn derive(
-        group_verifying_key: &[u8],
-        qsk: &[u8],
-        mainnet: bool,
-        diversifier_index: u32,
-    ) -> Result<js_sys::Array, JsError> {
+    pub fn derive(group_verifying_key: &[u8], qsk: &[u8], mainnet: bool, diversifier_index: u32) -> Result<js_sys::Array, JsError> {
         let ak: [u8; 32] = group_verifying_key
             .try_into()
             .map_err(|_| JsError::new("group_verifying_key must be 32 bytes"))?;
-        let qsk: [u8; 32] = qsk
-            .try_into()
-            .map_err(|_| JsError::new("qsk must be 32 bytes"))?;
+        let qsk: [u8; 32] = qsk.try_into().map_err(|_| JsError::new("qsk must be 32 bytes"))?;
         let network = if mainnet {
             zcash_protocol::consensus::Network::MainNetwork
         } else {
             zcash_protocol::consensus::Network::TestNetwork
         };
-        let keyset = vault_keyset::VaultKeyset::derive(&ak, &qsk, network, diversifier_index)
-            .map_err(err)?;
+        let keyset = vault_keyset::VaultKeyset::derive(&ak, &qsk, network, diversifier_index).map_err(err)?;
         let out = js_sys::Array::new();
         out.push(&to_js_bytes(&keyset.fvk));
         out.push(&JsValue::from(keyset.ufvk));
@@ -1055,10 +912,7 @@ impl Keyset {
         let mut bytes = [0u8; 32];
         rand_core::RngCore::fill_bytes(&mut rng(), &mut bytes);
         // A spending key must be a canonical scalar; retry rather than shipping a rejected one.
-        while orchard::keys::SpendingKey::from_bytes(bytes)
-            .into_option()
-            .is_none()
-        {
+        while orchard::keys::SpendingKey::from_bytes(bytes).into_option().is_none() {
             rand_core::RngCore::fill_bytes(&mut rng(), &mut bytes);
         }
         to_js_bytes(&bytes)
@@ -1105,11 +959,7 @@ impl PcztTools {
     pub fn strip_proofs(bytes: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
         let pczt = pczt::Pczt::parse(bytes).map_err(err)?;
         let stripped = pczt_signer_core::material::strip_proofs(pczt);
-        Ok(to_js_bytes(
-            &stripped
-                .serialize()
-                .map_err(|e| JsError::new(&format!("{e:?}")))?,
-        ))
+        Ok(to_js_bytes(&stripped.serialize().map_err(|e| JsError::new(&format!("{e:?}")))?))
     }
 
     /// The shielded sighash, recomputed from the PCZT. Signers must use this value, never one handed
@@ -1148,11 +998,7 @@ impl PcztTools {
 
     /// Whether every action's `rk` equals `ak + alpha·G`. Run this on the signer before approving.
     #[wasm_bindgen]
-    pub fn check_action_bindings(
-        bytes: &[u8],
-        group_verifying_key: &[u8],
-        alphas: &[u8],
-    ) -> Result<(), JsError> {
+    pub fn check_action_bindings(bytes: &[u8], group_verifying_key: &[u8], alphas: &[u8]) -> Result<(), JsError> {
         let ak: [u8; 32] = group_verifying_key
             .try_into()
             .map_err(|_| JsError::new("group_verifying_key must be 32 bytes"))?;
@@ -1161,10 +1007,7 @@ impl PcztTools {
         }
         let pczt = pczt::Pczt::parse(bytes).map_err(err)?;
         let rks = pczt_signer_core::material::ironwood_action_rks(&pczt).map_err(err)?;
-        let alphas: Vec<[u8; 32]> = alphas
-            .chunks_exact(32)
-            .map(|c| c.try_into().expect("chunk size checked"))
-            .collect();
+        let alphas: Vec<[u8; 32]> = alphas.chunks_exact(32).map(|c| c.try_into().expect("chunk size checked")).collect();
         let material = pczt_signer_core::material::bind_alphas(&rks, &alphas).map_err(err)?;
         for m in &material {
             m.verify_rk(&ak).map_err(err)?;
@@ -1174,11 +1017,7 @@ impl PcztTools {
 
     /// Write signatures back. `signatures` is 64 bytes per action, positionally matching `indices`.
     #[wasm_bindgen]
-    pub fn apply_signatures(
-        bytes: &[u8],
-        indices: &[u8],
-        signatures: &[u8],
-    ) -> Result<js_sys::Uint8Array, JsError> {
+    pub fn apply_signatures(bytes: &[u8], indices: &[u8], signatures: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
         if signatures.len() != indices.len() * 64 {
             return Err(JsError::new("expected 64 bytes of signature per index"));
         }
@@ -1187,18 +1026,12 @@ impl PcztTools {
             .iter()
             .enumerate()
             .map(|(i, index)| {
-                let sig: [u8; 64] = signatures[i * 64..(i + 1) * 64]
-                    .try_into()
-                    .expect("slice size checked");
+                let sig: [u8; 64] = signatures[i * 64..(i + 1) * 64].try_into().expect("slice size checked");
                 (*index as u32, sig)
             })
             .collect();
         let signed = pczt_signer_core::apply::apply_all(pczt, &pairs).map_err(err)?;
-        Ok(to_js_bytes(
-            &signed
-                .serialize()
-                .map_err(|e| JsError::new(&format!("{e:?}")))?,
-        ))
+        Ok(to_js_bytes(&signed.serialize().map_err(|e| JsError::new(&format!("{e:?}")))?))
     }
 }
 
@@ -1214,30 +1047,19 @@ impl Verification {
         let ak: [u8; 32] = group_verifying_key
             .try_into()
             .map_err(|_| JsError::new("group_verifying_key must be 32 bytes"))?;
-        let alpha: [u8; 32] = alpha
-            .try_into()
-            .map_err(|_| JsError::new("alpha must be 32 bytes"))?;
+        let alpha: [u8; 32] = alpha.try_into().map_err(|_| JsError::new("alpha must be 32 bytes"))?;
         let rk = threshold::randomized_verifying_key(&ak, &alpha).map_err(err)?;
         Ok(to_js_bytes(&rk))
     }
 
     /// Check an aggregated spend authorization signature. Run this before broadcasting.
     #[wasm_bindgen]
-    pub fn verify_spend_auth(
-        group_verifying_key: &[u8],
-        alpha: &[u8],
-        message: &[u8],
-        signature: &[u8],
-    ) -> Result<(), JsError> {
+    pub fn verify_spend_auth(group_verifying_key: &[u8], alpha: &[u8], message: &[u8], signature: &[u8]) -> Result<(), JsError> {
         let ak: [u8; 32] = group_verifying_key
             .try_into()
             .map_err(|_| JsError::new("group_verifying_key must be 32 bytes"))?;
-        let alpha: [u8; 32] = alpha
-            .try_into()
-            .map_err(|_| JsError::new("alpha must be 32 bytes"))?;
-        let signature: [u8; 64] = signature
-            .try_into()
-            .map_err(|_| JsError::new("signature must be 64 bytes"))?;
+        let alpha: [u8; 32] = alpha.try_into().map_err(|_| JsError::new("alpha must be 32 bytes"))?;
+        let signature: [u8; 64] = signature.try_into().map_err(|_| JsError::new("signature must be 64 bytes"))?;
         threshold::verify_with_group_key_and_alpha(&ak, &alpha, message, &signature).map_err(err)
     }
 }
@@ -1352,22 +1174,10 @@ impl Fixtures {
     /// `fvk` is the 96-byte viewing key from [`Keyset::derive`]; `spend` and `pay` are zatoshi.
     #[wasm_bindgen]
     pub fn ironwood_pczt(fvk: &[u8], spend: f64, pay: f64) -> Result<js_sys::Uint8Array, JsError> {
-        let fvk: [u8; 96] = fvk
-            .try_into()
-            .map_err(|_| JsError::new("fvk must be 96 bytes"))?;
-        let pczt = vault_fixtures::ironwood_pczt(
-            &fvk,
-            orchard::ValuePool::Ironwood,
-            spend as u64,
-            pay as u64,
-            rand::rng(),
-        )
-        .ok_or_else(|| JsError::new("could not build the fixture transaction"))?;
-        Ok(to_js_bytes(
-            &pczt
-                .serialize()
-                .map_err(|e| JsError::new(&format!("{e:?}")))?,
-        ))
+        let fvk: [u8; 96] = fvk.try_into().map_err(|_| JsError::new("fvk must be 96 bytes"))?;
+        let pczt = vault_fixtures::ironwood_pczt(&fvk, orchard::ValuePool::Ironwood, spend as u64, pay as u64, rand::rng())
+            .ok_or_else(|| JsError::new("could not build the fixture transaction"))?;
+        Ok(to_js_bytes(&pczt.serialize().map_err(|e| JsError::new(&format!("{e:?}")))?))
     }
 }
 

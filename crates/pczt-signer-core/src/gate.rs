@@ -81,10 +81,7 @@ impl core::fmt::Display for Refusal {
                  orchard pool forbids cross-address transfers"
             ),
             Self::Sapling { spends, outputs } => {
-                write!(
-                    f,
-                    "sapling part refused ({spends} spends, {outputs} outputs)"
-                )
+                write!(f, "sapling part refused ({spends} spends, {outputs} outputs)")
             }
             Self::TransparentInputs(n) => write!(
                 f,
@@ -197,13 +194,7 @@ mod tests {
     fn refuses_sapling() {
         let mut shape = ironwood_only();
         shape.sapling_outputs = 2;
-        assert_eq!(
-            check(&shape),
-            Err(Refusal::Sapling {
-                spends: 0,
-                outputs: 2
-            })
-        );
+        assert_eq!(check(&shape), Err(Refusal::Sapling { spends: 0, outputs: 2 }));
     }
 
     #[test]

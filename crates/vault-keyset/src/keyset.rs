@@ -18,9 +18,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use zcash_address::unified::{
-    Address as UnifiedAddress, Encoding, Fvk, Receiver, Revision, Ufvk, Uitem,
-};
+use zcash_address::unified::{Address as UnifiedAddress, Encoding, Fvk, Receiver, Revision, Ufvk, Uitem};
 use zcash_protocol::consensus::{Network, Parameters};
 
 /// Domain tag for the keyset fingerprint, so it can never be confused with another hash in the
@@ -42,9 +40,7 @@ impl core::fmt::Display for KeysetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidRecoveryKey => f.write_str("qsk is not a valid spending key"),
-            Self::InvalidFullViewingKey => {
-                f.write_str("ak ‖ nk ‖ rivk did not validate as a full viewing key")
-            }
+            Self::InvalidFullViewingKey => f.write_str("ak ‖ nk ‖ rivk did not validate as a full viewing key"),
             Self::Encoding => f.write_str("unified encoding failed"),
         }
     }
@@ -77,10 +73,7 @@ impl QuantumRecoveryMaterial {
         group_verifying_key.copy_from_slice(&bytes[..32]);
         let mut qsk = [0u8; 32];
         qsk.copy_from_slice(&bytes[32..]);
-        Self {
-            group_verifying_key,
-            qsk,
-        }
+        Self { group_verifying_key, qsk }
     }
 }
 
@@ -123,12 +116,7 @@ pub struct VaultKeyset {
 
 impl VaultKeyset {
     /// Derive the keyset from `ak` and `qsk`. Deterministic in every input.
-    pub fn derive(
-        group_verifying_key: &[u8; 32],
-        qsk: &[u8; 32],
-        network: Network,
-        diversifier_index: u32,
-    ) -> Result<Self, KeysetError> {
+    pub fn derive(group_verifying_key: &[u8; 32], qsk: &[u8; 32], network: Network, diversifier_index: u32) -> Result<Self, KeysetError> {
         let fvk = splice_fvk(group_verifying_key, qsk)?;
         let orchard_address = fvk.address_at(diversifier_index, Scope::External);
         let raw_address = orchard_address.to_raw_address_bytes();
@@ -137,14 +125,9 @@ impl VaultKeyset {
         // cannot spend one, and a transparent receiver would let someone send funds that are
         // unrecoverable forever. Revision 0 is the shielded-only form and needs no feature flags to
         // express.
-        let ua = UnifiedAddress::try_from_items(
-            Revision::R0,
-            vec![Uitem::Data(Receiver::Orchard(raw_address))],
-        )
-        .map_err(|_| KeysetError::Encoding)?;
+        let ua = UnifiedAddress::try_from_items(Revision::R0, vec![Uitem::Data(Receiver::Orchard(raw_address))]).map_err(|_| KeysetError::Encoding)?;
         let fvk_bytes = fvk.to_bytes();
-        let ufvk = Ufvk::try_from_items(Revision::R0, vec![Uitem::Data(Fvk::Orchard(fvk_bytes))])
-            .map_err(|_| KeysetError::InvalidFullViewingKey)?;
+        let ufvk = Ufvk::try_from_items(Revision::R0, vec![Uitem::Data(Fvk::Orchard(fvk_bytes))]).map_err(|_| KeysetError::InvalidFullViewingKey)?;
 
         Ok(Self {
             group_verifying_key: *group_verifying_key,
@@ -158,19 +141,10 @@ impl VaultKeyset {
     }
 
     /// The address at another diversifier index. The UFVK and fingerprint do not change.
-    pub fn address_at(
-        &self,
-        qsk: &[u8; 32],
-        network: Network,
-        diversifier_index: u32,
-    ) -> Result<String, KeysetError> {
+    pub fn address_at(&self, qsk: &[u8; 32], network: Network, diversifier_index: u32) -> Result<String, KeysetError> {
         let fvk = splice_fvk(&self.group_verifying_key, qsk)?;
-        let raw = fvk
-            .address_at(diversifier_index, Scope::External)
-            .to_raw_address_bytes();
-        let ua =
-            UnifiedAddress::try_from_items(Revision::R0, vec![Uitem::Data(Receiver::Orchard(raw))])
-                .map_err(|_| KeysetError::Encoding)?;
+        let raw = fvk.address_at(diversifier_index, Scope::External).to_raw_address_bytes();
+        let ua = UnifiedAddress::try_from_items(Revision::R0, vec![Uitem::Data(Receiver::Orchard(raw))]).map_err(|_| KeysetError::Encoding)?;
         Ok(ua.encode(&network.network_type()))
     }
 
@@ -196,13 +170,8 @@ impl VaultKeyset {
 }
 
 /// Splice `ak` over the `ak` field of the FVK that `qsk` implies.
-fn splice_fvk(
-    group_verifying_key: &[u8; 32],
-    qsk: &[u8; 32],
-) -> Result<FullViewingKey, KeysetError> {
-    let sk = SpendingKey::from_bytes(*qsk)
-        .into_option()
-        .ok_or(KeysetError::InvalidRecoveryKey)?;
+fn splice_fvk(group_verifying_key: &[u8; 32], qsk: &[u8; 32]) -> Result<FullViewingKey, KeysetError> {
+    let sk = SpendingKey::from_bytes(*qsk).into_option().ok_or(KeysetError::InvalidRecoveryKey)?;
     let mut bytes = FullViewingKey::from(&sk).to_bytes();
     bytes[..32].copy_from_slice(group_verifying_key);
     // `from_bytes` is not a cast: it validates the point, rejects the identity, and re-derives `ivk`
@@ -214,11 +183,7 @@ fn splice_fvk(
 fn fingerprint_of(network: Network, fvk: &[u8; 96]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(FINGERPRINT_DOMAIN);
-    let tag = if network == Network::MainNetwork {
-        0u8
-    } else {
-        1u8
-    };
+    let tag = if network == Network::MainNetwork { 0u8 } else { 1u8 };
     h.update([tag]);
     h.update(fvk);
     h.finalize().into()

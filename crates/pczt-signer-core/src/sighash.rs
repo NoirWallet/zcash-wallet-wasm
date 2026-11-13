@@ -17,10 +17,7 @@ pub enum SighashError {
     /// The PCZT could not be interpreted well enough to compute a sighash.
     Uncomputable,
     /// The recomputed digest differs from the one the coordinator supplied.
-    Mismatch {
-        claimed: [u8; 32],
-        recomputed: [u8; 32],
-    },
+    Mismatch { claimed: [u8; 32], recomputed: [u8; 32] },
 }
 
 impl core::fmt::Display for SighashError {
@@ -47,10 +44,7 @@ pub fn shielded_sighash(pczt: Pczt) -> Result<[u8; 32], SighashError> {
 pub fn verify_shielded_sighash(pczt: Pczt, claimed: &[u8; 32]) -> Result<[u8; 32], SighashError> {
     let recomputed = shielded_sighash(pczt)?;
     if &recomputed != claimed {
-        return Err(SighashError::Mismatch {
-            claimed: *claimed,
-            recomputed,
-        });
+        return Err(SighashError::Mismatch { claimed: *claimed, recomputed });
     }
     Ok(recomputed)
 }

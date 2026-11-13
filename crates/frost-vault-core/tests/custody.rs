@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use frost_vault_core::custody::{
-    new_session_id, CustodyError, GuardError, Recovery, SessionGuard, SessionProgress,
-    SessionStore, ShareBackup, ShareIdentity, MARKER_KEY,
+    new_session_id, CustodyError, GuardError, Recovery, SessionGuard, SessionProgress, SessionStore, ShareBackup, ShareIdentity, MARKER_KEY,
 };
 use frost_vault_core::threshold::{run_dkg, Identifier};
 use rand::rngs::OsRng;
@@ -28,11 +27,7 @@ fn identity(slot: u8, device: &[u8], vault: &[u8]) -> ShareIdentity {
 }
 
 fn roster(dkg: &frost_vault_core::threshold::DkgOutput) -> BTreeMap<u8, Identifier> {
-    dkg.identifiers
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (i as u8, *id))
-        .collect()
+    dkg.identifiers.iter().enumerate().map(|(i, id)| (i as u8, *id)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -60,10 +55,7 @@ fn a_share_round_trips_and_still_signs() {
     );
 
     // And it is the same key material, byte for byte.
-    assert_eq!(
-        restored.key_package().unwrap().signing_share(),
-        kp.signing_share()
-    );
+    assert_eq!(restored.key_package().unwrap().signing_share(), kp.signing_share());
 }
 
 #[test]
@@ -71,8 +63,7 @@ fn a_share_for_another_group_is_refused() {
     let a = dkg(2, 2);
     let b = dkg(2, 2);
     let by_slot = roster(&a);
-    let backup =
-        ShareBackup::new(&a.key_packages[&by_slot[&0]], identity(0, b"d", b"v")).expect("wrap");
+    let backup = ShareBackup::new(&a.key_packages[&by_slot[&0]], identity(0, b"d", b"v")).expect("wrap");
     let bytes = backup.to_bytes().unwrap();
 
     // Restoring vault A's share into vault B must fail on the group binding.
@@ -94,13 +85,7 @@ fn a_share_restored_into_the_wrong_slot_is_refused() {
         .unwrap();
 
     let err = ShareBackup::from_bytes(&share_b, &ak, 2).unwrap_err();
-    assert_eq!(
-        err,
-        CustodyError::WrongSlot {
-            expected: 2,
-            found: 1
-        }
-    );
+    assert_eq!(err, CustodyError::WrongSlot { expected: 2, found: 1 });
 }
 
 #[test]
@@ -116,10 +101,7 @@ fn an_edited_record_is_detected() {
     // Flip a byte in the identity section: the trailing check must catch it.
     let mid = bytes.len() / 2;
     bytes[mid] ^= 0xff;
-    assert_eq!(
-        ShareBackup::from_bytes(&bytes, &ak, 0).unwrap_err(),
-        CustodyError::Corrupt
-    );
+    assert_eq!(ShareBackup::from_bytes(&bytes, &ak, 0).unwrap_err(), CustodyError::Corrupt);
 
     // Truncation is refused too, and not as a panic.
     let full = ShareBackup::new(&dkg.key_packages[&by_slot[&0]], identity(0, b"d", b"v"))
@@ -148,11 +130,7 @@ fn an_over_long_identity_is_refused() {
     let dkg = dkg(2, 2);
     let by_slot = roster(&dkg);
     let too_long = vec![0u8; 200];
-    let err = ShareBackup::new(
-        &dkg.key_packages[&by_slot[&0]],
-        identity(0, &too_long, b"v"),
-    )
-    .unwrap_err();
+    let err = ShareBackup::new(&dkg.key_packages[&by_slot[&0]], identity(0, &too_long, b"v")).unwrap_err();
     assert_eq!(err, CustodyError::Malformed);
 }
 
@@ -268,10 +246,7 @@ fn abandoning_clears_the_marker_so_a_new_session_can_start() {
     first.mark_committed(&mut store).unwrap();
     drop(first);
     // Caller inspects, decides the session is unrecoverable, and clears it.
-    assert!(matches!(
-        SessionGuard::recover(&mut store).unwrap(),
-        Recovery::Burned { .. }
-    ));
+    assert!(matches!(SessionGuard::recover(&mut store).unwrap(), Recovery::Burned { .. }));
     SessionGuard::abandon(&mut store).unwrap();
     // A brand new session id, not the burned one.
     let _second = SessionGuard::begin(&mut store, sid(8)).unwrap();
@@ -281,10 +256,7 @@ fn abandoning_clears_the_marker_so_a_new_session_can_start() {
 fn a_corrupt_marker_is_refused_rather_than_guessed() {
     let mut store = MemoryStore::default();
     store.put(MARKER_KEY, &[9u8; 3]).unwrap();
-    assert!(matches!(
-        SessionGuard::recover(&mut store),
-        Err(GuardError::Malformed)
-    ));
+    assert!(matches!(SessionGuard::recover(&mut store), Err(GuardError::Malformed)));
 }
 
 #[test]

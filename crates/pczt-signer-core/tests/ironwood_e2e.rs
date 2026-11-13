@@ -22,8 +22,7 @@ use std::collections::BTreeMap;
 
 use ff::PrimeField;
 use frost_vault_core::threshold::{
-    aggregate_with_alpha, commit, randomized_verifying_key, run_dkg, sign_with_alpha,
-    verify_with_group_key_and_alpha, SigningCommitments,
+    aggregate_with_alpha, commit, randomized_verifying_key, run_dkg, sign_with_alpha, verify_with_group_key_and_alpha, SigningCommitments,
 };
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use orchard::note::{NoteVersion, RandomSeed, Rho};
@@ -53,15 +52,10 @@ const PAYMENT_VALUE: u64 = 990_000;
 /// Returns the PCZT together with the FVK's address, so the caller can see where the funds go.
 fn fixture_pczt(ak: &[u8; 32]) -> Pczt {
     let network = Network::TestNetwork;
-    let target_height = network
-        .activation_height(NetworkUpgrade::Nu6_3)
-        .expect("NU6.3 activation")
-        + 1;
+    let target_height = network.activation_height(NetworkUpgrade::Nu6_3).expect("NU6.3 activation") + 1;
 
     // nk / rivk come from an unrelated spending key; only `ak` controls spending.
-    let sk = SpendingKey::from_bytes([7u8; 32])
-        .into_option()
-        .expect("valid sk");
+    let sk = SpendingKey::from_bytes([7u8; 32]).into_option().expect("valid sk");
     let mut fvk_bytes = FullViewingKey::from(&sk).to_bytes();
     fvk_bytes[..32].copy_from_slice(ak);
     let fvk = FullViewingKey::from_bytes(&fvk_bytes).expect("spliced FVK is structurally valid");
@@ -112,9 +106,7 @@ fn fixture_pczt(ak: &[u8; 32]) -> Pczt {
         )
         .expect("add ironwood output");
 
-    let result = builder
-        .build_for_pczt(UnwrapErr(SysRng), &zip317::FeeRule::standard())
-        .expect("build for pczt");
+    let result = builder.build_for_pczt(UnwrapErr(SysRng), &zip317::FeeRule::standard()).expect("build for pczt");
 
     IoFinalizer::new(pczt::roles::creator::Creator::build_from_parts(result.pczt_parts).unwrap())
         .finalize_io(UnwrapErr(SysRng))
@@ -130,10 +122,7 @@ fn coordinator_alphas(pczt: &Pczt) -> Vec<[u8; 32]> {
     verifier
         .with_ironwood::<String, _>(|bundle| {
             for action in bundle.actions() {
-                let alpha = action
-                    .spend()
-                    .alpha()
-                    .expect("builder always sets alpha on a real spend");
+                let alpha = action.spend().alpha().expect("builder always sets alpha on a real spend");
                 alphas.push(alpha.to_repr());
             }
             Ok(())
@@ -166,12 +155,7 @@ fn a_frost_group_key_drives_a_real_ironwood_pczt() {
     //    this alpha. If this holds, the group key authored the transaction.
     for m in &material {
         m.verify_rk(&ak).expect("rk is ak + alpha*G");
-        assert_eq!(
-            m.rk,
-            randomized_verifying_key(&ak, &m.alpha).unwrap(),
-            "action {} rk disagrees",
-            m.action_index
-        );
+        assert_eq!(m.rk, randomized_verifying_key(&ak, &m.alpha).unwrap(), "action {} rk disagrees", m.action_index);
     }
 
     // 4. Recompute the sighash from the PCZT rather than trusting any digest.
@@ -193,25 +177,16 @@ fn a_frost_group_key_drives_a_real_ironwood_pczt() {
     for c in &round1 {
         shares.insert(
             c.identifier,
-            sign_with_alpha(
-                &c.nonces,
-                &dkg.key_packages[&c.identifier],
-                &commitments,
-                &sighash,
-                &m.alpha,
-            )
-            .expect("share"),
+            sign_with_alpha(&c.nonces, &dkg.key_packages[&c.identifier], &commitments, &sighash, &m.alpha).expect("share"),
         );
     }
 
-    let sig = aggregate_with_alpha(&dkg.pubkeys, &commitments, &sighash, &m.alpha, &shares)
-        .expect("aggregate");
+    let sig = aggregate_with_alpha(&dkg.pubkeys, &commitments, &sighash, &m.alpha, &shares).expect("aggregate");
     assert_eq!(sig.len(), 64);
 
     // 6. The signature verifies against the PCZT's own rk over the PCZT's own sighash — exactly the
     //    check the Zcash consensus rule performs.
-    verify_with_group_key_and_alpha(&ak, &m.alpha, &sighash, &sig)
-        .expect("threshold signature verifies against the PCZT rk");
+    verify_with_group_key_and_alpha(&ak, &m.alpha, &sighash, &sig).expect("threshold signature verifies against the PCZT rk");
 
     // And a signature over a different message must not verify, so the check above is not vacuous.
     let mut other = sighash;
@@ -220,14 +195,8 @@ fn a_frost_group_key_drives_a_real_ironwood_pczt() {
 
     // 7. Land it. The Signer role re-verifies against the action's rk, so this also proves the
     //    aggregate is the signature that transaction expects.
-    let signed = apply_ironwood_signature(pczt.clone(), m.action_index, &sig)
-        .expect("signer role accepts the aggregate");
-    assert_eq!(
-        signed.ironwood().actions()[m.action_index as usize]
-            .spend()
-            .spend_auth_sig(),
-        &Some(sig)
-    );
+    let signed = apply_ironwood_signature(pczt.clone(), m.action_index, &sig).expect("signer role accepts the aggregate");
+    assert_eq!(signed.ironwood().actions()[m.action_index as usize].spend().spend_auth_sig(), &Some(sig));
 
     // A signature produced for a different randomizer must not be accepted for this action.
     assert!(apply_ironwood_signature(pczt, m.action_index, &[0x5Au8; 64]).is_err());
@@ -242,11 +211,7 @@ fn aggregate_signature_is_indistinguishable_from_a_single_signer_one() {
     let dkg = run_dkg(2, 2, &mut rng).expect("dkg");
     let ak = dkg.group_verifying_key().unwrap();
     let pczt = fixture_pczt(&ak);
-    let material = bind_alphas(
-        &ironwood_action_rks(&pczt).unwrap(),
-        &coordinator_alphas(&pczt),
-    )
-    .expect("bind");
+    let material = bind_alphas(&ironwood_action_rks(&pczt).unwrap(), &coordinator_alphas(&pczt)).expect("bind");
     let sighash = shielded_sighash(pczt.clone()).expect("sighash");
     let m = material[0];
 
@@ -261,28 +226,14 @@ fn aggregate_signature_is_indistinguishable_from_a_single_signer_one() {
     for c in &round1 {
         shares.insert(
             c.identifier,
-            sign_with_alpha(
-                &c.nonces,
-                &dkg.key_packages[&c.identifier],
-                &commitments,
-                &sighash,
-                &m.alpha,
-            )
-            .unwrap(),
+            sign_with_alpha(&c.nonces, &dkg.key_packages[&c.identifier], &commitments, &sighash, &m.alpha).unwrap(),
         );
     }
-    let sig =
-        aggregate_with_alpha(&dkg.pubkeys, &commitments, &sighash, &m.alpha, &shares).unwrap();
+    let sig = aggregate_with_alpha(&dkg.pubkeys, &commitments, &sighash, &m.alpha, &shares).unwrap();
 
     // Aggregate produced by a *different* 2-of-2 group must not verify under this rk.
     let other = run_dkg(2, 2, &mut rng).unwrap();
-    assert!(verify_with_group_key_and_alpha(
-        &other.group_verifying_key().unwrap(),
-        &m.alpha,
-        &sighash,
-        &sig
-    )
-    .is_err());
+    assert!(verify_with_group_key_and_alpha(&other.group_verifying_key().unwrap(), &m.alpha, &sighash, &sig).is_err());
 }
 
 /// P10 decision ③: the request should not carry zk proofs.
@@ -316,14 +267,8 @@ fn proof_size_dominates_a_request_pczt() {
 
     // Stripping is idempotent and safe when the coordinator already did it: the gate does not treat
     // proof presence as a policy input.
-    let stripped = Redactor::new(pczt.clone())
-        .redact_ironwood_with(|mut bundle| bundle.clear_zkproof())
-        .finish();
-    assert_eq!(
-        stripped.clone().serialize().unwrap().len(),
-        bare,
-        "clearing an absent proof must be a no-op"
-    );
+    let stripped = Redactor::new(pczt.clone()).redact_ironwood_with(|mut bundle| bundle.clear_zkproof()).finish();
+    assert_eq!(stripped.clone().serialize().unwrap().len(), bare, "clearing an absent proof must be a no-op");
     check(&PcztShape::of(&stripped)).expect("stripped pczt still admitted");
 }
 

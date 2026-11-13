@@ -8,9 +8,8 @@
 use std::collections::BTreeMap;
 
 use frost_vault_core::threshold::{
-    self, aggregate_with_alpha, aggregate_with_randomizer_seed, commit, randomized_verifying_key,
-    run_dkg, sign_with_alpha, sign_with_randomizer_seed, verify_with_group_key_and_alpha,
-    DkgOutput, PublicKeyPackage, SigningCommitments, SUPPORTED_MODES,
+    self, aggregate_with_alpha, aggregate_with_randomizer_seed, commit, randomized_verifying_key, run_dkg, sign_with_alpha, sign_with_randomizer_seed,
+    verify_with_group_key_and_alpha, DkgOutput, PublicKeyPackage, SigningCommitments, SUPPORTED_MODES,
 };
 use rand::rngs::OsRng;
 
@@ -29,11 +28,7 @@ fn message(tag: u8) -> [u8; 32] {
 }
 
 /// Run the full ceremony for a given mode and return (dkg, signature, rk).
-fn sign_once(
-    participants: u16,
-    threshold: u16,
-    signer_slots: &[usize],
-) -> (DkgOutput, [u8; 64], [u8; 32]) {
+fn sign_once(participants: u16, threshold: u16, signer_slots: &[usize]) -> (DkgOutput, [u8; 64], [u8; 32]) {
     let mut rng = OsRng;
     let dkg = run_dkg(participants, threshold, &mut rng).expect("dkg");
     let ak = dkg.group_verifying_key().expect("ak");
@@ -110,13 +105,7 @@ fn below_threshold_shares_do_not_aggregate() {
     // A signer refuses to even produce a share when the commitment set is below threshold, so a
     // 2-of-3 group cannot be talked into signing with one commitment. Failure happens before
     // aggregation, which is the stronger guarantee.
-    let share = sign_with_alpha(
-        &c.nonces,
-        &dkg.key_packages[&id0],
-        &commitments,
-        &msg,
-        &alpha,
-    );
+    let share = sign_with_alpha(&c.nonces, &dkg.key_packages[&id0], &commitments, &msg, &alpha);
     assert!(share.is_err());
 
     let mut shares = BTreeMap::new();
@@ -141,14 +130,7 @@ fn duplicate_signer_share_is_refused() {
     let mut commitments = BTreeMap::new();
     commitments.insert(id0, c.commitments);
 
-    assert!(sign_with_alpha(
-        &c.nonces,
-        &dkg.key_packages[&id0],
-        &commitments,
-        &msg,
-        &alpha
-    )
-    .is_err());
+    assert!(sign_with_alpha(&c.nonces, &dkg.key_packages[&id0], &commitments, &msg, &alpha).is_err());
 }
 
 #[test]
@@ -205,9 +187,7 @@ fn seed_derived_randomizer_path_also_works() {
         );
     }
 
-    let (sig, rk) =
-        aggregate_with_randomizer_seed(&dkg.pubkeys, &commitments, &msg, &seed, &shares)
-            .expect("agg");
+    let (sig, rk) = aggregate_with_randomizer_seed(&dkg.pubkeys, &commitments, &msg, &seed, &shares).expect("agg");
     assert_eq!(sig.len(), 64);
 
     // The reconstructed rk must match a fresh derivation from (ak, ...) — here we only know the
@@ -219,13 +199,7 @@ fn seed_derived_randomizer_path_also_works() {
         &commitments,
     )
     .expect("params");
-    let rk_from_params: [u8; 32] = params
-        .randomized_verifying_key()
-        .serialize()
-        .unwrap()
-        .as_slice()
-        .try_into()
-        .unwrap();
+    let rk_from_params: [u8; 32] = params.randomized_verifying_key().serialize().unwrap().as_slice().try_into().unwrap();
     assert_eq!(rk, rk_from_params);
     let _ = ak;
 }
@@ -289,9 +263,7 @@ fn per_round_dkg_once(participants: u16, threshold: u16) {
             .map(|(peer, bytes)| (*peer, bytes.clone()))
             .collect();
         let f = dkg_part3(&round2_secrets[&slot], &peers, &inbox[&slot]).expect("part3");
-        let package: PublicKeyPackage =
-            frost_vault_core::threshold::PublicKeyPackage::deserialize(&f.public_key_package)
-                .expect("public package parses");
+        let package: PublicKeyPackage = frost_vault_core::threshold::PublicKeyPackage::deserialize(&f.public_key_package).expect("public package parses");
         group_keys.push(package.verifying_key().serialize().unwrap());
     }
     // Every participant lands on the same group key, and it is a usable `ak`.
@@ -329,14 +301,7 @@ fn per_round_dkg_once(participants: u16, threshold: u16) {
     for c in &round1 {
         shares.insert(
             c.identifier,
-            sign_with_alpha(
-                &c.nonces,
-                &key_packages[&c.identifier],
-                &commitments,
-                &msg,
-                &alpha,
-            )
-            .expect("share"),
+            sign_with_alpha(&c.nonces, &key_packages[&c.identifier], &commitments, &msg, &alpha).expect("share"),
         );
     }
     let group: PublicKeyPackage = frost_vault_core::threshold::PublicKeyPackage::deserialize(
@@ -416,8 +381,7 @@ fn round_two_packages_are_sealed_and_the_relay_cannot_read_them() {
     let mut inbox1 = BTreeMap::new();
     inbox1.insert(0u8, from0.outgoing[&1].clone());
     inbox1.insert(2u8, from2.outgoing[&1].clone());
-    let final1 = frost_vault_core::threshold::dkg_part3(&from1.secret, &peers_for(1), &inbox1)
-        .expect("part3 opens the sealed packages");
+    let final1 = frost_vault_core::threshold::dkg_part3(&from1.secret, &peers_for(1), &inbox1).expect("part3 opens the sealed packages");
 
     // And a package addressed to slot 1 cannot be opened by slot 2: swapping the slot label makes
     // the sender's static key wrong, so the Noise authenticator fails.

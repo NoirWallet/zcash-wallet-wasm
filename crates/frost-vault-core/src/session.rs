@@ -24,10 +24,7 @@ use rand_core::{CryptoRng, RngCore};
 
 use crate::protocol::{Envelope, EnvelopeError, MsgType, COORDINATOR_SLOT};
 use crate::state::{NonceState, SignPhase, TransitionError};
-use crate::threshold::{
-    self, commit, Identifier, KeyPackage, PublicKeyPackage, SignatureShare, SigningCommitments,
-    SigningNonces,
-};
+use crate::threshold::{self, commit, Identifier, KeyPackage, PublicKeyPackage, SignatureShare, SigningCommitments, SigningNonces};
 
 /// Length of a session id on the wire.
 pub const SESSION_ID_LEN: usize = 16;
@@ -85,10 +82,7 @@ impl core::fmt::Display for SessionError {
             Self::WrongStage(p) => write!(f, "operation not allowed in phase {p:?}"),
             Self::UnknownSender(i) => write!(f, "slot {i} is not a selected signer"),
             Self::Duplicate(i) => write!(f, "slot {i} already sent for this step"),
-            Self::SequenceRewind { sender, last, got } => write!(
-                f,
-                "sender {sender} replayed or reordered messages ({got} after {last})"
-            ),
+            Self::SequenceRewind { sender, last, got } => write!(f, "sender {sender} replayed or reordered messages ({got} after {last})"),
             Self::Malformed => f.write_str("malformed payload"),
             Self::Envelope(e) => write!(f, "envelope: {e}"),
             Self::State(e) => write!(f, "state: {e}"),
@@ -171,9 +165,7 @@ impl<'a> Reader<'a> {
     }
 
     fn array32(&mut self) -> Result<[u8; 32], SessionError> {
-        self.take(32)?
-            .try_into()
-            .map_err(|_| SessionError::Malformed)
+        self.take(32)?.try_into().map_err(|_| SessionError::Malformed)
     }
 
     fn bytes(&mut self) -> Result<&'a [u8], SessionError> {
@@ -231,11 +223,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedPayload, SessionError> {
         per_action.push(grid);
     }
     r.finish()?;
-    Ok(DecodedPayload {
-        sighash,
-        alphas,
-        per_action,
-    })
+    Ok(DecodedPayload { sighash, alphas, per_action })
 }
 
 // ---------------------------------------------------------------------------
@@ -289,11 +277,7 @@ pub struct CoordinatorSession {
 }
 
 impl CoordinatorSession {
-    pub fn new(
-        cfg: SessionConfig,
-        pubkeys: PublicKeyPackage,
-        actions: usize,
-    ) -> Result<Self, SessionError> {
+    pub fn new(cfg: SessionConfig, pubkeys: PublicKeyPackage, actions: usize) -> Result<Self, SessionError> {
         cfg.validate()?;
         if !valid_actions(actions) {
             return Err(SessionError::Counts {
@@ -366,10 +350,7 @@ impl CoordinatorSession {
             return Err(SessionError::WrongRecipient(env.recipient));
         }
         if env.msg_type != expected {
-            return Err(SessionError::WrongPhase {
-                expected,
-                got: env.msg_type,
-            });
+            return Err(SessionError::WrongPhase { expected, got: env.msg_type });
         }
         if !self.cfg.signers.contains(&env.sender) {
             return Err(SessionError::UnknownSender(env.sender));
@@ -421,11 +402,7 @@ impl CoordinatorSession {
     ///
     /// Neither value can be invented here: the sighash comes from the transaction, and each `alpha`
     /// is the per-action randomizer already baked into it.
-    pub fn prepare_payload(
-        &mut self,
-        sighash: [u8; 32],
-        alphas: Vec<[u8; 32]>,
-    ) -> Result<(), SessionError> {
+    pub fn prepare_payload(&mut self, sighash: [u8; 32], alphas: Vec<[u8; 32]>) -> Result<(), SessionError> {
         if self.phase != SignPhase::CommitmentsCollected {
             return Err(SessionError::WrongStage(self.phase));
         }
@@ -460,10 +437,7 @@ impl CoordinatorSession {
             payload.push(u8::try_from(self.grid.len()).map_err(|_| SessionError::Malformed)?);
             for (slot, per_action) in &self.grid {
                 payload.push(*slot);
-                put_bytes(
-                    &mut payload,
-                    &per_action[action].serialize().map_err(frost)?,
-                )?;
+                put_bytes(&mut payload, &per_action[action].serialize().map_err(frost)?)?;
             }
         }
 
@@ -529,29 +503,15 @@ impl CoordinatorSession {
         for (action, alpha) in self.alphas.iter().enumerate() {
             let mut commitments = BTreeMap::new();
             for (slot, per_action) in &self.grid {
-                let id = *self
-                    .cfg
-                    .identifiers
-                    .get(slot)
-                    .ok_or(SessionError::UnknownSender(*slot))?;
+                let id = *self.cfg.identifiers.get(slot).ok_or(SessionError::UnknownSender(*slot))?;
                 commitments.insert(id, per_action[action].clone());
             }
             let mut shares = BTreeMap::new();
             for (slot, per_action) in &self.shares {
-                let id = *self
-                    .cfg
-                    .identifiers
-                    .get(slot)
-                    .ok_or(SessionError::UnknownSender(*slot))?;
+                let id = *self.cfg.identifiers.get(slot).ok_or(SessionError::UnknownSender(*slot))?;
                 shares.insert(id, per_action[action]);
             }
-            out.push(threshold::aggregate_with_alpha(
-                &self.pubkeys,
-                &commitments,
-                &sighash,
-                alpha,
-                &shares,
-            )?);
+            out.push(threshold::aggregate_with_alpha(&self.pubkeys, &commitments, &sighash, alpha, &shares)?);
         }
         // SharesCollected -> Aggregated. Broadcast is the wallet tier's step, not this module's.
         self.phase.advance()?;
@@ -589,11 +549,7 @@ pub struct SignerSession {
 impl SignerSession {
     /// `identifiers` is the locked roster's slot → FROST identifier map, which §3.2 requires every
     /// device to hold. Without it a signer cannot build the signing package the coordinator defined.
-    pub fn new(
-        session_id: [u8; SESSION_ID_LEN],
-        my_slot: u8,
-        identifiers: BTreeMap<u8, Identifier>,
-    ) -> Self {
+    pub fn new(session_id: [u8; SESSION_ID_LEN], my_slot: u8, identifiers: BTreeMap<u8, Identifier>) -> Self {
         Self {
             session_id,
             my_slot,
@@ -633,10 +589,7 @@ impl SignerSession {
             return Err(SessionError::UnknownSender(env.sender));
         }
         if env.msg_type != expected {
-            return Err(SessionError::WrongPhase {
-                expected,
-                got: env.msg_type,
-            });
+            return Err(SessionError::WrongPhase { expected, got: env.msg_type });
         }
         if let Some(last) = self.last_seq {
             if env.sequence <= last {
@@ -652,12 +605,7 @@ impl SignerSession {
     }
 
     /// `SIGN_INIT` in, `SIGN_COMMITMENTS` out. Generates one nonce set per action.
-    pub fn on_init<R>(
-        &mut self,
-        env: &Envelope,
-        key_package: &KeyPackage,
-        rng: &mut R,
-    ) -> Result<Envelope, SessionError>
+    pub fn on_init<R>(&mut self, env: &Envelope, key_package: &KeyPackage, rng: &mut R) -> Result<Envelope, SessionError>
     where
         R: CryptoRng + RngCore,
     {
@@ -778,12 +726,7 @@ impl SignerSession {
             // Slot -> FROST identifier, from the locked roster.
             let grid: BTreeMap<Identifier, SigningCommitments> = decoded.per_action[action]
                 .iter()
-                .map(|(slot, c)| {
-                    self.identifiers
-                        .get(slot)
-                        .map(|id| (*id, c.clone()))
-                        .ok_or(SessionError::UnknownSender(*slot))
-                })
+                .map(|(slot, c)| self.identifiers.get(slot).map(|id| (*id, c.clone())).ok_or(SessionError::UnknownSender(*slot)))
                 .collect::<Result<_, _>>()?;
 
             // Burn the nonce *before* signing. Once it is handed to `sign_with_alpha` it may have
@@ -791,13 +734,7 @@ impl SignerSession {
             // call would otherwise return early with the nonce still Committed.
             self.nonce_states[action] = self.nonce_states[action].consume()?;
 
-            let share = threshold::sign_with_alpha(
-                &self.nonces[action],
-                key_package,
-                &grid,
-                &decoded.sighash,
-                &decoded.alphas[action],
-            )?;
+            let share = threshold::sign_with_alpha(&self.nonces[action], key_package, &grid, &decoded.sighash, &decoded.alphas[action])?;
             put_bytes(&mut payload, &share.serialize())?;
         }
 

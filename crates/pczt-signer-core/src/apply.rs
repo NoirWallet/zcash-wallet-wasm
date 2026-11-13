@@ -32,20 +32,11 @@ impl core::fmt::Display for ApplyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::SignerUnavailable => f.write_str("cannot start the signer role on this PCZT"),
-            Self::Rejected { action_index } => write!(
-                f,
-                "action {action_index}: signature does not verify against rk, or the action is absent"
-            ),
+            Self::Rejected { action_index } => write!(f, "action {action_index}: signature does not verify against rk, or the action is absent"),
             Self::Duplicate { action_index } => {
                 write!(f, "action {action_index}: more than one signature supplied")
             }
-            Self::CountMismatch {
-                material,
-                signatures,
-            } => write!(
-                f,
-                "{signatures} signature(s) for {material} action(s): refusing to guess the pairing"
-            ),
+            Self::CountMismatch { material, signatures } => write!(f, "{signatures} signature(s) for {material} action(s): refusing to guess the pairing"),
         }
     }
 }
@@ -53,11 +44,7 @@ impl core::fmt::Display for ApplyError {
 impl std::error::Error for ApplyError {}
 
 /// Apply one spend authorization signature to one Ironwood action.
-pub fn apply_ironwood_signature(
-    pczt: Pczt,
-    action_index: u32,
-    signature: &[u8; 64],
-) -> Result<Pczt, ApplyError> {
+pub fn apply_ironwood_signature(pczt: Pczt, action_index: u32, signature: &[u8; 64]) -> Result<Pczt, ApplyError> {
     apply_all(pczt, &[(action_index, *signature)])
 }
 
@@ -69,41 +56,28 @@ pub fn apply_all(pczt: Pczt, signatures: &[(u32, [u8; 64])]) -> Result<Pczt, App
     let mut seen = std::collections::BTreeSet::new();
     for (action_index, _) in signatures {
         if !seen.insert(*action_index) {
-            return Err(ApplyError::Duplicate {
-                action_index: *action_index,
-            });
+            return Err(ApplyError::Duplicate { action_index: *action_index });
         }
     }
 
     let mut signer = Signer::new(pczt).map_err(|_| ApplyError::SignerUnavailable)?;
     for (action_index, signature) in signatures {
-        let contribution =
-            SpendAuthSignature::from_parts(ValuePool::Ironwood, *action_index as usize, *signature);
+        let contribution = SpendAuthSignature::from_parts(ValuePool::Ironwood, *action_index as usize, *signature);
         signer
             .apply_orchard_spend_auth_signature(&contribution)
-            .map_err(|_| ApplyError::Rejected {
-                action_index: *action_index,
-            })?;
+            .map_err(|_| ApplyError::Rejected { action_index: *action_index })?;
     }
     Ok(signer.finish())
 }
 
 /// Apply every aggregated share, pairing it with the material it was produced for.
-pub fn apply_material(
-    pczt: Pczt,
-    material: &[SpendMaterial],
-    signatures: &[[u8; 64]],
-) -> Result<Pczt, ApplyError> {
+pub fn apply_material(pczt: Pczt, material: &[SpendMaterial], signatures: &[[u8; 64]]) -> Result<Pczt, ApplyError> {
     if material.len() != signatures.len() {
         return Err(ApplyError::CountMismatch {
             material: material.len(),
             signatures: signatures.len(),
         });
     }
-    let paired: Vec<(u32, [u8; 64])> = material
-        .iter()
-        .zip(signatures.iter())
-        .map(|(m, s)| (m.action_index, *s))
-        .collect();
+    let paired: Vec<(u32, [u8; 64])> = material.iter().zip(signatures.iter()).map(|(m, s)| (m.action_index, *s)).collect();
     apply_all(pczt, &paired)
 }

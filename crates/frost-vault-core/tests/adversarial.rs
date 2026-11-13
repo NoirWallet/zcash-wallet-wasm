@@ -55,8 +55,7 @@ fn envelope_refuses_a_huge_declared_payload_without_allocating() {
     assert!(
         matches!(
             err,
-            frost_vault_core::protocol::EnvelopeError::PayloadTooLarge(_)
-                | frost_vault_core::protocol::EnvelopeError::LengthMismatch { .. }
+            frost_vault_core::protocol::EnvelopeError::PayloadTooLarge(_) | frost_vault_core::protocol::EnvelopeError::LengthMismatch { .. }
         ),
         "{err:?}"
     );
@@ -70,12 +69,7 @@ fn the_signer_refuses_a_payload_claiming_a_thousand_actions() {
 
     let mut rng = OsRng;
     let dkg = run_dkg(2, 2, &mut rng).expect("dkg");
-    let identifiers: BTreeMap<u8, _> = dkg
-        .identifiers
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (i as u8, *id))
-        .collect();
+    let identifiers: BTreeMap<u8, _> = dkg.identifiers.iter().enumerate().map(|(i, id)| (i as u8, *id)).collect();
     let mut signer = SignerSession::new([1u8; 16], 0, identifiers);
 
     // Hand-build a SIGN_INIT claiming 1000 actions.
@@ -97,13 +91,8 @@ fn the_signer_refuses_a_payload_claiming_a_thousand_actions() {
     )
     .unwrap();
 
-    let err = signer
-        .on_init(&env, &dkg.key_packages[&dkg.identifiers[0]], &mut rng)
-        .unwrap_err();
-    assert!(
-        matches!(err, SessionError::Counts { .. }),
-        "expected a count refusal, got {err:?}"
-    );
+    let err = signer.on_init(&env, &dkg.key_packages[&dkg.identifiers[0]], &mut rng).unwrap_err();
+    assert!(matches!(err, SessionError::Counts { .. }), "expected a count refusal, got {err:?}");
 }
 
 #[test]
@@ -111,12 +100,7 @@ fn the_signer_refuses_a_commitment_grid_with_too_many_entries() {
     // A u8 could claim 255 commitments for a 2-of-3 group. Refuse before deserialising any of them.
     let mut rng = OsRng;
     let dkg = run_dkg(2, 2, &mut rng).expect("dkg");
-    let identifiers: BTreeMap<u8, _> = dkg
-        .identifiers
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (i as u8, *id))
-        .collect();
+    let identifiers: BTreeMap<u8, _> = dkg.identifiers.iter().enumerate().map(|(i, id)| (i as u8, *id)).collect();
     let mut signer = SignerSession::new([1u8; 16], 0, identifiers);
     let key_package = dkg.key_packages[&dkg.identifiers[0]].clone();
 
@@ -157,22 +141,14 @@ fn the_signer_refuses_a_commitment_grid_with_too_many_entries() {
     .unwrap();
 
     let err = signer.on_payload(&env).unwrap_err();
-    assert!(
-        matches!(err, SessionError::UnknownSender(_)),
-        "expected a slot refusal, got {err:?}"
-    );
+    assert!(matches!(err, SessionError::UnknownSender(_)), "expected a slot refusal, got {err:?}");
 }
 
 #[test]
 fn random_payloads_never_panic_the_signer_entry_points() {
     let mut rng = OsRng;
     let dkg = run_dkg(2, 2, &mut rng).expect("dkg");
-    let identifiers: BTreeMap<u8, _> = dkg
-        .identifiers
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (i as u8, *id))
-        .collect();
+    let identifiers: BTreeMap<u8, _> = dkg.identifiers.iter().enumerate().map(|(i, id)| (i as u8, *id)).collect();
     let key_package = dkg.key_packages[&dkg.identifiers[0]].clone();
 
     for seed in 0..500u64 {

@@ -28,23 +28,13 @@ fn fixture(ak: &[u8; 32], qsk: &[u8; 32]) -> (Pczt, VaultKeyset) {
     let keyset = VaultKeyset::derive(ak, qsk, network, 0).expect("keyset");
     let fvk = FullViewingKey::from_bytes(&keyset.fvk).expect("fvk");
     let recipient = fvk.address_at(0u32, Scope::External);
-    let target_height = network
-        .activation_height(NetworkUpgrade::Nu6_3)
-        .expect("nu6.3")
-        + 1;
+    let target_height = network.activation_height(NetworkUpgrade::Nu6_3).expect("nu6.3") + 1;
 
     let rho = Rho::from_bytes(&[1u8; 32]).unwrap();
     let rseed = (0u8..=255)
         .find_map(|byte| RandomSeed::from_bytes([byte; 32], &rho).into_option())
         .expect("rseed");
-    let note = Note::from_parts(
-        recipient,
-        orchard::value::NoteValue::from_raw(SPEND),
-        rho,
-        rseed,
-        NoteVersion::V3,
-    )
-    .unwrap();
+    let note = Note::from_parts(recipient, orchard::value::NoteValue::from_raw(SPEND), rho, rseed, NoteVersion::V3).unwrap();
 
     let zero = MerkleHashOrchard::from_bytes(&[0; 32]).unwrap();
     let merkle_path = MerklePath::from_parts(0, [zero; 32]);
@@ -64,26 +54,15 @@ fn fixture(ak: &[u8; 32], qsk: &[u8; 32]) -> (Pczt, VaultKeyset) {
             },
         },
     );
+    builder.add_ironwood_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path).expect("spend");
     builder
-        .add_ironwood_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path)
-        .expect("spend");
-    builder
-        .add_ironwood_output::<zip317::FeeRule>(
-            Some(fvk.to_ovk(Scope::External)),
-            recipient,
-            Zatoshis::const_from_u64(PAY),
-            MemoBytes::empty(),
-        )
+        .add_ironwood_output::<zip317::FeeRule>(Some(fvk.to_ovk(Scope::External)), recipient, Zatoshis::const_from_u64(PAY), MemoBytes::empty())
         .expect("output");
 
-    let parts = builder
-        .build_for_pczt(UnwrapErr(SysRng), &zip317::FeeRule::standard())
-        .expect("build");
-    let pczt = IoFinalizer::new(
-        pczt::roles::creator::Creator::build_from_parts(parts.pczt_parts).expect("creator"),
-    )
-    .finalize_io(UnwrapErr(SysRng))
-    .expect("io finalizer");
+    let parts = builder.build_for_pczt(UnwrapErr(SysRng), &zip317::FeeRule::standard()).expect("build");
+    let pczt = IoFinalizer::new(pczt::roles::creator::Creator::build_from_parts(parts.pczt_parts).expect("creator"))
+        .finalize_io(UnwrapErr(SysRng))
+        .expect("io finalizer");
     (pczt, keyset)
 }
 
@@ -148,10 +127,7 @@ fn the_transport_copy_still_verifies_as_the_same_transaction() {
 
     let transport = Pczt::parse(&prepared.transport).expect("transport parses");
     // Same digest, from bytes that crossed a wire.
-    assert_eq!(
-        shielded_sighash(transport.clone()).expect("sighash"),
-        prepared.sighash
-    );
+    assert_eq!(shielded_sighash(transport.clone()).expect("sighash"), prepared.sighash);
     // And the alphas the signer will be given match the action.
     let alphas = vault_pczt::extract_alphas(&transport).expect("alphas");
     assert_eq!(alphas, prepared.alphas);

@@ -24,29 +24,15 @@ use zcash_protocol::value::Zatoshis;
 /// Build one Ironwood spend of `spend_value` paying `pay_value` back to the same address.
 ///
 /// Unpadded, so the transaction holds exactly one action and the arithmetic in a test stays obvious.
-pub fn ironwood_pczt<R: rand::Rng + rand::CryptoRng>(
-    fvk_bytes: &[u8; 96],
-    pool: ValuePool,
-    spend_value: u64,
-    pay_value: u64,
-    rng: R,
-) -> Option<Pczt> {
+pub fn ironwood_pczt<R: rand::Rng + rand::CryptoRng>(fvk_bytes: &[u8; 96], pool: ValuePool, spend_value: u64, pay_value: u64, rng: R) -> Option<Pczt> {
     let network = Network::TestNetwork;
     let fvk = FullViewingKey::from_bytes(fvk_bytes)?;
     let recipient = fvk.address_at(0u32, Scope::External);
     let target_height = network.activation_height(NetworkUpgrade::Nu6_3)? + 1;
 
     let rho = Rho::from_bytes(&[1u8; 32]).into_option()?;
-    let rseed =
-        (0u8..=255).find_map(|byte| RandomSeed::from_bytes([byte; 32], &rho).into_option())?;
-    let note = Note::from_parts(
-        recipient,
-        orchard::value::NoteValue::from_raw(spend_value),
-        rho,
-        rseed,
-        NoteVersion::V3,
-    )
-    .into_option()?;
+    let rseed = (0u8..=255).find_map(|byte| RandomSeed::from_bytes([byte; 32], &rho).into_option())?;
+    let note = Note::from_parts(recipient, orchard::value::NoteValue::from_raw(spend_value), rho, rseed, NoteVersion::V3).into_option()?;
 
     let zero = MerkleHashOrchard::from_bytes(&[0; 32]).into_option()?;
     let merkle_path = MerklePath::from_parts(0, [zero; 32]);
@@ -68,14 +54,10 @@ pub fn ironwood_pczt<R: rand::Rng + rand::CryptoRng>(
     );
     match pool {
         ValuePool::Orchard => {
-            builder
-                .add_orchard_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path)
-                .ok()?;
+            builder.add_orchard_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path).ok()?;
         }
         ValuePool::Ironwood => {
-            builder
-                .add_ironwood_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path)
-                .ok()?;
+            builder.add_ironwood_spend::<zip317::FeeRule>(fvk.clone(), note, merkle_path).ok()?;
         }
     }
     builder
@@ -87,9 +69,7 @@ pub fn ironwood_pczt<R: rand::Rng + rand::CryptoRng>(
         )
         .ok()?;
 
-    let parts = builder
-        .build_for_pczt(rng, &zip317::FeeRule::standard())
-        .ok()?;
+    let parts = builder.build_for_pczt(rng, &zip317::FeeRule::standard()).ok()?;
     let creator = Creator::build_from_parts(parts.pczt_parts)?;
     IoFinalizer::new(creator).finalize_io(rand::rng()).ok()
 }

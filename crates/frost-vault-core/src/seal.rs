@@ -67,12 +67,7 @@ pub fn generate_keypair() -> Result<(Vec<u8>, Vec<u8>), SealError> {
 }
 
 /// Seal `plaintext` so that only the holder of `recipient_public` can read it.
-pub fn seal(
-    sender_private: &[u8],
-    recipient_public: &[u8],
-    prologue: &[u8],
-    plaintext: &[u8],
-) -> Result<Vec<u8>, SealError> {
+pub fn seal(sender_private: &[u8], recipient_public: &[u8], prologue: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
     if plaintext.len() > MAX_SEALED {
         return Err(SealError::TooLarge);
     }
@@ -84,20 +79,13 @@ pub fn seal(
         .map_err(|_| SealError::Setup)?;
 
     let mut buf = vec![0u8; MAX_SEALED + 128];
-    let len = handshake
-        .write_message(plaintext, &mut buf)
-        .map_err(|_| SealError::Setup)?;
+    let len = handshake.write_message(plaintext, &mut buf).map_err(|_| SealError::Setup)?;
     buf.truncate(len);
     Ok(buf)
 }
 
 /// Open a package sealed by `sender_public`. Fails if the pair, the ceremony or the bytes are wrong.
-pub fn open(
-    recipient_private: &[u8],
-    sender_public: &[u8],
-    prologue: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, SealError> {
+pub fn open(recipient_private: &[u8], sender_public: &[u8], prologue: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, SealError> {
     let mut handshake = snow::Builder::new(params()?)
         .local_private_key(recipient_private)
         .remote_public_key(sender_public)
@@ -106,9 +94,7 @@ pub fn open(
         .map_err(|_| SealError::Setup)?;
 
     let mut buf = vec![0u8; MAX_SEALED + 128];
-    let len = handshake
-        .read_message(ciphertext, &mut buf)
-        .map_err(|_| SealError::Open)?;
+    let len = handshake.read_message(ciphertext, &mut buf).map_err(|_| SealError::Open)?;
     buf.truncate(len);
     Ok(buf)
 }
@@ -166,10 +152,7 @@ mod tests {
         let prologue = prologue();
 
         let sealed = seal(&sender_sk, &recipient_pk, &prologue, b"share for recipient").unwrap();
-        assert_eq!(
-            open(&relay_sk, &sender_pk, &prologue, &sealed),
-            Err(SealError::Open)
-        );
+        assert_eq!(open(&relay_sk, &sender_pk, &prologue, &sealed), Err(SealError::Open));
     }
 
     #[test]
@@ -181,10 +164,7 @@ mod tests {
         // Same keys, different roster: the key schedule differs and nothing opens.
         let (_, other) = generate_keypair().unwrap();
         let other_prologue = ceremony_prologue(&[(0, other)]);
-        assert_eq!(
-            open(&recipient_sk, &sender_pk, &other_prologue, &sealed),
-            Err(SealError::Open)
-        );
+        assert_eq!(open(&recipient_sk, &sender_pk, &other_prologue, &sealed), Err(SealError::Open));
     }
 
     #[test]
@@ -196,19 +176,13 @@ mod tests {
         let last = sealed.len() - 1;
         sealed[last] ^= 0x01;
 
-        assert_eq!(
-            open(&recipient_sk, &sender_pk, &prologue, &sealed),
-            Err(SealError::Open)
-        );
+        assert_eq!(open(&recipient_sk, &sender_pk, &prologue, &sealed), Err(SealError::Open));
     }
 
     #[test]
     fn the_prologue_is_order_independent() {
         let (_, a) = generate_keypair().unwrap();
         let (_, b) = generate_keypair().unwrap();
-        assert_eq!(
-            ceremony_prologue(&[(1, b.clone()), (0, a.clone())]),
-            ceremony_prologue(&[(0, a), (1, b)])
-        );
+        assert_eq!(ceremony_prologue(&[(1, b.clone()), (0, a.clone())]), ceremony_prologue(&[(0, a), (1, b)]));
     }
 }

@@ -5,9 +5,7 @@
 //! module's test pins that the vault account is recorded with **no** derivation, and that none of
 //! the wallet's other guarantees (shielded-only address, viewing key binding) are lost in exchange.
 
-use zcash_client_backend::data_api::{
-    Account as _, AccountBirthday, AccountPurpose, AccountSource, WalletRead, WalletWrite,
-};
+use zcash_client_backend::data_api::{Account as _, AccountBirthday, AccountPurpose, AccountSource, WalletRead, WalletWrite};
 use zcash_client_memory::MemoryWalletDb;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -22,10 +20,7 @@ const NETWORK: zcash_protocol::consensus::Network = zcash_protocol::consensus::N
 
 fn birthday() -> AccountBirthday {
     AccountBirthday::from_parts(
-        zcash_client_backend::data_api::chain::ChainState::empty(
-            BlockHeight::from_u32(3_000_000),
-            zcash_primitives::block::BlockHash([0; 32]),
-        ),
+        zcash_client_backend::data_api::chain::ChainState::empty(BlockHeight::from_u32(3_000_000), zcash_primitives::block::BlockHash([0; 32])),
         None,
     )
 }
@@ -49,8 +44,7 @@ fn vault_keyset() -> vault_keyset::VaultKeyset {
 fn a_vault_account_is_imported_without_a_derivation() {
     let keyset = vault_keyset();
     let mut db = test_db();
-    let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &keyset.ufvk)
-        .expect("vault ufvk decodes");
+    let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &keyset.ufvk).expect("vault ufvk decodes");
 
     let id = db
         .import_account_ufvk(
@@ -72,10 +66,7 @@ fn a_vault_account_is_imported_without_a_derivation() {
             purpose: AccountPurpose::Spending { derivation },
             key_source,
         } => {
-            assert!(
-                derivation.is_none(),
-                "a vault account must have no derivation"
-            );
+            assert!(derivation.is_none(), "a vault account must have no derivation");
             assert_eq!(key_source.as_deref(), Some("frost-dkg"));
         }
         other => panic!("unexpected account source: {other:?}"),
@@ -95,13 +86,7 @@ fn a_vault_account_address_is_shielded_only() {
     let mut db = test_db();
     let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &keyset.ufvk).unwrap();
     let id = db
-        .import_account_ufvk(
-            "frost-vault",
-            &ufvk,
-            &birthday(),
-            AccountPurpose::Spending { derivation: None },
-            None,
-        )
+        .import_account_ufvk("frost-vault", &ufvk, &birthday(), AccountPurpose::Spending { derivation: None }, None)
         .unwrap()
         .id();
     let account = db.get_account(id).unwrap().unwrap();
@@ -121,13 +106,7 @@ fn a_view_only_import_is_still_possible_for_the_same_keyset() {
     let mut db = test_db();
     let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &keyset.ufvk).unwrap();
     let id = db
-        .import_account_ufvk(
-            "vault-watch",
-            &ufvk,
-            &birthday(),
-            AccountPurpose::ViewOnly,
-            None,
-        )
+        .import_account_ufvk("vault-watch", &ufvk, &birthday(), AccountPurpose::ViewOnly, None)
         .unwrap()
         .id();
     let account = db.get_account(id).unwrap().unwrap();
@@ -151,20 +130,9 @@ fn the_wasm_import_rejects_a_malformed_ufvk_before_touching_the_network() {
     )
     .expect("wallet");
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
     let error = runtime
-        .block_on(wallet.create_account_ufvk_external(
-            "bad",
-            "uview1not-a-key",
-            Some(3_000_000),
-            None,
-        ))
+        .block_on(wallet.create_account_ufvk_external("bad", "uview1not-a-key", Some(3_000_000), None))
         .expect_err("must be refused");
-    assert!(
-        matches!(error, crate::error::Error::KeyDecoding(_)),
-        "expected a decoding error, got {error:?}"
-    );
+    assert!(matches!(error, crate::error::Error::KeyDecoding(_)), "expected a decoding error, got {error:?}");
 }

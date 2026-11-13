@@ -49,13 +49,7 @@ fn the_address_carries_only_an_orchard_receiver() {
     // P8: a transparent receiver in the vault's UA would let someone send funds that FROST can
     // never spend. This is the check that keeps that from happening by accident.
     let dkg = dkg(2, 2);
-    let k = VaultKeyset::derive(
-        &dkg.group_verifying_key().unwrap(),
-        &qsk(3),
-        Network::TestNetwork,
-        0,
-    )
-    .unwrap();
+    let k = VaultKeyset::derive(&dkg.group_verifying_key().unwrap(), &qsk(3), Network::TestNetwork, 0).unwrap();
     assert!(k.has_only_orchard_receiver());
     assert!(k.address.starts_with("u1") || k.address.starts_with("utest1"));
     assert!(k.ufvk.starts_with("uview") || k.ufvk.starts_with("uviewtest"));
@@ -125,9 +119,7 @@ fn diversifier_index_changes_the_address_but_not_the_viewing_key() {
     let other = k.address_at(&qsk(11), Network::TestNetwork, 5).unwrap();
     assert_ne!(other, k.address);
     // Same viewing key: diversifying addresses must not require new keys.
-    let ufvk_again = VaultKeyset::derive(&ak, &qsk(11), Network::TestNetwork, 5)
-        .unwrap()
-        .ufvk;
+    let ufvk_again = VaultKeyset::derive(&ak, &qsk(11), Network::TestNetwork, 5).unwrap().ufvk;
     assert_eq!(ufvk_again, k.ufvk);
 }
 
@@ -178,10 +170,7 @@ fn the_fingerprint_is_stable_and_covers_the_whole_keyset() {
     assert_ne!(a.fingerprint, [0u8; 32]);
 
     // A different ak changes the fingerprint, i.e. devices comparing it would notice a wrong group.
-    let other = run_dkg(2, 2, &mut OsRng)
-        .unwrap()
-        .group_verifying_key()
-        .unwrap();
+    let other = run_dkg(2, 2, &mut OsRng).unwrap().group_verifying_key().unwrap();
     if other != ak {
         let c = VaultKeyset::derive(&other, &qsk(31), Network::TestNetwork, 0).unwrap();
         assert_ne!(a.fingerprint, c.fingerprint);
@@ -192,14 +181,8 @@ fn the_fingerprint_is_stable_and_covers_the_whole_keyset() {
 /// ak values over the same qsk share nk/rivk and differ only in the first 32 bytes.
 #[test]
 fn splice_only_replaces_the_authorizing_component() {
-    let a = run_dkg(2, 2, &mut OsRng)
-        .unwrap()
-        .group_verifying_key()
-        .unwrap();
-    let b = run_dkg(2, 2, &mut OsRng)
-        .unwrap()
-        .group_verifying_key()
-        .unwrap();
+    let a = run_dkg(2, 2, &mut OsRng).unwrap().group_verifying_key().unwrap();
+    let b = run_dkg(2, 2, &mut OsRng).unwrap().group_verifying_key().unwrap();
     if a == b {
         return;
     }

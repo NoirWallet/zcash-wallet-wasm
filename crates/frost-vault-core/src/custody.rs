@@ -67,9 +67,7 @@ impl core::fmt::Display for CustodyError {
                 write!(f, "share is for slot {found}, expected {expected}")
             }
             Self::WrongIdentity => f.write_str("share belongs to a different device or vault"),
-            Self::InconsistentParameters => {
-                f.write_str("key package parameters disagree with the record")
-            }
+            Self::InconsistentParameters => f.write_str("key package parameters disagree with the record"),
         }
     }
 }
@@ -167,9 +165,7 @@ impl<'a> Reader<'a> {
     }
 
     fn array32(&mut self) -> Result<[u8; 32], CustodyError> {
-        self.take(32)?
-            .try_into()
-            .map_err(|_| CustodyError::Malformed)
+        self.take(32)?.try_into().map_err(|_| CustodyError::Malformed)
     }
 
     fn bytes(&mut self) -> Result<&'a [u8], CustodyError> {
@@ -189,8 +185,7 @@ impl<'a> Reader<'a> {
 impl ShareBackup {
     /// Wrap a key package for storage. The caller supplies the identity it wants bound in.
     pub fn new(key_package: &KeyPackage, identity: ShareIdentity) -> Result<Self, CustodyError> {
-        if identity.device_id.len() > MAX_IDENTITY_LEN || identity.vault_id.len() > MAX_IDENTITY_LEN
-        {
+        if identity.device_id.len() > MAX_IDENTITY_LEN || identity.vault_id.len() > MAX_IDENTITY_LEN {
             return Err(CustodyError::Malformed);
         }
         let group_verifying_key: [u8; 32] = key_package
@@ -205,9 +200,7 @@ impl ShareBackup {
             group_verifying_key,
             min_signers: *key_package.min_signers(),
             secrets: Secrets {
-                key_package: key_package
-                    .serialize()
-                    .map_err(|_| CustodyError::InvalidKeyPackage)?,
+                key_package: key_package.serialize().map_err(|_| CustodyError::InvalidKeyPackage)?,
             },
         })
     }
@@ -245,11 +238,7 @@ impl ShareBackup {
     ///
     /// Both are arguments rather than "read from the record" on purpose: a restore that only checks
     /// the record against itself would happily load the wrong vault's share.
-    pub fn from_bytes(
-        bytes: &[u8],
-        expected_group: &[u8; 32],
-        expected_slot: u8,
-    ) -> Result<Self, CustodyError> {
+    pub fn from_bytes(bytes: &[u8], expected_group: &[u8; 32], expected_slot: u8) -> Result<Self, CustodyError> {
         if bytes.len() < 1 + 32 + 2 + 1 + 2 + 2 + 2 + 32 {
             return Err(CustodyError::Malformed);
         }
@@ -285,8 +274,7 @@ impl ShareBackup {
             return Err(CustodyError::Malformed);
         }
 
-        let package =
-            KeyPackage::deserialize(&key_package).map_err(|_| CustodyError::InvalidKeyPackage)?;
+        let package = KeyPackage::deserialize(&key_package).map_err(|_| CustodyError::InvalidKeyPackage)?;
         // The package's own fields must agree with the record, or one of the two was edited.
         if *package.min_signers() != min {
             return Err(CustodyError::InconsistentParameters);
@@ -303,11 +291,7 @@ impl ShareBackup {
         }
 
         Ok(Self {
-            identity: ShareIdentity {
-                slot,
-                device_id,
-                vault_id,
-            },
+            identity: ShareIdentity { slot, device_id, vault_id },
             group_verifying_key: group,
             min_signers: min,
             secrets: Secrets { key_package },
@@ -316,8 +300,7 @@ impl ShareBackup {
 
     /// Extract the key package. Only for the holder of this record.
     pub fn key_package(&self) -> Result<KeyPackage, CustodyError> {
-        KeyPackage::deserialize(&self.secrets.key_package)
-            .map_err(|_| CustodyError::InvalidKeyPackage)
+        KeyPackage::deserialize(&self.secrets.key_package).map_err(|_| CustodyError::InvalidKeyPackage)
     }
 
     /// Check the record against a public package: the group key must match and the account of
@@ -357,16 +340,10 @@ pub enum Recovery {
     /// No marker: nothing was in flight.
     Clean,
     /// A session started but never left the device. Safe to discard and start over.
-    Discardable {
-        session_id: [u8; 16],
-        progress: SessionProgress,
-    },
+    Discardable { session_id: [u8; 16], progress: SessionProgress },
     /// A session reached a point of no return. It must be abandoned, never continued: continuing
     /// would mean reusing nonces that may already be outside this device.
-    Burned {
-        session_id: [u8; 16],
-        progress: SessionProgress,
-    },
+    Burned { session_id: [u8; 16], progress: SessionProgress },
 }
 
 impl Recovery {
@@ -374,9 +351,7 @@ impl Recovery {
     pub fn session_id(self) -> Option<[u8; 16]> {
         match self {
             Self::Clean => None,
-            Self::Discardable { session_id, .. } | Self::Burned { session_id, .. } => {
-                Some(session_id)
-            }
+            Self::Discardable { session_id, .. } | Self::Burned { session_id, .. } => Some(session_id),
         }
     }
 }
@@ -418,14 +393,8 @@ pub fn recover_from_marker(bytes: Option<&[u8]>) -> Result<Recovery, MarkerError
     };
     let (session_id, progress) = parse_marker(bytes)?;
     Ok(match progress {
-        SessionProgress::Created => Recovery::Discardable {
-            session_id,
-            progress,
-        },
-        SessionProgress::Committed | SessionProgress::Consumed => Recovery::Burned {
-            session_id,
-            progress,
-        },
+        SessionProgress::Created => Recovery::Discardable { session_id, progress },
+        SessionProgress::Committed | SessionProgress::Consumed => Recovery::Burned { session_id, progress },
     })
 }
 
@@ -488,10 +457,7 @@ pub struct SessionGuard {
 
 impl SessionGuard {
     /// Start a session. **Must be called before any nonce is generated.**
-    pub fn begin<S: SessionStore>(
-        store: &mut S,
-        session_id: [u8; 16],
-    ) -> Result<Self, GuardError<S::Error>> {
+    pub fn begin<S: SessionStore>(store: &mut S, session_id: [u8; 16]) -> Result<Self, GuardError<S::Error>> {
         if store.get(MARKER_KEY).map_err(GuardError::Store)?.is_some() {
             return Err(GuardError::AlreadyInFlight);
         }
@@ -512,19 +478,13 @@ impl SessionGuard {
     }
 
     /// Record that commitments left the device. From here on the session may not be resumed.
-    pub fn mark_committed<S: SessionStore>(
-        &mut self,
-        store: &mut S,
-    ) -> Result<(), GuardError<S::Error>> {
+    pub fn mark_committed<S: SessionStore>(&mut self, store: &mut S) -> Result<(), GuardError<S::Error>> {
         self.progress = SessionProgress::Committed;
         self.persist(store)
     }
 
     /// Record that a share was produced.
-    pub fn mark_consumed<S: SessionStore>(
-        &mut self,
-        store: &mut S,
-    ) -> Result<(), GuardError<S::Error>> {
+    pub fn mark_consumed<S: SessionStore>(&mut self, store: &mut S) -> Result<(), GuardError<S::Error>> {
         self.progress = SessionProgress::Consumed;
         self.persist(store)
     }
@@ -553,9 +513,7 @@ impl SessionGuard {
     }
 
     fn persist<S: SessionStore>(&self, store: &mut S) -> Result<(), GuardError<S::Error>> {
-        store
-            .put(MARKER_KEY, &self.marker())
-            .map_err(GuardError::Store)
+        store.put(MARKER_KEY, &self.marker()).map_err(GuardError::Store)
     }
 }
 

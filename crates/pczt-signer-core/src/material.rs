@@ -51,14 +51,8 @@ pub enum MaterialError {
 impl core::fmt::Display for MaterialError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::RkMismatch { action_index } => write!(
-                f,
-                "action {action_index}: rk is not the group key randomized by the supplied alpha"
-            ),
-            Self::AlphaCount { actions, alphas } => write!(
-                f,
-                "{alphas} alpha value(s) supplied for {actions} ironwood action(s)"
-            ),
+            Self::RkMismatch { action_index } => write!(f, "action {action_index}: rk is not the group key randomized by the supplied alpha"),
+            Self::AlphaCount { actions, alphas } => write!(f, "{alphas} alpha value(s) supplied for {actions} ironwood action(s)"),
             Self::MissingRk { action_index } => write!(f, "action {action_index}: no rk present"),
             Self::Unreadable => f.write_str("PCZT could not be read by the verifier role"),
         }
@@ -73,12 +67,9 @@ impl SpendMaterial {
     /// The value is computed, never trusted: `rk` from the PCZT is compared against the key derived
     /// from the group key and the supplied `alpha`.
     pub fn verify_rk(&self, group_verifying_key: &[u8; 32]) -> Result<(), MaterialError> {
-        let expected =
-            randomized_verifying_key(group_verifying_key, &self.alpha).map_err(|_| {
-                MaterialError::RkMismatch {
-                    action_index: self.action_index,
-                }
-            })?;
+        let expected = randomized_verifying_key(group_verifying_key, &self.alpha).map_err(|_| MaterialError::RkMismatch {
+            action_index: self.action_index,
+        })?;
         if expected != self.rk {
             return Err(MaterialError::RkMismatch {
                 action_index: self.action_index,
@@ -121,10 +112,7 @@ pub fn extract_alphas(pczt: &Pczt) -> Result<Vec<[u8; 32]>, MaterialError> {
     verifier
         .with_ironwood::<(), _>(|bundle| {
             for action in bundle.actions() {
-                let alpha = action
-                    .spend()
-                    .alpha()
-                    .ok_or(pczt::roles::verifier::OrchardError::Custom(()))?;
+                let alpha = action.spend().alpha().ok_or(pczt::roles::verifier::OrchardError::Custom(()))?;
                 alphas.push(alpha.to_repr());
             }
             Ok(())
@@ -150,10 +138,7 @@ pub fn strip_proofs(pczt: Pczt) -> Pczt {
 /// Ordering is positional and must match the Ironwood bundle exactly: an off-by-one here would
 /// authorize a different action than the one the user was shown, so a count mismatch is an error
 /// rather than a zip.
-pub fn bind_alphas(
-    rks: &[ActionRk],
-    alphas: &[[u8; 32]],
-) -> Result<Vec<SpendMaterial>, MaterialError> {
+pub fn bind_alphas(rks: &[ActionRk], alphas: &[[u8; 32]]) -> Result<Vec<SpendMaterial>, MaterialError> {
     if rks.len() != alphas.len() {
         return Err(MaterialError::AlphaCount {
             actions: rks.len(),
@@ -192,11 +177,7 @@ mod tests {
         let alpha = alpha(0x11);
         let rk = randomized_verifying_key(&ak, &alpha).unwrap();
 
-        let material = SpendMaterial {
-            action_index: 0,
-            alpha,
-            rk,
-        };
+        let material = SpendMaterial { action_index: 0, alpha, rk };
         assert_eq!(material.verify_rk(&ak), Ok(()));
     }
 
@@ -212,10 +193,7 @@ mod tests {
             alpha: alpha(0x22), // coordinator swapped the alpha
             rk,
         };
-        assert_eq!(
-            material.verify_rk(&ak),
-            Err(MaterialError::RkMismatch { action_index: 3 })
-        );
+        assert_eq!(material.verify_rk(&ak), Err(MaterialError::RkMismatch { action_index: 3 }));
     }
 
     #[test]
@@ -251,13 +229,7 @@ mod tests {
                 rk: [2u8; 32],
             },
         ];
-        assert_eq!(
-            bind_alphas(&rks, &[alpha(1)]),
-            Err(MaterialError::AlphaCount {
-                actions: 2,
-                alphas: 1
-            })
-        );
+        assert_eq!(bind_alphas(&rks, &[alpha(1)]), Err(MaterialError::AlphaCount { actions: 2, alphas: 1 }));
     }
 
     #[test]

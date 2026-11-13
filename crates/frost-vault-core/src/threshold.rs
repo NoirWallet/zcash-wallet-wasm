@@ -91,19 +91,12 @@ impl DkgOutput {
     /// into an FVK as `ak ‖ nk ‖ rivk`, 96 bytes).
     pub fn group_verifying_key(&self) -> Result<[u8; 32], ThresholdError> {
         let bytes = self.pubkeys.verifying_key().serialize().map_err(frost)?;
-        bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| ThresholdError::Frost("ak is not 32 bytes".into()))
+        bytes.as_slice().try_into().map_err(|_| ThresholdError::Frost("ak is not 32 bytes".into()))
     }
 
     /// Identifiers of the first `threshold` participants, i.e. a legal signing subset.
     pub fn default_signers(&self) -> Vec<Identifier> {
-        self.identifiers
-            .iter()
-            .take(self.threshold as usize)
-            .copied()
-            .collect()
+        self.identifiers.iter().take(self.threshold as usize).copied().collect()
     }
 }
 
@@ -113,19 +106,12 @@ impl DkgOutput {
 /// broadcasts and the round-2 packages addressed to it. There is deliberately no dealer path: a
 /// trusted dealer (or splitting an existing `ask`) would contradict the vault's core promise that
 /// the full spend authority never exists in one place.
-pub fn run_dkg<R>(
-    participants: u16,
-    threshold: u16,
-    rng: &mut R,
-) -> Result<DkgOutput, ThresholdError>
+pub fn run_dkg<R>(participants: u16, threshold: u16, rng: &mut R) -> Result<DkgOutput, ThresholdError>
 where
     R: CryptoRng + RngCore,
 {
     if !SUPPORTED_MODES.contains(&(participants, threshold)) {
-        return Err(ThresholdError::UnsupportedMode {
-            participants,
-            threshold,
-        });
+        return Err(ThresholdError::UnsupportedMode { participants, threshold });
     }
 
     let identifiers: Vec<Identifier> = (1..=participants)
@@ -136,8 +122,7 @@ where
     let mut round1_secret = BTreeMap::new();
     let mut round1_packages = BTreeMap::new();
     for id in &identifiers {
-        let (secret, package) =
-            frost_core::keys::dkg::part1(*id, participants, threshold, &mut *rng).map_err(frost)?;
+        let (secret, package) = frost_core::keys::dkg::part1(*id, participants, threshold, &mut *rng).map_err(frost)?;
         round1_secret.insert(*id, secret);
         round1_packages.insert(*id, package);
     }
@@ -145,10 +130,7 @@ where
     // Round 2 — every participant sends one encrypted package to each peer. `inbox` models the
     // per-recipient channel: only packages addressed to `id` land there.
     let mut round2_secret = BTreeMap::new();
-    let mut inbox: BTreeMap<
-        Identifier,
-        BTreeMap<Identifier, frost_core::keys::dkg::round2::Package<Suite>>,
-    > = BTreeMap::new();
+    let mut inbox: BTreeMap<Identifier, BTreeMap<Identifier, frost_core::keys::dkg::round2::Package<Suite>>> = BTreeMap::new();
     for id in &identifiers {
         let peers: BTreeMap<_, _> = round1_packages
             .iter()
@@ -156,8 +138,7 @@ where
             .map(|(peer, pkg)| (*peer, pkg.clone()))
             .collect();
         let secret = round1_secret.remove(id).expect("round 1 secret present");
-        let (round2_secret_package, outgoing) =
-            frost_core::keys::dkg::part2(secret, &peers).map_err(frost)?;
+        let (round2_secret_package, outgoing) = frost_core::keys::dkg::part2(secret, &peers).map_err(frost)?;
         round2_secret.insert(*id, round2_secret_package);
         for (recipient, package) in outgoing {
             inbox.entry(recipient).or_default().insert(*id, package);
@@ -175,8 +156,7 @@ where
             .collect();
         let received = inbox.remove(id).expect("round 2 inbox present");
         let secret = round2_secret.remove(id).expect("round 2 secret present");
-        let (key_package, public_key_package) =
-            frost_core::keys::dkg::part3(&secret, &peers, &received).map_err(frost)?;
+        let (key_package, public_key_package) = frost_core::keys::dkg::part3(&secret, &peers, &received).map_err(frost)?;
 
         // Every participant must land on the same group key, or the sweep/outputs would be bound
         // to different verification keys. This is the check §5.9 describes as mandatory.
@@ -184,9 +164,7 @@ where
             None => pubkeys = Some(public_key_package),
             Some(expected) => {
                 if expected.verifying_key() != public_key_package.verifying_key() {
-                    return Err(ThresholdError::Frost(
-                        "participants disagree on the group verifying key".into(),
-                    ));
+                    return Err(ThresholdError::Frost("participants disagree on the group verifying key".into()));
                 }
             }
         }
@@ -237,25 +215,20 @@ pub fn slot_identifier(slot: u8) -> Result<Identifier, ThresholdError> {
 const DKG_WIRE_VERSION: u8 = 1;
 
 fn put_len(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ThresholdError> {
-    let len = u16::try_from(bytes.len())
-        .map_err(|_| ThresholdError::Frost("DKG blob too large".into()))?;
+    let len = u16::try_from(bytes.len()).map_err(|_| ThresholdError::Frost("DKG blob too large".into()))?;
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(bytes);
     Ok(())
 }
 
 fn take_len<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<&'a [u8], ThresholdError> {
-    let end = pos
-        .checked_add(2)
-        .ok_or_else(|| ThresholdError::Frost("malformed DKG blob".into()))?;
+    let end = pos.checked_add(2).ok_or_else(|| ThresholdError::Frost("malformed DKG blob".into()))?;
     if end > bytes.len() {
         return Err(ThresholdError::Frost("malformed DKG blob".into()));
     }
     let len = u16::from_le_bytes([bytes[*pos], bytes[*pos + 1]]) as usize;
     *pos = end;
-    let end = pos
-        .checked_add(len)
-        .ok_or_else(|| ThresholdError::Frost("malformed DKG blob".into()))?;
+    let end = pos.checked_add(len).ok_or_else(|| ThresholdError::Frost("malformed DKG blob".into()))?;
     if end > bytes.len() {
         return Err(ThresholdError::Frost("malformed DKG blob".into()));
     }
@@ -273,9 +246,7 @@ struct SecretEnvelope {
 
 fn unpack_secret(bytes: &[u8]) -> Result<SecretEnvelope, ThresholdError> {
     if bytes.len() < 67 || bytes[0] != DKG_WIRE_VERSION {
-        return Err(ThresholdError::Frost(
-            "unsupported DKG secret format".into(),
-        ));
+        return Err(ThresholdError::Frost("unsupported DKG secret format".into()));
     }
     let slot = bytes[1];
     let static_sk = bytes[2..34].to_vec();
@@ -293,12 +264,7 @@ fn unpack_secret(bytes: &[u8]) -> Result<SecretEnvelope, ThresholdError> {
     })
 }
 
-fn pack_secret(
-    slot: u8,
-    static_sk: &[u8],
-    static_pk: &[u8],
-    frost: &[u8],
-) -> Result<Vec<u8>, ThresholdError> {
+fn pack_secret(slot: u8, static_sk: &[u8], static_pk: &[u8], frost: &[u8]) -> Result<Vec<u8>, ThresholdError> {
     let mut out = Vec::with_capacity(68 + frost.len());
     out.push(DKG_WIRE_VERSION);
     out.push(slot);
@@ -320,9 +286,7 @@ pub fn static_public_of_broadcast(broadcast: &[u8]) -> Result<Vec<u8>, Threshold
 /// A peer's round-1 broadcast: its static key plus the FROST package.
 fn unpack_broadcast(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ThresholdError> {
     if bytes.len() < 33 || bytes[0] != DKG_WIRE_VERSION {
-        return Err(ThresholdError::Frost(
-            "unsupported DKG broadcast format".into(),
-        ));
+        return Err(ThresholdError::Frost("unsupported DKG broadcast format".into()));
     }
     Ok((bytes[1..33].to_vec(), bytes[33..].to_vec()))
 }
@@ -371,50 +335,30 @@ pub struct DkgFinal {
 }
 
 /// Round 1 of the DKG for one device.
-pub fn dkg_part1<R>(
-    participants: u16,
-    threshold: u16,
-    slot: u8,
-    rng: &mut R,
-) -> Result<DkgRound1, ThresholdError>
+pub fn dkg_part1<R>(participants: u16, threshold: u16, slot: u8, rng: &mut R) -> Result<DkgRound1, ThresholdError>
 where
     R: CryptoRng + RngCore,
 {
     if !SUPPORTED_MODES.contains(&(participants, threshold)) {
-        return Err(ThresholdError::UnsupportedMode {
-            participants,
-            threshold,
-        });
+        return Err(ThresholdError::UnsupportedMode { participants, threshold });
     }
     let identifier = slot_identifier(slot)?;
-    let (secret, package) =
-        frost_core::keys::dkg::part1(identifier, participants, threshold, &mut *rng)
-            .map_err(frost)?;
+    let (secret, package) = frost_core::keys::dkg::part1(identifier, participants, threshold, &mut *rng).map_err(frost)?;
     // A static X25519 keypair for this ceremony. Its public half travels in the broadcast so peers
     // can seal their round-2 packages to it; the secret half stays in the local secret blob and is
     // carried forward into round 2.
     let (static_sk, static_pk) = crate::seal::generate_keypair()?;
     Ok(DkgRound1 {
-        secret: pack_secret(
-            slot,
-            &static_sk,
-            &static_pk,
-            &secret.serialize().map_err(frost)?,
-        )?,
+        secret: pack_secret(slot, &static_sk, &static_pk, &secret.serialize().map_err(frost)?)?,
         broadcast: pack_broadcast(&static_pk, &package.serialize().map_err(frost)?),
         static_public: static_pk,
     })
 }
 
 /// Round 2: produce one sealed package per peer from the round-1 broadcasts.
-pub fn dkg_part2(
-    secret: &[u8],
-    peer_broadcasts: &BTreeMap<u8, Vec<u8>>,
-) -> Result<DkgRound2, ThresholdError> {
+pub fn dkg_part2(secret: &[u8], peer_broadcasts: &BTreeMap<u8, Vec<u8>>) -> Result<DkgRound2, ThresholdError> {
     let mine = unpack_secret(secret)?;
-    let round1_secret =
-        frost_core::keys::dkg::round1::SecretPackage::<Suite>::deserialize(&mine.frost)
-            .map_err(frost)?;
+    let round1_secret = frost_core::keys::dkg::round1::SecretPackage::<Suite>::deserialize(&mine.frost).map_err(frost)?;
 
     // Decode every broadcast once: the FROST package for the ceremony, the static key for both the
     // prologue and the sealing.
@@ -422,8 +366,7 @@ pub fn dkg_part2(
     let mut statics = vec![(mine.slot, mine.static_pk.clone())];
     for (slot, bytes) in peer_broadcasts {
         let (static_pk, frost_bytes) = unpack_broadcast(bytes)?;
-        let package = frost_core::keys::dkg::round1::Package::<Suite>::deserialize(&frost_bytes)
-            .map_err(frost)?;
+        let package = frost_core::keys::dkg::round1::Package::<Suite>::deserialize(&frost_bytes).map_err(frost)?;
         peers.insert(slot_identifier(*slot)?, package);
         statics.push((*slot, static_pk));
     }
@@ -432,8 +375,7 @@ pub fn dkg_part2(
     let prologue = crate::seal::ceremony_prologue(&statics);
     let statics_by_slot: BTreeMap<u8, Vec<u8>> = statics.into_iter().collect();
 
-    let (round2_secret, outgoing) =
-        frost_core::keys::dkg::part2(round1_secret, &peers).map_err(frost)?;
+    let (round2_secret, outgoing) = frost_core::keys::dkg::part2(round1_secret, &peers).map_err(frost)?;
 
     let mut by_slot = BTreeMap::new();
     for (identifier, package) in outgoing {
@@ -443,44 +385,27 @@ pub fn dkg_part2(
             .ok_or_else(|| ThresholdError::Frost("missing static key for peer".into()))?;
         // Sealed to the recipient alone: this is what stops a relaying coordinator from learning
         // the shares it forwards.
-        let sealed = crate::seal::seal(
-            &mine.static_sk,
-            recipient_pk,
-            &prologue,
-            &package.serialize().map_err(frost)?,
-        )?;
+        let sealed = crate::seal::seal(&mine.static_sk, recipient_pk, &prologue, &package.serialize().map_err(frost)?)?;
         by_slot.insert(recipient, sealed);
     }
 
     Ok(DkgRound2 {
-        secret: pack_secret(
-            mine.slot,
-            &mine.static_sk,
-            &mine.static_pk,
-            &round2_secret.serialize().map_err(frost)?,
-        )?,
+        secret: pack_secret(mine.slot, &mine.static_sk, &mine.static_pk, &round2_secret.serialize().map_err(frost)?)?,
         outgoing: by_slot,
         statics: statics_by_slot,
     })
 }
 
 /// Round 3: finalize with the broadcasts and the packages addressed to this device.
-pub fn dkg_part3(
-    secret: &[u8],
-    peer_broadcasts: &BTreeMap<u8, Vec<u8>>,
-    incoming: &BTreeMap<u8, Vec<u8>>,
-) -> Result<DkgFinal, ThresholdError> {
+pub fn dkg_part3(secret: &[u8], peer_broadcasts: &BTreeMap<u8, Vec<u8>>, incoming: &BTreeMap<u8, Vec<u8>>) -> Result<DkgFinal, ThresholdError> {
     let mine = unpack_secret(secret)?;
-    let round2_secret =
-        frost_core::keys::dkg::round2::SecretPackage::<Suite>::deserialize(&mine.frost)
-            .map_err(frost)?;
+    let round2_secret = frost_core::keys::dkg::round2::SecretPackage::<Suite>::deserialize(&mine.frost).map_err(frost)?;
 
     let mut broadcasts = BTreeMap::new();
     let mut statics = vec![(mine.slot, mine.static_pk.clone())];
     for (slot, bytes) in peer_broadcasts {
         let (static_pk, frost_bytes) = unpack_broadcast(bytes)?;
-        let package = frost_core::keys::dkg::round1::Package::<Suite>::deserialize(&frost_bytes)
-            .map_err(frost)?;
+        let package = frost_core::keys::dkg::round1::Package::<Suite>::deserialize(&frost_bytes).map_err(frost)?;
         broadcasts.insert(slot_identifier(*slot)?, package);
         statics.push((*slot, static_pk));
     }
@@ -494,13 +419,11 @@ pub fn dkg_part3(
             .ok_or_else(|| ThresholdError::Frost("missing static key for sender".into()))?;
         // Only this device's static secret opens it.
         let opened = crate::seal::open(&mine.static_sk, sender_pk, &prologue, bytes)?;
-        let package =
-            frost_core::keys::dkg::round2::Package::<Suite>::deserialize(&opened).map_err(frost)?;
+        let package = frost_core::keys::dkg::round2::Package::<Suite>::deserialize(&opened).map_err(frost)?;
         received.insert(slot_identifier(*slot)?, package);
     }
 
-    let (key_package, public_key_package) =
-        frost_core::keys::dkg::part3(&round2_secret, &broadcasts, &received).map_err(frost)?;
+    let (key_package, public_key_package) = frost_core::keys::dkg::part3(&round2_secret, &broadcasts, &received).map_err(frost)?;
     Ok(DkgFinal {
         key_package: key_package.serialize().map_err(frost)?,
         public_key_package: public_key_package.serialize().map_err(frost)?,
@@ -518,9 +441,7 @@ pub fn slot_of(identifier: Identifier) -> Result<u8, ThresholdError> {
             return Ok(slot_u8);
         }
     }
-    Err(ThresholdError::Frost(format!(
-        "identifier {identifier:?} is not a roster slot"
-    )))
+    Err(ThresholdError::Frost(format!("identifier {identifier:?} is not a roster slot")))
 }
 
 /// One signer's round-1 output: its nonces (secret, local only) and commitments (broadcast).
@@ -577,13 +498,7 @@ pub fn sign_with_randomizer_seed(
     randomizer_seed: &[u8],
 ) -> Result<SignatureShare, ThresholdError> {
     let signing_package = frost_core::SigningPackage::new(commitments.clone(), message);
-    frost_rerandomized::sign_with_randomizer_seed(
-        &signing_package,
-        nonces,
-        key_package,
-        randomizer_seed,
-    )
-    .map_err(frost)
+    frost_rerandomized::sign_with_randomizer_seed(&signing_package, nonces, key_package, randomizer_seed).map_err(frost)
 }
 
 /// Coordinator aggregation with an explicit randomizer. Returns the 64-byte spend auth signature.
@@ -597,13 +512,10 @@ pub fn aggregate_with_alpha(
     let signing_package = frost_core::SigningPackage::new(commitments.clone(), message);
     let randomizer = Randomizer::<Suite>::deserialize(alpha).map_err(frost)?;
     let params = RandomizedParams::from_randomizer(pubkeys.verifying_key(), randomizer);
-    let signature =
-        frost_rerandomized::aggregate(&signing_package, shares, pubkeys, &params).map_err(frost)?;
+    let signature = frost_rerandomized::aggregate(&signing_package, shares, pubkeys, &params).map_err(frost)?;
     let bytes = signature.serialize().map_err(frost)?;
     let len = bytes.len();
-    bytes
-        .try_into()
-        .map_err(|_| ThresholdError::BadSignatureLength(len))
+    bytes.try_into().map_err(|_| ThresholdError::BadSignatureLength(len))
 }
 
 /// Coordinator aggregation for the seed-derived path.
@@ -615,27 +527,13 @@ pub fn aggregate_with_randomizer_seed(
     shares: &BTreeMap<Identifier, SignatureShare>,
 ) -> Result<(SpendAuthSignature, [u8; 32]), ThresholdError> {
     let signing_package = frost_core::SigningPackage::new(commitments.clone(), message);
-    let params = RandomizedParams::regenerate_from_seed_and_commitments(
-        pubkeys.verifying_key(),
-        randomizer_seed,
-        commitments,
-    )
-    .map_err(frost)?;
-    let rk = params
-        .randomized_verifying_key()
-        .serialize()
-        .map_err(frost)?;
-    let signature =
-        frost_rerandomized::aggregate(&signing_package, shares, pubkeys, &params).map_err(frost)?;
+    let params = RandomizedParams::regenerate_from_seed_and_commitments(pubkeys.verifying_key(), randomizer_seed, commitments).map_err(frost)?;
+    let rk = params.randomized_verifying_key().serialize().map_err(frost)?;
+    let signature = frost_rerandomized::aggregate(&signing_package, shares, pubkeys, &params).map_err(frost)?;
     let bytes = signature.serialize().map_err(frost)?;
     let len = bytes.len();
-    let sig = bytes
-        .try_into()
-        .map_err(|_| ThresholdError::BadSignatureLength(len))?;
-    let rk: [u8; 32] = rk
-        .as_slice()
-        .try_into()
-        .map_err(|_| ThresholdError::Frost("rk is not 32 bytes".into()))?;
+    let sig = bytes.try_into().map_err(|_| ThresholdError::BadSignatureLength(len))?;
+    let rk: [u8; 32] = rk.as_slice().try_into().map_err(|_| ThresholdError::Frost("rk is not 32 bytes".into()))?;
     Ok((sig, rk))
 }
 
@@ -654,25 +552,14 @@ pub fn verify_with_group_key_and_alpha(
     let randomizer = Randomizer::<Suite>::deserialize(alpha).map_err(frost)?;
     let params = RandomizedParams::from_randomizer(&ak, randomizer);
     let sig = frost_core::Signature::<Suite>::deserialize(signature).map_err(frost)?;
-    params
-        .randomized_verifying_key()
-        .verify(message, &sig)
-        .map_err(frost)
+    params.randomized_verifying_key().verify(message, &sig).map_err(frost)
 }
 
 /// Randomized verification key for a given `ak` and `alpha`, i.e. the `rk` a PCZT must carry.
-pub fn randomized_verifying_key(
-    group_verifying_key: &[u8; 32],
-    alpha: &[u8; 32],
-) -> Result<[u8; 32], ThresholdError> {
+pub fn randomized_verifying_key(group_verifying_key: &[u8; 32], alpha: &[u8; 32]) -> Result<[u8; 32], ThresholdError> {
     let ak = frost_core::VerifyingKey::<Suite>::deserialize(group_verifying_key).map_err(frost)?;
     let randomizer = Randomizer::<Suite>::deserialize(alpha).map_err(frost)?;
     let params = RandomizedParams::from_randomizer(&ak, randomizer);
-    let rk = params
-        .randomized_verifying_key()
-        .serialize()
-        .map_err(frost)?;
-    rk.as_slice()
-        .try_into()
-        .map_err(|_| ThresholdError::Frost("rk is not 32 bytes".into()))
+    let rk = params.randomized_verifying_key().serialize().map_err(frost)?;
+    rk.as_slice().try_into().map_err(|_| ThresholdError::Frost("rk is not 32 bytes".into()))
 }
