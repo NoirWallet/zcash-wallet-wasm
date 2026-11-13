@@ -205,6 +205,51 @@ impl ShareBackup {
         })
     }
 
+    /// Rebuild a share from the material a 24-word backup can carry: the signing scalar, plus the
+    /// group's public data.
+    ///
+    /// A BIP39 mnemonic is 256 bits — 32 bytes — which fits the scalar and nothing else. The rest of a
+    /// usable `KeyPackage` (identifier, verifying share, group key, threshold) is either derivable
+    /// from it or public, so it is supplied here instead of being stored:
+    ///
+    /// * the identifier and verifying share are derived from `slot` and the scalar;
+    /// * `ak` and `min_signers` come from the group's public state.
+    ///
+    /// Pass `pubkeys` when you have them: the reconstructed verifying share is then checked against
+    /// the group's record for this slot, which is the only way to catch a wrong scalar at restore time
+    /// instead of at signing time.
+    pub fn from_scalar(
+        signing_scalar: &[u8; 32],
+        group_verifying_key: &[u8; 32],
+        slot: u8,
+        min_signers: u16,
+        identity: ShareIdentity,
+        pubkeys: Option<&PublicKeyPackage>,
+    ) -> Result<Self, CustodyError> {
+        use frost_rerandomized::frost_core::keys::{SigningShare, VerifyingShare};
+
+        let identifier = crate::threshold::slot_identifier(slot).map_err(|_| CustodyError::WrongSlot { expected: 0, found: slot })?;
+        let signing_share = SigningShare::<Suite>::deserialize(signing_scalar).map_err(|_| CustodyError::InvalidKeyPackage)?;
+        let verifying_share = VerifyingShare::<Suite>::from(signing_share);
+        let verifying_key = frost_rerandomized::frost_core::VerifyingKey::<Suite>::deserialize(group_verifying_key).map_err(|_| CustodyError::WrongGroup)?;
+
+        if let Some(pubkeys) = pubkeys {
+            let expected = pubkeys
+                .verifying_shares()
+                .get(&identifier)
+                .ok_or(CustodyError::WrongSlot { expected: slot, found: slot })?;
+            if expected != &verifying_share {
+                return Err(CustodyError::WrongIdentity);
+            }
+            if pubkeys.verifying_key().serialize().map(|b| b.as_slice() != group_verifying_key).unwrap_or(true) {
+                return Err(CustodyError::WrongGroup);
+            }
+        }
+
+        let key_package = KeyPackage::new(identifier, signing_share, verifying_share, verifying_key, min_signers);
+        Self::new(&key_package, identity)
+    }
+
     pub fn identity(&self) -> &ShareIdentity {
         &self.identity
     }

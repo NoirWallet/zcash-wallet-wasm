@@ -267,3 +267,55 @@ fn session_ids_are_random_not_sequential() {
     assert_ne!(a, b);
     assert_ne!(a, [0u8; 16]);
 }
+
+#[test]
+fn a_share_can_be_rebuilt_from_a_32_byte_scalar() {
+    // The 24-word case: a BIP39 mnemonic holds 256 bits, so it can carry the signing scalar and
+    // nothing else. Everything else a KeyPackage needs is either derivable or public.
+    let dkg = dkg(3, 2);
+    let ak = dkg.group_verifying_key().unwrap();
+    let by_slot = roster(&dkg);
+    let original = &dkg.key_packages[&by_slot[&1]];
+    let scalar: [u8; 32] = original.signing_share().serialize().as_slice().try_into().expect("a signing share is 32 bytes");
+
+    let rebuilt = ShareBackup::from_scalar(&scalar, &ak, 1, 2, identity(1, b"device-b", b"vault-1"), Some(&dkg.pubkeys)).expect("rebuild");
+
+    // The signature material must be identical to what the DKG produced.
+    let kp = rebuilt.key_package().unwrap();
+    assert_eq!(kp.signing_share(), original.signing_share());
+    assert_eq!(kp.identifier(), original.identifier());
+    assert_eq!(*kp.min_signers(), 2);
+    assert_eq!(kp.verifying_key().serialize().unwrap(), ak.to_vec(), "the group key must come back");
+
+    // And it round-trips like any other backup.
+    let bytes = rebuilt.to_bytes().unwrap();
+    let restored = ShareBackup::from_bytes(&bytes, &ak, 1).expect("from_bytes");
+    assert_eq!(restored.key_package().unwrap().signing_share(), original.signing_share());
+}
+
+#[test]
+fn rebuilding_from_the_wrong_scalar_is_caught_against_the_public_package() {
+    // Without the public package a wrong scalar is indistinguishable from a right one — that is
+    // inherent, since a share is uniformly random. With it, the mismatch is caught at restore time
+    // rather than when a signature share fails to aggregate.
+    let dkg = dkg(3, 2);
+    let ak = dkg.group_verifying_key().unwrap();
+    let by_slot = roster(&dkg);
+    let scalar: [u8; 32] = dkg.key_packages[&by_slot[&2]].signing_share().serialize().as_slice().try_into().unwrap();
+
+    // Slot 2's scalar presented as slot 1's share.
+    let err = ShareBackup::from_scalar(&scalar, &ak, 1, 2, identity(1, b"b", b"v"), Some(&dkg.pubkeys)).unwrap_err();
+    assert_eq!(err, CustodyError::WrongIdentity);
+
+    // Against another group's public package it is caught earlier, as a group mismatch.
+    let other = run_dkg(2, 2, &mut OsRng).expect("dkg");
+    let err = ShareBackup::from_scalar(
+        &scalar,
+        &other.group_verifying_key().unwrap(),
+        1,
+        2,
+        identity(1, b"b", b"v"),
+        Some(&other.pubkeys),
+    );
+    assert!(err.is_err());
+}

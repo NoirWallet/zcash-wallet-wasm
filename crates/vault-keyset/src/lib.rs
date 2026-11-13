@@ -5,4 +5,4 @@
 
 pub mod keyset;
 
-pub use keyset::{KeysetError, QuantumRecoveryMaterial, VaultKeyset};
+pub use keyset::{fvk_from_ufvk, ufvk_matches_ak, KeysetError, QuantumRecoveryMaterial, VaultKeyset};

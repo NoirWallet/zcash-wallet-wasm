@@ -628,6 +628,49 @@ impl ShareBackup {
         Ok(to_js_bytes(&self.inner.to_bytes().map_err(|e| JsError::new(&format!("{e:?}")))?))
     }
 
+    /// Rebuild a share from a 32-byte signing scalar plus the group's public data.
+    ///
+    /// This is the 24-word path: a BIP39 mnemonic carries 256 bits, which fits the scalar and nothing
+    /// else. The identifier and verifying share are derived from `slot` and the scalar, and `ak` /
+    /// `min_signers` come from the group's public state, which is not secret.
+    ///
+    /// **Pass `publicKeyPackage` whenever you have it.** With it, the reconstructed share is checked
+    /// against the group's record for this slot, so a wrong scalar fails here instead of producing
+    /// signature shares that never aggregate.
+    #[wasm_bindgen]
+    pub fn from_scalar(
+        signing_scalar: &[u8],
+        group_verifying_key: &[u8],
+        slot: u8,
+        min_signers: u16,
+        device_id: &[u8],
+        vault_id: &[u8],
+        public_key_package: Option<Vec<u8>>,
+    ) -> Result<ShareBackup, JsError> {
+        let scalar: [u8; 32] = signing_scalar.try_into().map_err(|_| JsError::new("signing_scalar must be 32 bytes"))?;
+        let group: [u8; 32] = group_verifying_key
+            .try_into()
+            .map_err(|_| JsError::new("group_verifying_key must be 32 bytes"))?;
+        let pubkeys = match public_key_package {
+            Some(bytes) => Some(PublicKeyPackage::deserialize(&bytes).map_err(err)?),
+            None => None,
+        };
+        let inner = custody::ShareBackup::from_scalar(
+            &scalar,
+            &group,
+            slot,
+            min_signers,
+            custody::ShareIdentity {
+                slot,
+                device_id: device_id.to_vec(),
+                vault_id: vault_id.to_vec(),
+            },
+            pubkeys.as_ref(),
+        )
+        .map_err(err)?;
+        Ok(Self { inner })
+    }
+
     /// Load and validate against the expected group and slot.
     pub fn from_bytes(bytes: &[u8], group_verifying_key: &[u8], expected_slot: u8) -> Result<ShareBackup, JsError> {
         let group: [u8; 32] = group_verifying_key
@@ -916,6 +959,28 @@ impl Keyset {
             rand_core::RngCore::fill_bytes(&mut rng(), &mut bytes);
         }
         to_js_bytes(&bytes)
+    }
+
+    /// The 96-byte FVK inside a UFVK string.
+    ///
+    /// A recovering device receives a viewing key but not the `qsk` behind it, so it cannot re-derive
+    /// anything with [`Self::derive`]. This reads the key back out.
+    #[wasm_bindgen]
+    pub fn fvk_from_ufvk(ufvk: &str) -> Result<js_sys::Uint8Array, JsError> {
+        Ok(to_js_bytes(&vault_keyset::fvk_from_ufvk(ufvk).map_err(err)?))
+    }
+
+    /// Whether a UFVK was derived from this group key.
+    ///
+    /// Run this before trusting a viewing key handed to you by a coordinator or a peer: `ak` is the
+    /// first 32 bytes of the FVK, and a mismatch would restore the device into a different, empty
+    /// wallet.
+    #[wasm_bindgen]
+    pub fn ufvk_matches_ak(ufvk: &str, group_verifying_key: &[u8]) -> Result<bool, JsError> {
+        let ak: [u8; 32] = group_verifying_key
+            .try_into()
+            .map_err(|_| JsError::new("group_verifying_key must be 32 bytes"))?;
+        vault_keyset::ufvk_matches_ak(ufvk, &ak).map_err(err)
     }
 
     /// Whether the derived address carries only an Orchard receiver. Must always be true; the

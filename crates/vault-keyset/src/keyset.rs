@@ -169,6 +169,33 @@ impl VaultKeyset {
     }
 }
 
+/// The 96-byte FVK inside a UFVK string.
+///
+/// A recovering device receives a viewing key but not the `qsk` it was derived from, so it cannot use
+/// [`VaultKeyset::derive`] to check anything. This reads the key back out.
+pub fn fvk_from_ufvk(ufvk: &str) -> Result<[u8; 96], KeysetError> {
+    use zcash_address::unified::Container;
+    let (_, _, decoded) = Ufvk::decode(ufvk).map_err(|_| KeysetError::Encoding)?;
+    decoded
+        .items()
+        .into_iter()
+        .find_map(|item| match item {
+            Fvk::Orchard(bytes) => Some(bytes),
+            _ => None,
+        })
+        .ok_or(KeysetError::Encoding)
+}
+
+/// Whether a UFVK was derived from this group key.
+///
+/// This is the check a recovering device must run before trusting a viewing key handed to it by a
+/// coordinator or a peer: `ak` is the first 32 bytes of the FVK, and a mismatched key would restore
+/// the device into a different — and empty — wallet.
+pub fn ufvk_matches_ak(ufvk: &str, group_verifying_key: &[u8; 32]) -> Result<bool, KeysetError> {
+    let fvk = fvk_from_ufvk(ufvk)?;
+    Ok(&fvk[..32] == group_verifying_key)
+}
+
 /// Splice `ak` over the `ak` field of the FVK that `qsk` implies.
 fn splice_fvk(group_verifying_key: &[u8; 32], qsk: &[u8; 32]) -> Result<FullViewingKey, KeysetError> {
     let sk = SpendingKey::from_bytes(*qsk).into_option().ok_or(KeysetError::InvalidRecoveryKey)?;

@@ -202,3 +202,24 @@ fn keyset_matches_the_wallet_stack_parameters_impl() {
     // Column of the map is irrelevant here; this just keeps the import meaningful.
     let _: BTreeMap<u8, u8> = BTreeMap::new();
 }
+
+#[test]
+fn a_ufvk_can_be_checked_against_the_group_key() {
+    // The recovery case: a device gets a viewing key from a coordinator and must confirm it belongs
+    // to the group whose share it holds.
+    let mine = dkg(2, 2);
+    let ak = mine.group_verifying_key().unwrap();
+    let keyset = VaultKeyset::derive(&ak, &qsk(51), Network::TestNetwork, 0).unwrap();
+
+    assert_eq!(vault_keyset::fvk_from_ufvk(&keyset.ufvk).unwrap(), keyset.fvk);
+    assert!(vault_keyset::ufvk_matches_ak(&keyset.ufvk, &ak).unwrap());
+
+    // Another group's viewing key must not pass.
+    let other = dkg(2, 2);
+    let other_ak = other.group_verifying_key().unwrap();
+    let other_keyset = VaultKeyset::derive(&other_ak, &qsk(52), Network::TestNetwork, 0).unwrap();
+    assert!(!vault_keyset::ufvk_matches_ak(&other_keyset.ufvk, &ak).unwrap());
+
+    // A malformed string is an error, not a false answer.
+    assert!(vault_keyset::fvk_from_ufvk("uview1not-a-key").is_err());
+}
