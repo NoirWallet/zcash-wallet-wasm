@@ -5,4 +5,4 @@
 
 pub mod keyset;
 
-pub use keyset::{fvk_from_ufvk, ufvk_matches_ak, KeysetError, QuantumRecoveryMaterial, VaultKeyset};
+pub use keyset::{fingerprint_from_fvk, fingerprint_from_ufvk, fvk_from_ufvk, ufvk_matches_ak, KeysetError, QuantumRecoveryMaterial, VaultKeyset};

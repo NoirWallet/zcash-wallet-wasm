@@ -970,6 +970,37 @@ impl Keyset {
         Ok(to_js_bytes(&vault_keyset::fvk_from_ufvk(ufvk).map_err(err)?))
     }
 
+    /// The keyset fingerprint, recomputed from an FVK: `SHA-256(domain ‖ network_tag ‖ fvk)`.
+    ///
+    /// Recovery needs this: a device keeps the FVK but not the `qsk`, so [`Self::derive`] is not
+    /// available to it, and the fingerprint is what the user compares against an independent device to
+    /// detect a coordinator handing over a viewing key with a real `ak` and attacker-chosen
+    /// `nk`/`rivk`.
+    ///
+    /// Do not reimplement this hash elsewhere: the domain tag and network tag are part of the preimage,
+    /// and a one-byte difference makes two implementations disagree forever.
+    #[wasm_bindgen]
+    pub fn fingerprint_from_fvk(fvk: &[u8], mainnet: bool) -> Result<js_sys::Uint8Array, JsError> {
+        let fvk: [u8; 96] = fvk.try_into().map_err(|_| JsError::new("fvk must be 96 bytes"))?;
+        let network = if mainnet {
+            zcash_protocol::consensus::Network::MainNetwork
+        } else {
+            zcash_protocol::consensus::Network::TestNetwork
+        };
+        Ok(to_js_bytes(&vault_keyset::fingerprint_from_fvk(&fvk, network)))
+    }
+
+    /// `fingerprint_from_fvk` for callers holding the encoded UFVK.
+    #[wasm_bindgen]
+    pub fn fingerprint_from_ufvk(ufvk: &str, mainnet: bool) -> Result<js_sys::Uint8Array, JsError> {
+        let network = if mainnet {
+            zcash_protocol::consensus::Network::MainNetwork
+        } else {
+            zcash_protocol::consensus::Network::TestNetwork
+        };
+        Ok(to_js_bytes(&vault_keyset::fingerprint_from_ufvk(ufvk, network).map_err(err)?))
+    }
+
     /// Whether a UFVK was derived from this group key.
     ///
     /// Run this before trusting a viewing key handed to you by a coordinator or a peer: `ak` is the

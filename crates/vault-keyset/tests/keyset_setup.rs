@@ -223,3 +223,32 @@ fn a_ufvk_can_be_checked_against_the_group_key() {
     // A malformed string is an error, not a false answer.
     assert!(vault_keyset::fvk_from_ufvk("uview1not-a-key").is_err());
 }
+
+#[test]
+fn the_fingerprint_can_be_recomputed_from_the_fvk_alone() {
+    // After KEYSET_SETUP a device keeps the FVK but not the qsk, so recovery can only recompute the
+    // fingerprint from the FVK. It must equal the one derive() produced.
+    let dkg = dkg(2, 2);
+    let ak = dkg.group_verifying_key().unwrap();
+    let keyset = VaultKeyset::derive(&ak, &qsk(61), Network::TestNetwork, 0).unwrap();
+
+    assert_eq!(vault_keyset::fingerprint_from_fvk(&keyset.fvk, Network::TestNetwork), keyset.fingerprint);
+    assert_eq!(
+        vault_keyset::fingerprint_from_ufvk(&keyset.ufvk, Network::TestNetwork).unwrap(),
+        keyset.fingerprint
+    );
+
+    // Network is part of the hash: the same keyset on another network is a different fingerprint.
+    assert_ne!(vault_keyset::fingerprint_from_fvk(&keyset.fvk, Network::MainNetwork), keyset.fingerprint);
+
+    // The domain tag and network tag are part of the preimage, so this is not a plain SHA-256 of the
+    // FVK: a wallet that hashed the FVK alone would produce a different value and never match.
+    let naive = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(keyset.fvk);
+        let out: [u8; 32] = h.finalize().into();
+        out
+    };
+    assert_ne!(naive, keyset.fingerprint);
+}

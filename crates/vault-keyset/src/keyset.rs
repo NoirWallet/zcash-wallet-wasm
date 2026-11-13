@@ -186,6 +186,22 @@ pub fn fvk_from_ufvk(ufvk: &str) -> Result<[u8; 96], KeysetError> {
         .ok_or(KeysetError::Encoding)
 }
 
+/// The fingerprint of an FVK: `SHA-256(domain ‖ network_tag ‖ fvk)`.
+///
+/// A device that holds only the FVK — which is the normal state after `KEYSET_SETUP`, since `qsk` is
+/// not kept — cannot use [`VaultKeyset::derive`] to obtain the fingerprint, because that needs the
+/// recovery key. Recovery does need it: the user compares the fingerprint shown on the recovering
+/// device against one shown by an independent device, which is the only way to detect a coordinator
+/// handing over a viewing key with a real `ak` and attacker-chosen `nk`/`rivk`.
+pub fn fingerprint_from_fvk(fvk: &[u8; 96], network: Network) -> [u8; 32] {
+    fingerprint_of(network, fvk)
+}
+
+/// `fingerprint_from_fvk` for callers that hold the encoded UFVK.
+pub fn fingerprint_from_ufvk(ufvk: &str, network: Network) -> Result<[u8; 32], KeysetError> {
+    Ok(fingerprint_from_fvk(&fvk_from_ufvk(ufvk)?, network))
+}
+
 /// Whether a UFVK was derived from this group key.
 ///
 /// This is the check a recovering device must run before trusting a viewing key handed to it by a

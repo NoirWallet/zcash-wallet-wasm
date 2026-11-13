@@ -7,6 +7,7 @@
 // Run:  make test-vault-wasm
 
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   Canary,
   Coordinator,
@@ -664,6 +665,34 @@ check("recovery: a 32-byte scalar rebuilds a working share", () => {
     threw = true;
   }
   assert(threw, "a malformed ufvk is an error, not a false answer");
+});
+
+check("recovery: the fingerprint can be recomputed without the qsk", () => {
+  // A device keeps the FVK but not the qsk, so `derive` is unavailable to it. The fingerprint still
+  // has to come out identical, because it is what the user compares across devices.
+  const ceremony = ceremonyFor(2, 2);
+  const ak = ceremony.finals[0].group_verifying_key();
+  const keyset = Keyset.derive(ak, Keyset.generate_qsk(), false, 0);
+  const [, ufvk, , , fingerprint] = keyset;
+
+  assert(hex(Keyset.fingerprint_from_fvk(keyset[0], false)) === hex(fingerprint), "from fvk");
+  assert(hex(Keyset.fingerprint_from_ufvk(ufvk, false)) === hex(fingerprint), "from ufvk");
+
+  // Network is part of the preimage.
+  assert(hex(Keyset.fingerprint_from_fvk(keyset[0], true)) !== hex(fingerprint));
+
+  // And it is not a bare SHA-256 of the FVK: the domain tag is in there, so an implementation that
+  // hashed the FVK alone would never match ours.
+  const naive = createHash("sha256").update(Buffer.from(keyset[0])).digest("hex");
+  assert(naive !== hex(fingerprint), "fingerprint must include the domain tag");
+
+  let threw = false;
+  try {
+    Keyset.fingerprint_from_fvk(new Uint8Array(95), false);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a short fvk is an error");
 });
 
 // --- a real PCZT, end to end -------------------------------------------
