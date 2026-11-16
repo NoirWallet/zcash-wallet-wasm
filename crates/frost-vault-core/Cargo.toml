@@ -9,6 +9,11 @@ publish = false
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[features]
+# Test-only hooks that let a handshake use a caller-supplied ephemeral key, so interop vectors can be
+# fixed instead of recorded. Off by default: production code must never choose its own ephemerals.
+test-vectors = []
+
 [dependencies]
 # FROST(Pallas, BLAKE2b-512) — the RedPallas ciphersuite Orchard/Ironwood spend auth uses.
 # 0.5.x is the last reddsa line that ships the `frost` feature; 0.6.1 (pulled by orchard 0.16)

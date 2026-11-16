@@ -814,6 +814,15 @@ impl ShareBackup {
         Ok(Self { inner })
     }
 
+    /// The 32-byte signing scalar, for a 24-word backup.
+    ///
+    /// This is all a BIP39 mnemonic can carry (256 bits); `from_scalar` rebuilds the rest from public
+    /// data. **Drop the reference as soon as the words are encoded** — do not keep it, return it, or log
+    /// it.
+    pub fn signing_scalar(&self) -> Result<js_sys::Uint8Array, JsError> {
+        Ok(to_js_bytes(&self.inner.signing_scalar().map_err(err)?))
+    }
+
     /// Load and validate against the expected group and slot.
     pub fn from_bytes(bytes: &[u8], group_verifying_key: &[u8], expected_slot: u8) -> Result<ShareBackup, JsError> {
         let group: [u8; 32] = group_verifying_key

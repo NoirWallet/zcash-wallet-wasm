@@ -319,3 +319,49 @@ fn rebuilding_from_the_wrong_scalar_is_caught_against_the_public_package() {
     );
     assert!(err.is_err());
 }
+
+#[test]
+fn the_signing_scalar_round_trips_through_a_24_word_backup() {
+    // What a mnemonic backup carries is exactly this scalar; `from_scalar` must rebuild an equivalent
+    // share from it plus public data.
+    let dkg = dkg(3, 2);
+    let ak = dkg.group_verifying_key().unwrap();
+    let by_slot = roster(&dkg);
+    let kp = &dkg.key_packages[&by_slot[&1]];
+
+    let backup = ShareBackup::new(kp, identity(1, b"device-b", b"vault-1")).expect("wrap");
+    let scalar = backup.signing_scalar().expect("scalar");
+
+    // Same bytes the key package holds.
+    assert_eq!(scalar, kp.signing_share().serialize().as_slice());
+
+    // And it is enough to rebuild the share.
+    let rebuilt = ShareBackup::from_scalar(&scalar, &ak, 1, 2, identity(1, b"device-c", b"vault-1"), Some(&dkg.pubkeys)).expect("rebuild");
+    assert_eq!(rebuilt.key_package().unwrap().signing_share(), kp.signing_share());
+    assert_eq!(rebuilt.signing_scalar().unwrap(), scalar);
+}
+
+#[test]
+fn a_scalar_from_another_vault_is_rejected_on_rebuild() {
+    // The scalar alone cannot be told apart from a wrong one; the public package is what catches it.
+    let mine = dkg(2, 2);
+    let other = dkg(2, 2);
+    let by_slot = roster(&other);
+    let foreign = ShareBackup::new(&other.key_packages[&by_slot[&0]], identity(0, b"d", b"v"))
+        .expect("wrap")
+        .signing_scalar()
+        .expect("scalar");
+
+    let err = ShareBackup::from_scalar(
+        &foreign,
+        &mine.group_verifying_key().unwrap(),
+        0,
+        2,
+        identity(0, b"d", b"v"),
+        Some(&mine.pubkeys),
+    )
+    .unwrap_err();
+    // Caught at the share, which is the more precise of the two checks: the group key matched the public
+    // package, the share did not.
+    assert_eq!(err, CustodyError::WrongIdentity);
+}

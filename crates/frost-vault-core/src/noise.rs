@@ -106,10 +106,18 @@ pub struct NoiseChannel {
 
 impl NoiseChannel {
     fn build(private: &[u8], prologue: &[u8], initiator: bool) -> Result<Self, NoiseError> {
+        Self::build_with_ephemeral(private, prologue, initiator, None)
+    }
+
+    fn build_with_ephemeral(private: &[u8], prologue: &[u8], initiator: bool, fixed_ephemeral: Option<&[u8]>) -> Result<Self, NoiseError> {
         if private.len() != 32 {
             return Err(NoiseError::Setup);
         }
         let builder = snow::Builder::new(params()?).local_private_key(private).prologue(prologue);
+        let builder = match fixed_ephemeral {
+            Some(ephemeral) => builder.fixed_ephemeral_key_for_testing_only(ephemeral),
+            None => builder,
+        };
         let handshake = if initiator { builder.build_initiator() } else { builder.build_responder() }.map_err(|_| NoiseError::Setup)?;
         Ok(Self {
             state: State::Handshake(Box::new(handshake)),
@@ -293,5 +301,21 @@ impl NoiseChannel {
             }
             State::Handshake(_) => Err(NoiseError::NotEstablished),
         }
+    }
+}
+
+/// Handshake constructors that accept a caller-supplied ephemeral key.
+///
+/// Only for producing interop vectors: with the ephemeral pinned, a handshake becomes a pure function of
+/// its inputs, so two implementations can be compared byte for byte. Production code must let `snow`
+/// generate ephemerals from the system RNG.
+#[cfg(feature = "test-vectors")]
+impl NoiseChannel {
+    pub fn initiator_with_ephemeral(static_private: &[u8], prologue: &[u8], ephemeral_private: &[u8]) -> Result<Self, NoiseError> {
+        Self::build_with_ephemeral(static_private, prologue, true, Some(ephemeral_private))
+    }
+
+    pub fn responder_with_ephemeral(static_private: &[u8], prologue: &[u8], ephemeral_private: &[u8]) -> Result<Self, NoiseError> {
+        Self::build_with_ephemeral(static_private, prologue, false, Some(ephemeral_private))
     }
 }

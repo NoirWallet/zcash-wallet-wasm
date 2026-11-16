@@ -343,6 +343,22 @@ impl ShareBackup {
         })
     }
 
+    /// The 32-byte signing scalar.
+    ///
+    /// This is what a 24-word backup encodes: a BIP39 mnemonic carries 256 bits, which fits the scalar and
+    /// nothing else — [`Self::from_scalar`] rebuilds the rest from public data. The encoding is
+    /// `SigningShare::serialize()`, the same canonical little-endian Pallas scalar the mobile client uses.
+    ///
+    /// **Handle with care.** These bytes cross into the host's memory. Encode them into words and drop the
+    /// reference immediately: do not keep them in a variable, send them back, or let them reach a log.
+    pub fn signing_scalar(&self) -> Result<[u8; 32], CustodyError> {
+        self.key_package()
+            .map(|kp| kp.signing_share().serialize())?
+            .as_slice()
+            .try_into()
+            .map_err(|_| CustodyError::InvalidKeyPackage)
+    }
+
     /// Extract the key package. Only for the holder of this record.
     pub fn key_package(&self) -> Result<KeyPackage, CustodyError> {
         KeyPackage::deserialize(&self.secrets.key_package).map_err(|_| CustodyError::InvalidKeyPackage)

@@ -659,6 +659,27 @@ check("recovery: a 32-byte scalar rebuilds a working share", () => {
   };
   assert(rebuiltWithWrongScalar(), "a wrong scalar must be refused against the public package");
 
+  // The scalar a 24-word backup encodes: 32 bytes, and enough to rebuild the share.
+  const backup = new ShareBackup(
+    ceremony.keyPackages[1],
+    1,
+    new Uint8Array([9]),
+    new Uint8Array([8]),
+    ak,
+  );
+  const scalar = backup.signing_scalar();
+  assert(scalar.length === 32, `scalar is ${scalar.length} bytes`);
+  const fromScalar = ShareBackup.from_scalar(
+    scalar,
+    ak,
+    1,
+    2,
+    new Uint8Array([9]),
+    new Uint8Array([8]),
+    publicKeyPackage,
+  );
+  assert(hex(fromScalar.signing_scalar()) === hex(scalar), "scalar round-trips");
+
   // And the UFVK a recovering device receives can be checked against its share's ak.
   const qsk = Keyset.generate_qsk();
   const keyset = Keyset.derive(ak, qsk, false, 0);
