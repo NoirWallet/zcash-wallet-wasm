@@ -485,7 +485,10 @@ fn take_note(bytes: &[u8], pos: &mut usize) -> Result<String, PayloadError> {
     Ok(note.to_string())
 }
 
-/// `code:u8 || len:u16 || utf8 note`
+/// `code:u8 || len:u16 (little-endian) || utf8 note`
+///
+/// The length is little-endian here while the roster's `field()` prefixes are big-endian. That is not a
+/// mistake to fix: both are frozen encodings, and this one is what the signing payloads already ship.
 pub fn encode_reject(code: RejectCode, note: &str) -> Result<Vec<u8>, PayloadError> {
     let mut out = Vec::with_capacity(3 + note.len());
     out.push(code.to_byte());
@@ -504,7 +507,10 @@ pub fn decode_reject(payload: &[u8]) -> Result<(RejectCode, String), PayloadErro
     Ok((code, note))
 }
 
-/// `status:u8 || txid:32 || len:u16 || utf8 note`, with the transaction id present only on success.
+/// `status:u8 || txid(32) || len:u16 (little-endian) || utf8 note`
+///
+/// The transaction id field is always 32 bytes; on failure it is all zero and decoding returns `None` for
+/// it. "Present" is therefore a property of the status, not of the length.
 pub fn encode_result(status: ResultStatus, txid: Option<[u8; 32]>, note: &str) -> Result<Vec<u8>, PayloadError> {
     match (status, txid.is_some()) {
         (ResultStatus::Broadcasted, false) | (ResultStatus::Failed, true) => return Err(PayloadError::ResultShape),

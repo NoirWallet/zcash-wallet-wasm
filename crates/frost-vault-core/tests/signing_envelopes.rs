@@ -34,6 +34,24 @@ fn a_reject_round_trips_and_keeps_the_agreed_code_bytes() {
 }
 
 #[test]
+fn the_note_length_is_little_endian() {
+    // The roster hash uses big-endian length prefixes and these payloads use little-endian ones. Both are
+    // frozen, so the difference is permanent — which means a reader has to be able to see which is which
+    // without reading `put_note`. This test is that statement.
+    let bytes = encode_sign_reject(SESSION, PHONE, COORDINATOR_SLOT, 1, RejectCode::Malformed, "ab").expect("encode");
+    // header(29) ‖ code(1) ‖ len(2, little-endian) ‖ "ab"
+    assert_eq!(&bytes[HEADER_LEN..], &[3u8, 2, 0, b'a', b'b']);
+
+    // A result keeps the 32-byte transaction id field even when there is none: the status decides whether
+    // it means anything, so the note length is always at offset 33.
+    let bytes = encode_sign_result(SESSION, COORDINATOR_SLOT, PHONE, 1, ResultStatus::Failed, None, "xyz").expect("encode");
+    let payload = &bytes[HEADER_LEN..];
+    assert_eq!(payload[0], 1, "status");
+    assert_eq!(&payload[1..33], &[0u8; 32], "absent txid is all zero");
+    assert_eq!(&payload[33..], &[3u8, 0, b'x', b'y', b'z'], "len is little-endian");
+}
+
+#[test]
 fn a_result_round_trips_with_and_without_a_txid() {
     let bytes = encode_sign_result(SESSION, COORDINATOR_SLOT, PHONE, 2, ResultStatus::Broadcasted, Some(TXID), "").expect("encode");
     let (envelope, status, txid, _) = decode_sign_result(&bytes).expect("decode");
