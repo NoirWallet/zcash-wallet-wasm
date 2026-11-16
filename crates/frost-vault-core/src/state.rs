@@ -10,6 +10,21 @@
 
 /// DKG lifecycle: `CREATED → PAIRING → ROSTER_LOCKED → DKG_R1 → R1_VERIFIED → DKG_R2 →
 /// FINALIZED → KEYSET_VERIFIED → ACTIVATED`, any failure to `ABORTED`.
+///
+/// **Round 1 may be generated during `PAIRING`.** The chain above is the order *after* the roster is
+/// locked, not a precondition on when this device's own round-1 contribution is created: FROST round 1
+/// depends only on `(N, t, my identifier)` and references no other participant, so creating it early
+/// cannot weaken anything. What the ceremony actually needs is that no participant *consumes* another's
+/// round-1 broadcast, and nobody sends a round-2 secret, before the roster is locked and the round-1
+/// set has been checked for consistency (§5.5/§5.6).
+///
+/// That difference is what makes the merged QR flow of §6.2/§6.3 possible: a pairing message can carry
+/// `Pair + Round 1` because generating it early is fine, while the identity binding still comes from
+/// SAS and the roster hash once the roster locks.
+///
+/// So "has round 1 been generated" is deliberately **not** a phase: it is local state that no other
+/// device can observe. Use [`DkgPhase::may_start_round1`] before generating and
+/// [`DkgPhase::may_accept_peer_round1`] before consuming a peer's broadcast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DkgPhase {
     Created,
@@ -44,6 +59,31 @@ impl DkgPhase {
     /// Whether a vault in this phase may hold funds. Only `Activated` may.
     pub fn is_usable(self) -> bool {
         matches!(self, DkgPhase::Activated)
+    }
+
+    /// Whether this device may generate its own round-1 contribution now.
+    ///
+    /// True from `Pairing` onwards: round 1 needs only `(N, t, my slot)`. Generating it early does not
+    /// advance the phase — the phase still moves to `RosterLocked` only when the roster is actually
+    /// locked.
+    pub fn may_start_round1(self) -> bool {
+        matches!(self, DkgPhase::Pairing | DkgPhase::RosterLocked | DkgPhase::DkgR1)
+    }
+
+    /// Whether a *peer's* round-1 broadcast may be consumed now.
+    ///
+    /// This is the invariant the merged flow must not break: consuming peers' broadcasts before the
+    /// roster is locked would let a participant act on a set it has not agreed to.
+    pub fn may_accept_peer_round1(self) -> bool {
+        matches!(self, DkgPhase::RosterLocked | DkgPhase::DkgR1 | DkgPhase::R1Verified)
+    }
+
+    /// Whether a round-2 secret may be produced or forwarded now.
+    ///
+    /// Requires the roster to be locked *and* the round-1 set to be verified, so it is reachable only
+    /// after [`Self::may_accept_peer_round1`] has been honoured.
+    pub fn may_send_round2(self) -> bool {
+        matches!(self, DkgPhase::R1Verified | DkgPhase::DkgR2)
     }
 }
 
@@ -211,6 +251,43 @@ mod tests {
         assert_eq!(phase, DkgPhase::Activated);
         assert!(phase.is_usable());
         assert_eq!(phase.advance(), Err(TransitionError::Terminal));
+    }
+
+    #[test]
+    fn round_one_may_be_generated_before_the_roster_locks() {
+        // The merged QR flow: a pairing message carries the device's round-1 broadcast, so round 1
+        // exists while the ceremony is still pairing.
+        let mut phase = DkgPhase::Created;
+        assert!(!phase.may_start_round1(), "not before pairing");
+        phase.advance().unwrap(); // Created -> Pairing
+        assert_eq!(phase, DkgPhase::Pairing);
+        assert!(phase.may_start_round1(), "round 1 may be generated during pairing");
+
+        // But a peer's broadcast may not be consumed until the roster is locked.
+        assert!(!phase.may_accept_peer_round1());
+        assert!(!phase.may_send_round2(), "no round-2 secret before the roster locks");
+
+        phase.advance().unwrap(); // Pairing -> RosterLocked
+        assert!(phase.may_accept_peer_round1(), "peers' broadcasts may be consumed now");
+        assert!(!phase.may_send_round2(), "round-1 set still has to be verified");
+
+        phase.advance().unwrap(); // RosterLocked -> DkgR1
+        phase.advance().unwrap(); // DkgR1 -> R1Verified
+        assert!(phase.may_send_round2());
+    }
+
+    #[test]
+    fn round_two_is_unreachable_while_pairing() {
+        for phase in [DkgPhase::Created, DkgPhase::Pairing] {
+            assert!(!phase.may_send_round2(), "{phase:?}");
+            assert!(!phase.may_accept_peer_round1(), "{phase:?}");
+        }
+        // And once aborted, nothing is allowed.
+        let mut aborted = DkgPhase::Pairing;
+        aborted.abort();
+        assert!(!aborted.may_start_round1());
+        assert!(!aborted.may_accept_peer_round1());
+        assert!(!aborted.may_send_round2());
     }
 
     #[test]
