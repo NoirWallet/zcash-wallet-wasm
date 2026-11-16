@@ -34,7 +34,10 @@ pub mod threshold;
 
 pub use custody::{Recovery, SessionGuard, SessionProgress, ShareBackup, ShareIdentity};
 pub use noise::{NoiseChannel, NoiseError};
-pub use protocol::{RejectCode, ResultStatus};
+pub use protocol::{
+    decode_sign_reject, decode_sign_result, encode_sign_reject, encode_sign_result, read_signing_envelope, signing_envelope, RejectCode, ResultStatus,
+    SigningError,
+};
 pub use roster::{RosterError, RosterManifest};
 pub use session::{CoordinatorSession, SessionConfig, SessionError, SignerSession};
 pub use threshold::{DkgOutput, Suite};

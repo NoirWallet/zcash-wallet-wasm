@@ -830,6 +830,76 @@ check("seal: a different round-1 transcript cannot be opened", () => {
   // contract that matters is that the prologue itself is a function of the transcript.
 });
 
+check("signing envelopes: reject and result round-trip with the agreed codes", () => {
+  const sid = new Uint8Array(16).fill(0x5a);
+  const phone = 2;
+  const coordinator = EnvelopeCodec.coordinator_slot;
+
+  // The reject codes are the phone's mapping; a renumbering on either side is a silent misread.
+  const codes = { userDeclined: 1, verificationFailed: 2, malformed: 3, expired: 4 };
+  for (const [name, byte] of Object.entries(codes)) {
+    assert(EnvelopeCodec.rejectCode(name) === byte, `reject code ${name}`);
+    const bytes = EnvelopeCodec.buildSignReject(sid, phone, coordinator, 1, byte, "");
+    const [sender, seq, sessionId, code, note] = EnvelopeCodec.readSignReject(bytes);
+    assert(sender === phone && seq === 1 && code === byte && note === "", `round-trip ${name}`);
+    assert(sessionId.length === 16, "session id survives");
+    // A reject carries no share but is still a round-3 message.
+    assert(EnvelopeCodec.decode(bytes)[1] === 3, "reject is round 3");
+  }
+
+  // The round cannot be passed in: it comes from the message type.
+  for (const [name, round] of [
+    ["signInit", 1],
+    ["signCommitments", 1],
+    ["signPayload", 3],
+    ["signShare", 3],
+    ["signReject", 3],
+    ["signResult", 3],
+  ]) {
+    const bytes = EnvelopeCodec.buildSigning(EnvelopeCodec.msg_type(name), phone, coordinator, 1, sid, new Uint8Array());
+    assert(EnvelopeCodec.decode(bytes)[1] === round, `${name} must be round ${round}`);
+  }
+
+  // A hand-set round is refused on read.
+  const fabricated = EnvelopeCodec.build(EnvelopeCodec.msg_type("signShare"), 4, phone, coordinator, 1, sid, new Uint8Array([1]));
+  let threw = false;
+  try {
+    EnvelopeCodec.readSignReject(fabricated);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a wrong round must be refused");
+
+  // Result: broadcast needs a txid, failure must not carry one.
+  const txid = new Uint8Array(32).fill(0x9c);
+  const ok = EnvelopeCodec.buildSignResult(sid, coordinator, phone, 2, 0, txid, "");
+  const [sender2, seq2, , status, gotTxid, note2] = EnvelopeCodec.readSignResult(ok);
+  assert(sender2 === coordinator && seq2 === 2 && status === 0 && note2 === "", "broadcast round-trip");
+  assert(gotTxid.length === 32 && gotTxid[0] === 0x9c, "txid survives");
+
+  const failed = EnvelopeCodec.buildSignResult(sid, coordinator, phone, 3, 1, undefined, "aggregation failed");
+  const [, , , status2, txid2, note3] = EnvelopeCodec.readSignResult(failed);
+  assert(status2 === 1 && (txid2 === null || txid2 === undefined) && note3 === "aggregation failed", "failure round-trip");
+
+  threw = false;
+  try {
+    EnvelopeCodec.buildSignResult(sid, coordinator, phone, 1, 0, undefined, "");
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a broadcast result without a txid is not representable");
+
+  // A reject read as a result must not be accepted just because both are round 3.
+  const reject = EnvelopeCodec.buildSignReject(sid, phone, coordinator, 1, 1, "");
+  threw = false;
+  try {
+    EnvelopeCodec.readSignResult(reject);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "the wrong reader must refuse a reject");
+});
+
 check("noise: three-message XX handshake, then transport", () => {
   const prologue = new TextEncoder().encode("noir/pair/v1");
   // Fixed static keys so a failure is reproducible; the ephemerals are generated inside the wasm.

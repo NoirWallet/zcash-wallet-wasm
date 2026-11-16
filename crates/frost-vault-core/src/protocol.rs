@@ -336,6 +336,15 @@ impl MsgType {
     /// Round 1 is the commitment round; round 2 is the coordinator building the PCZT locally and is not
     /// a message; round 3 is the signing round. A message carrying a different round is refused, so the
     /// field is a checked part of the protocol rather than a label.
+    /// Whether this type belongs to a signing session.
+    ///
+    /// Signing messages carry the session's per-round payloads; the DKG types are shaped differently and
+    /// go through their own helpers.
+    pub const fn is_signing(self) -> bool {
+        use MsgType::*;
+        matches!(self, SignInit | SignCommitments | SignPayload | SignShare | SignReject | SignResult)
+    }
+
     pub const fn round(self) -> u8 {
         use MsgType::*;
         match self {
@@ -562,6 +571,117 @@ impl core::fmt::Display for BatchError {
 impl std::error::Error for BatchError {}
 
 /// `count:u8 || count * (slot:u8 || len:u16 || bytes)`, slots ascending.
+/// A signing-session message could not be built or read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SigningError {
+    Envelope(EnvelopeError),
+    Payload(PayloadError),
+    /// The type does not belong to a signing session, so these helpers do not apply.
+    NotSigning(MsgType),
+    /// The envelope carries a round other than the one its type is fixed to.
+    WrongRound {
+        msg_type: MsgType,
+        expected: u8,
+        got: u8,
+    },
+}
+
+impl std::fmt::Display for SigningError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Envelope(e) => write!(f, "envelope: {e}"),
+            Self::Payload(e) => write!(f, "payload: {e}"),
+            Self::NotSigning(msg_type) => write!(f, "{msg_type:?} is not a signing message"),
+            Self::WrongRound { msg_type, expected, got } => write!(f, "{msg_type:?} is fixed to round {expected}, got {got}"),
+        }
+    }
+}
+
+impl std::error::Error for SigningError {}
+
+impl From<EnvelopeError> for SigningError {
+    fn from(e: EnvelopeError) -> Self {
+        Self::Envelope(e)
+    }
+}
+
+impl From<PayloadError> for SigningError {
+    fn from(e: PayloadError) -> Self {
+        Self::Payload(e)
+    }
+}
+
+/// Build an envelope for a signing-session message.
+///
+/// The round is taken from the message type rather than passed in. That is the whole point of this
+/// constructor: the round table is a cross-implementation contract, so a caller cannot get it wrong by
+/// forgetting to set a field — the value is derived from the only thing that determines it.
+pub fn signing_envelope(msg_type: MsgType, session_id: [u8; 16], sender: u8, recipient: u8, sequence: u32, payload: Vec<u8>) -> Result<Vec<u8>, SigningError> {
+    if !msg_type.is_signing() {
+        return Err(SigningError::NotSigning(msg_type));
+    }
+    Ok(Envelope::new(msg_type, msg_type.round(), sender, recipient, sequence, session_id, payload)?.encode())
+}
+
+/// Read a signing-session envelope, refusing a type outside the signing set and a round that disagrees
+/// with its type.
+///
+/// The sender, session and sequence are *not* checked here: those belong to the caller's session state,
+/// which is the only place that knows what it has already accepted.
+pub fn read_signing_envelope(bytes: &[u8]) -> Result<Envelope, SigningError> {
+    let envelope = Envelope::decode(bytes)?;
+    if !envelope.msg_type.is_signing() {
+        return Err(SigningError::NotSigning(envelope.msg_type));
+    }
+    let expected = envelope.msg_type.round();
+    if envelope.round != expected {
+        return Err(SigningError::WrongRound {
+            msg_type: envelope.msg_type,
+            expected,
+            got: envelope.round,
+        });
+    }
+    Ok(envelope)
+}
+
+/// Build a `SIGN_REJECT` envelope.
+pub fn encode_sign_reject(session_id: [u8; 16], sender: u8, recipient: u8, sequence: u32, code: RejectCode, note: &str) -> Result<Vec<u8>, SigningError> {
+    signing_envelope(MsgType::SignReject, session_id, sender, recipient, sequence, encode_reject(code, note)?)
+}
+
+/// Read a `SIGN_REJECT` envelope and its payload.
+pub fn decode_sign_reject(bytes: &[u8]) -> Result<(Envelope, RejectCode, String), SigningError> {
+    let envelope = read_signing_envelope(bytes)?;
+    if envelope.msg_type != MsgType::SignReject {
+        return Err(SigningError::NotSigning(envelope.msg_type));
+    }
+    let (code, note) = decode_reject(&envelope.payload)?;
+    Ok((envelope, code, note))
+}
+
+/// Build a `SIGN_RESULT` envelope.
+pub fn encode_sign_result(
+    session_id: [u8; 16],
+    sender: u8,
+    recipient: u8,
+    sequence: u32,
+    status: ResultStatus,
+    txid: Option<[u8; 32]>,
+    note: &str,
+) -> Result<Vec<u8>, SigningError> {
+    signing_envelope(MsgType::SignResult, session_id, sender, recipient, sequence, encode_result(status, txid, note)?)
+}
+
+/// Read a `SIGN_RESULT` envelope and its payload.
+pub fn decode_sign_result(bytes: &[u8]) -> Result<(Envelope, ResultStatus, Option<[u8; 32]>, String), SigningError> {
+    let envelope = read_signing_envelope(bytes)?;
+    if envelope.msg_type != MsgType::SignResult {
+        return Err(SigningError::NotSigning(envelope.msg_type));
+    }
+    let (status, txid, note) = decode_result(&envelope.payload)?;
+    Ok((envelope, status, txid, note))
+}
+
 pub fn pack_batch(messages: &std::collections::BTreeMap<u8, Vec<u8>>) -> Result<Vec<u8>, BatchError> {
     if messages.len() > MAX_BATCH {
         return Err(BatchError::TooMany(messages.len()));
