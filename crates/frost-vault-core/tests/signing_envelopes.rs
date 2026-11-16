@@ -182,6 +182,17 @@ fn a_relayed_envelope_is_checked_against_the_ceremony_and_the_sender() {
         Err(SigningError::WrongSender { expected: 1, got: PHONE })
     );
 
+    // The wrong message type is its own error, not "this is not a signing message": a relayed DKG message
+    // that turns out to be something else wants a different report from a signing helper used in the wrong
+    // place.
+    assert_eq!(
+        check_relayed(&bytes, SESSION, PHONE, MsgType::SignShare),
+        Err(SigningError::WrongType {
+            expected: MsgType::SignShare,
+            got: MsgType::SignReject
+        })
+    );
+
     // A round that does not belong to the type.
     let fabricated = Envelope::new(MsgType::SignShare, 1, PHONE, COORDINATOR_SLOT, 1, SESSION, vec![7])
         .expect("envelope")

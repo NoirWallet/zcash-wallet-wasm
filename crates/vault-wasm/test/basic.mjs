@@ -323,6 +323,7 @@ check("qsk: generated, canonical, and it drives the keyset", () => {
 
 function runCeremony(participants, threshold) {
   const ds = [];
+
   const dkgSession = new Uint8Array(16).fill(0x5a);
   for (let slot = 0; slot < participants; slot += 1) ds.push(new Dkg(participants, threshold, slot, dkgSession));
 
@@ -477,8 +478,10 @@ check("dkg over envelopes: the relay binds, forwards, and rejects replays", () =
   const threshold = 2;
   const sid = EnvelopeCodec.new_session_id();
   const ds = [];
-  const dkgSession = new Uint8Array(16).fill(0x5a);
-  for (let slot = 0; slot < participants; slot += 1) ds.push(new Dkg(participants, threshold, slot, dkgSession));
+  // The same 16 bytes everywhere: the ceremony's session id is what round 2 checks, so `Dkg` and the relay
+  // must be given the same value. Passing two different ids here would make every `part2` fail with
+  // WrongSession, and copying that pattern into production is the failure this comment exists to prevent.
+  for (let slot = 0; slot < participants; slot += 1) ds.push(new Dkg(participants, threshold, slot, sid));
   const relay = new DkgRelay(sid, participants);
 
   // Round 1: each device sends an envelope to the relay; the relay validates and collects.

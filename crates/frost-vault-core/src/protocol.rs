@@ -580,6 +580,14 @@ pub enum SigningError {
     Payload(PayloadError),
     /// The type does not belong to a signing session, so these helpers do not apply.
     NotSigning(MsgType),
+    /// The envelope carries a different message type than the caller expected.
+    ///
+    /// Separate from [`Self::NotSigning`]: a relayed `DKG_R1` that turns out to be something else is a
+    /// type mismatch, not a signing message used in the wrong place, and the two want different reports.
+    WrongType {
+        expected: MsgType,
+        got: MsgType,
+    },
     /// The envelope names another ceremony.
     WrongSession,
     /// The envelope names another sender.
@@ -601,6 +609,9 @@ impl std::fmt::Display for SigningError {
             Self::Envelope(e) => write!(f, "envelope: {e}"),
             Self::Payload(e) => write!(f, "payload: {e}"),
             Self::NotSigning(msg_type) => write!(f, "{msg_type:?} is not a signing message"),
+            Self::WrongType { expected, got } => {
+                write!(f, "the envelope is {got:?}, expected {expected:?}")
+            }
             Self::WrongSession => f.write_str("the envelope belongs to another ceremony"),
             Self::WrongSender { expected, got } => {
                 write!(f, "the envelope is from slot {got}, expected {expected}")
@@ -676,7 +687,10 @@ pub fn check_relayed(bytes: &[u8], session_id: [u8; 16], sender: u8, msg_type: M
         });
     }
     if envelope.msg_type != msg_type {
-        return Err(SigningError::NotSigning(envelope.msg_type));
+        return Err(SigningError::WrongType {
+            expected: msg_type,
+            got: envelope.msg_type,
+        });
     }
     let expected = msg_type.round();
     if envelope.round != expected {
