@@ -253,11 +253,21 @@ check("envelope: defined and reserved message types are kept apart", () => {
   assert(EnvelopeCodec.msg_type("signShare") === 0x23);
   assert(EnvelopeCodec.msg_type("dkgR1") === 0x10);
   assert(EnvelopeCodec.msg_type("dkgR2Batch") === 0x14);
+  assert(EnvelopeCodec.msg_type("signReject") === 0x24);
+  assert(EnvelopeCodec.msg_type("signResult") === 0x25);
+
+  // The round each type belongs to is part of the protocol: a mismatch is refused by both sides.
+  assert(EnvelopeCodec.round_of("signInit") === 1);
+  assert(EnvelopeCodec.round_of("signCommitments") === 1);
+  assert(EnvelopeCodec.round_of("signPayload") === 3);
+  assert(EnvelopeCodec.round_of("signShare") === 3);
+  assert(EnvelopeCodec.round_of("signReject") === 3);
+  assert(EnvelopeCodec.round_of("signResult") === 3);
 
   const defined = EnvelopeCodec.defined_msg_types();
   const reserved = EnvelopeCodec.reserved_msg_types();
-  assert(defined.length === 8, `defined: ${defined.length}`);
-  assert(reserved.length === 11, `reserved: ${reserved.length}`);
+  assert(defined.length === 10, `defined: ${defined.length}`);
+  assert(reserved.length === 9, `reserved: ${reserved.length}`);
 
   // A reserved type has a number but no payload: asking for it as a defined type is an error, so an
   // undefined message cannot become a contract by accident.
@@ -881,6 +891,88 @@ check("noise: a mismatched prologue does not establish a channel", () => {
     failed = true;
   }
   assert(failed, "different prologues must not produce a channel");
+});
+
+check("session: a signer can refuse, and the coordinator reports the outcome", () => {
+  const ceremony = ceremonyFor(2, 2);
+  const sessionId = EnvelopeCodec.new_session_id();
+  const signers = [0, 1];
+  const coordinator = new Coordinator(sessionId, 2, 2, signers, 1, ceremony.publicPackage);
+  const handles = signers.map((slot) => new Signer(sessionId, slot, 2, ceremony.keyPackages[slot]));
+
+  for (const [slot, env] of coordinator.init_all()) {
+    coordinator.accept_commitments(handles[signers.indexOf(slot)].init(env));
+  }
+  const sighash = new Uint8Array(32).fill(0x11);
+  const alphas = new Uint8Array(32);
+  alphas[0] = 0x31;
+  alphas[31] = 0x01;
+  coordinator.prepare_payload(sighash, alphas);
+
+  const payloads = coordinator.payloads();
+  // Slot 0 signs; slot 1 refuses.
+  for (const [slot, env] of payloads) {
+    if (slot === 0) {
+      const h = handles[0];
+      h.payload(env);
+      h.approve();
+      coordinator.accept_share(h.share());
+    } else {
+      const h = handles[1];
+      h.payload(env);
+      const reject = h.reject(1, "user said no"); // 1 = user declined
+      assert(reject.length > 0);
+      const [sender, code, note] = coordinator.accept_reject(reject);
+      assert(sender === 1, `sender ${sender}`);
+      assert(code === 1, `code ${code}`);
+      assert(note === "user said no", note);
+    }
+  }
+  // One signer out of a 2-of-2 means the session cannot aggregate.
+  assert(coordinator.phase() === "Aborted", coordinator.phase());
+  let threw = false;
+  try {
+    coordinator.aggregate();
+  } catch {
+    threw = true;
+  }
+  assert(threw, "an aborted session must not aggregate");
+});
+
+check("session: the coordinator reports the outcome to every signer", () => {
+  const ceremony = ceremonyFor(3, 2);
+  const sessionId = EnvelopeCodec.new_session_id();
+  const signers = [0, 1];
+  const coordinator = new Coordinator(sessionId, 3, 2, signers, 1, ceremony.publicPackage);
+  const handles = signers.map((slot) => new Signer(sessionId, slot, 3, ceremony.keyPackages[slot]));
+
+  for (const [slot, env] of coordinator.init_all()) {
+    coordinator.accept_commitments(handles[signers.indexOf(slot)].init(env));
+  }
+  const sighash = new Uint8Array(32).fill(0x11);
+  const alphas = new Uint8Array(32);
+  alphas[0] = 0x41;
+  alphas[31] = 0x01;
+  coordinator.prepare_payload(sighash, alphas);
+  for (const [slot, env] of coordinator.payloads()) {
+    const h = handles[signers.indexOf(slot)];
+    h.payload(env);
+    h.approve();
+    coordinator.accept_share(h.share());
+  }
+  coordinator.aggregate();
+
+  const txid = new Uint8Array(32).fill(0x7a);
+  const results = coordinator.report_result(0, txid, "broadcasted");
+  assert(results.length === 2, `results: ${results.length}`);
+  for (const [slot, env] of results) {
+    const h = handles[signers.indexOf(slot)];
+    const [status, gotTxid, note] = h.on_result(env);
+    assert(status === 0, `status ${status}`);
+    assert(hex(gotTxid) === hex(txid), "txid must round-trip");
+    assert(note === "broadcasted", note);
+    assert(h.phase() === "Broadcasted", h.phase());
+  }
 });
 
 // --- a real PCZT, end to end -------------------------------------------

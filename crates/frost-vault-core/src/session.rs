@@ -22,7 +22,9 @@ use std::collections::BTreeMap;
 
 use rand_core::{CryptoRng, RngCore};
 
-use crate::protocol::{Envelope, EnvelopeError, MsgType, COORDINATOR_SLOT};
+use crate::protocol::{
+    decode_reject, decode_result, encode_reject, encode_result, Envelope, EnvelopeError, MsgType, RejectCode, ResultStatus, COORDINATOR_SLOT,
+};
 use crate::state::{NonceState, SignPhase, TransitionError};
 use crate::threshold::{self, commit, Identifier, KeyPackage, PublicKeyPackage, SignatureShare, SigningCommitments, SigningNonces};
 
@@ -49,6 +51,8 @@ pub enum SessionError {
     WrongRecipient(u8),
     /// Message type is not the one this phase expects.
     WrongPhase { expected: MsgType, got: MsgType },
+    /// The envelope's `round` does not belong to this message type.
+    WrongRound { msg_type: MsgType, expected: u8, got: u8 },
     /// The session is not in a phase this operation may run in.
     WrongStage(SignPhase),
     /// Sender is not a selected signer, or this device is not in the roster.
@@ -79,6 +83,7 @@ impl core::fmt::Display for SessionError {
             Self::WrongSession => f.write_str("message belongs to another session"),
             Self::WrongRecipient(r) => write!(f, "message is addressed to slot 0x{r:02x}"),
             Self::WrongPhase { expected, got } => write!(f, "expected {expected:?}, got {got:?}"),
+            Self::WrongRound { msg_type, expected, got } => write!(f, "{msg_type:?} belongs to round {expected}, got {got}"),
             Self::WrongStage(p) => write!(f, "operation not allowed in phase {p:?}"),
             Self::UnknownSender(i) => write!(f, "slot {i} is not a selected signer"),
             Self::Duplicate(i) => write!(f, "slot {i} already sent for this step"),
@@ -352,6 +357,13 @@ impl CoordinatorSession {
         if env.msg_type != expected {
             return Err(SessionError::WrongPhase { expected, got: env.msg_type });
         }
+        if env.round != expected.round() {
+            return Err(SessionError::WrongRound {
+                msg_type: expected,
+                expected: expected.round(),
+                got: env.round,
+            });
+        }
         if !self.cfg.signers.contains(&env.sender) {
             return Err(SessionError::UnknownSender(env.sender));
         }
@@ -591,6 +603,13 @@ impl SignerSession {
         if env.msg_type != expected {
             return Err(SessionError::WrongPhase { expected, got: env.msg_type });
         }
+        if env.round != expected.round() {
+            return Err(SessionError::WrongRound {
+                msg_type: expected,
+                expected: expected.round(),
+                got: env.round,
+            });
+        }
         if let Some(last) = self.last_seq {
             if env.sequence <= last {
                 return Err(SessionError::SequenceRewind {
@@ -749,5 +768,100 @@ impl SignerSession {
             self.session_id,
             payload,
         )?)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Refusal and outcome
+//
+// These live in their own impl blocks so the happy path above stays readable. Both are terminal for the
+// session: a signer that refuses, or a coordinator whose broadcast failed, must not be mistaken for a
+// session that is still making progress.
+// ---------------------------------------------------------------------------
+
+impl SignerSession {
+    /// Report why this signer will not produce a share, and end the session.
+    pub fn reject(&mut self, code: RejectCode, note: &str) -> Result<Envelope, SessionError> {
+        // Refusal is only meaningful before a share exists: once this device has signed, a refusal would
+        // be describing a session it has already contributed to.
+        if !matches!(
+            self.phase,
+            SignPhase::InitSent | SignPhase::CommitmentsCollected | SignPhase::PcztReady | SignPhase::Verifying | SignPhase::Approved
+        ) {
+            return Err(SessionError::WrongStage(self.phase));
+        }
+        let payload = encode_reject(code, note).map_err(|_| SessionError::Malformed)?;
+        let seq = self.next_seq();
+        let envelope = Envelope::new(
+            MsgType::SignReject,
+            MsgType::SignReject.round(),
+            self.my_slot,
+            COORDINATOR_SLOT,
+            seq,
+            self.session_id,
+            payload,
+        )?;
+        self.phase = SignPhase::Rejected;
+        Ok(envelope)
+    }
+
+    /// Accept the coordinator's outcome report.
+    ///
+    /// Only valid after this signer has returned its shares: a result before that would be describing a
+    /// transaction this device has not signed.
+    pub fn on_result(&mut self, env: &Envelope) -> Result<(ResultStatus, Option<[u8; 32]>, String), SessionError> {
+        self.accept(env, MsgType::SignResult)?;
+        if self.phase != SignPhase::SharesCollected {
+            return Err(SessionError::WrongStage(self.phase));
+        }
+        let (status, txid, note) = decode_result(&env.payload).map_err(|_| SessionError::Malformed)?;
+        match status {
+            ResultStatus::Broadcasted => {
+                self.phase.advance()?; // SharesCollected -> Aggregated
+                self.phase.advance()?; // Aggregated -> Broadcasted
+            }
+            ResultStatus::Failed => self.phase = SignPhase::Aborted,
+        }
+        Ok((status, txid, note))
+    }
+}
+
+impl CoordinatorSession {
+    /// Accept a refusal from one signer. The session ends: with one signer out, the threshold no longer
+    /// holds for this selection, and pretending otherwise would invite a partial aggregate.
+    pub fn on_reject(&mut self, env: &Envelope) -> Result<(u8, RejectCode, String), SessionError> {
+        let sender = self.accept(env, MsgType::SignReject)?;
+        let (code, note) = decode_reject(&env.payload).map_err(|_| SessionError::Malformed)?;
+        self.phase = SignPhase::Aborted;
+        Ok((sender, code, note))
+    }
+
+    /// Report the outcome to every signer, after aggregation.
+    pub fn result(&mut self, status: ResultStatus, txid: Option<[u8; 32]>, note: &str) -> Result<Vec<Envelope>, SessionError> {
+        if self.phase != SignPhase::Aggregated {
+            return Err(SessionError::WrongStage(self.phase));
+        }
+        let payload = encode_result(status, txid, note).map_err(|_| SessionError::Malformed)?;
+        let mut out = Vec::with_capacity(self.cfg.signers.len());
+        for slot in self.cfg.signers.clone() {
+            let seq = self.next_seq();
+            out.push(Envelope::new(
+                MsgType::SignResult,
+                MsgType::SignResult.round(),
+                COORDINATOR_SLOT,
+                slot,
+                seq,
+                self.cfg.session_id,
+                payload.clone(),
+            )?);
+        }
+        match status {
+            // Aggregated -> Broadcasted.
+            ResultStatus::Broadcasted => {
+                self.phase.advance()?;
+            }
+            ResultStatus::Failed => self.phase = SignPhase::Aborted,
+        }
+        Ok(out)
     }
 }

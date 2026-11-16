@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use frost_vault_core::protocol::{Envelope, MsgType};
+use frost_vault_core::protocol::{Envelope, MsgType, RejectCode, ResultStatus};
 use frost_vault_core::session::{CoordinatorSession, SessionConfig, SessionError, SignerSession, SESSION_ID_LEN};
 use frost_vault_core::state::{NonceState, SignPhase};
 use frost_vault_core::threshold::{randomized_verifying_key, run_dkg, verify_with_group_key_and_alpha, Identifier};
@@ -397,4 +397,149 @@ fn truncated_payload_is_refused() {
     env.payload.truncate(env.payload.len() - 4);
     let err = h.signers.get_mut(&0).unwrap().on_payload(&env).unwrap_err();
     assert_eq!(err, SessionError::Malformed);
+}
+
+// ---------------------------------------------------------------------------
+// Refusal, outcome, and the round field
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_round_that_does_not_belong_to_the_message_is_refused() {
+    // The round is part of the protocol, not a label: a commitments message claiming round 3 must not be
+    // accepted as if it were round 1.
+    let mut h = Harness::new(2, 2, vec![0, 1], 1);
+    let mut rng = OsRng;
+    let inits = h.coordinator.init().unwrap();
+    let env = &inits[0];
+    let slot = env.recipient;
+    let commitments = h
+        .signers
+        .get_mut(&slot)
+        .unwrap()
+        .on_init(env, &h.dkg.key_packages[&h.identifiers[&slot]], &mut rng)
+        .unwrap();
+
+    let mut wrong = commitments.clone();
+    wrong.round = 3;
+    let err = h.coordinator.on_commitments(&wrong).unwrap_err();
+    assert!(matches!(err, SessionError::WrongRound { expected: 1, got: 3, .. }), "{err:?}");
+}
+
+#[test]
+fn a_signer_can_refuse_and_the_session_ends() {
+    let mut h = Harness::new(2, 2, vec![0, 1], 1);
+    let payloads = h.run_to_verifying(1);
+    let slot = payloads[0].recipient;
+    let signer = h.signers.get_mut(&slot).unwrap();
+    signer.on_payload(&payloads[0]).unwrap();
+
+    let envelope = signer.reject(RejectCode::UserDeclined, "user said no").unwrap();
+    assert_eq!(envelope.msg_type, MsgType::SignReject);
+    assert_eq!(envelope.round, 3);
+    assert_eq!(signer.phase(), SignPhase::Rejected);
+
+    let (sender, code, note) = h.coordinator.on_reject(&envelope).unwrap();
+    assert_eq!(sender, slot);
+    assert_eq!(code, RejectCode::UserDeclined);
+    assert_eq!(note, "user said no");
+    assert_eq!(h.coordinator.phase(), SignPhase::Aborted);
+
+    // A refused session cannot report a result.
+    assert!(h.coordinator.result(ResultStatus::Broadcasted, Some([7u8; 32]), "x").is_err());
+}
+
+#[test]
+fn a_refusal_cannot_come_from_a_session_that_already_finished() {
+    let mut h = Harness::new(2, 2, vec![0, 1], 1);
+    let payloads = h.run_to_verifying(1);
+    for env in &payloads {
+        let slot = env.recipient;
+        let signer = h.signers.get_mut(&slot).unwrap();
+        signer.on_payload(env).unwrap();
+        signer.approve().unwrap();
+        let share = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap();
+        h.coordinator.on_share(&share).unwrap();
+    }
+    assert_eq!(h.coordinator.phase(), SignPhase::SharesCollected);
+    let slot = payloads[0].recipient;
+    let err = h.signers.get_mut(&slot).unwrap().reject(RejectCode::Malformed, "too late").unwrap_err();
+    assert!(matches!(err, SessionError::WrongStage(_)), "{err:?}");
+}
+
+#[test]
+fn the_outcome_reaches_every_signer() {
+    let mut h = Harness::new(3, 2, vec![0, 1], 1);
+    let payloads = h.run_to_verifying(1);
+    for env in &payloads {
+        let slot = env.recipient;
+        let signer = h.signers.get_mut(&slot).unwrap();
+        signer.on_payload(env).unwrap();
+        signer.approve().unwrap();
+        let share = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap();
+        h.coordinator.on_share(&share).unwrap();
+    }
+    let _signatures = h.coordinator.aggregate().unwrap();
+
+    let results = h.coordinator.result(ResultStatus::Broadcasted, Some([9u8; 32]), "broadcasted").unwrap();
+    assert_eq!(results.len(), 2, "one per selected signer");
+    assert_eq!(h.coordinator.phase(), SignPhase::Broadcasted);
+
+    for env in &results {
+        let slot = env.recipient;
+        let signer = h.signers.get_mut(&slot).unwrap();
+        let (status, txid, note) = signer.on_result(env).unwrap();
+        assert_eq!(status, ResultStatus::Broadcasted);
+        assert_eq!(txid, Some([9u8; 32]));
+        assert_eq!(note, "broadcasted");
+        assert_eq!(signer.phase(), SignPhase::Broadcasted);
+    }
+}
+
+#[test]
+fn a_failed_broadcast_is_reported_and_ends_the_session() {
+    let mut h = Harness::new(2, 2, vec![0, 1], 1);
+    let payloads = h.run_to_verifying(1);
+    for env in &payloads {
+        let slot = env.recipient;
+        let signer = h.signers.get_mut(&slot).unwrap();
+        signer.on_payload(env).unwrap();
+        signer.approve().unwrap();
+        let share = signer.share(&h.dkg.key_packages[&h.identifiers[&slot]]).unwrap();
+        h.coordinator.on_share(&share).unwrap();
+    }
+    h.coordinator.aggregate().unwrap();
+
+    let results = h.coordinator.result(ResultStatus::Failed, None, "node rejected the transaction").unwrap();
+    assert_eq!(h.coordinator.phase(), SignPhase::Aborted);
+    for env in &results {
+        let slot = env.recipient;
+        let signer = h.signers.get_mut(&slot).unwrap();
+        let (status, txid, _) = signer.on_result(env).unwrap();
+        assert_eq!(status, ResultStatus::Failed);
+        assert_eq!(txid, None);
+        assert_eq!(signer.phase(), SignPhase::Aborted);
+    }
+}
+
+#[test]
+fn a_result_before_any_share_is_refused() {
+    // A signer must not accept "broadcasted" for a transaction it has not signed.
+    let mut h = Harness::new(2, 2, vec![0, 1], 1);
+    let payloads = h.run_to_verifying(1);
+    let slot = payloads[0].recipient;
+    let signer = h.signers.get_mut(&slot).unwrap();
+    signer.on_payload(&payloads[0]).unwrap();
+
+    let forged = frost_vault_core::protocol::Envelope::new(
+        MsgType::SignResult,
+        MsgType::SignResult.round(),
+        frost_vault_core::protocol::COORDINATOR_SLOT,
+        slot,
+        99,
+        SESSION,
+        frost_vault_core::protocol::encode_result(ResultStatus::Broadcasted, Some([1u8; 32]), "x").unwrap(),
+    )
+    .unwrap();
+    let err = signer.on_result(&forged).unwrap_err();
+    assert!(matches!(err, SessionError::WrongStage(_)), "{err:?}");
 }

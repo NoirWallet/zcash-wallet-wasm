@@ -330,6 +330,201 @@ impl Envelope {
     }
 }
 
+impl MsgType {
+    /// The `round` this message type belongs to, as agreed with the mobile client.
+    ///
+    /// Round 1 is the commitment round; round 2 is the coordinator building the PCZT locally and is not
+    /// a message; round 3 is the signing round. A message carrying a different round is refused, so the
+    /// field is a checked part of the protocol rather than a label.
+    pub const fn round(self) -> u8 {
+        use MsgType::*;
+        match self {
+            // DKG: the ceremony's own rounds.
+            DkgR1 | DkgR1Bundle | DkgR1Echo | DkgR1Cert => 1,
+            DkgR2Batch | DkgR2Inbox => 2,
+            // Pairing and roster happen before any round.
+            PairInvite | PairResponse | RosterLock => 0,
+            KeysetSetup | DkgFinal | DkgActivate => 2,
+            // Signing.
+            SignInit | SignCommitments => 1,
+            SignPayload | SignShare | SignReject | SignResult => 3,
+            SessionAbort => 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rejection and result payloads
+//
+// Small, fixed layouts so the signer and the coordinator cannot disagree about them; both sides are
+// already exchanging envelopes with these types, and an undefined payload would be invented per client.
+// ---------------------------------------------------------------------------
+
+/// Why a signer refused to produce a share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RejectCode {
+    /// The user declined.
+    UserDeclined,
+    /// This signer's own verification of the PCZT failed.
+    VerificationFailed,
+    /// The payload could not be parsed, or was for another session.
+    Malformed,
+    /// The signing session had already expired.
+    Expired,
+}
+
+impl RejectCode {
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::UserDeclined => 1,
+            Self::VerificationFailed => 2,
+            Self::Malformed => 3,
+            Self::Expired => 4,
+        }
+    }
+
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        Some(match byte {
+            1 => Self::UserDeclined,
+            2 => Self::VerificationFailed,
+            3 => Self::Malformed,
+            4 => Self::Expired,
+            _ => return None,
+        })
+    }
+}
+
+/// Outcome the coordinator reports back to the signers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultStatus {
+    /// Aggregated and broadcast.
+    Broadcasted,
+    /// Aggregation or broadcast failed.
+    Failed,
+}
+
+impl ResultStatus {
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::Broadcasted => 0,
+            Self::Failed => 1,
+        }
+    }
+
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        Some(match byte {
+            0 => Self::Broadcasted,
+            1 => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+/// Longest human-readable note these payloads will carry. They are for a UI line, not for data.
+pub const MAX_NOTE: usize = 512;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadError {
+    /// The code byte is not one this build knows.
+    UnknownCode(u8),
+    /// Truncated, over-long, or carrying trailing bytes.
+    Malformed,
+    /// A `Broadcasted` result without a transaction id, or a `Failed` one with one.
+    ResultShape,
+}
+
+impl core::fmt::Display for PayloadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnknownCode(c) => write!(f, "unknown status code {c}"),
+            Self::Malformed => f.write_str("malformed payload"),
+            Self::ResultShape => f.write_str("result status and transaction id disagree"),
+        }
+    }
+}
+
+impl std::error::Error for PayloadError {}
+
+fn put_note(out: &mut Vec<u8>, note: &str) -> Result<(), PayloadError> {
+    let bytes = note.as_bytes();
+    if bytes.len() > MAX_NOTE {
+        return Err(PayloadError::Malformed);
+    }
+    out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn take_note(bytes: &[u8], pos: &mut usize) -> Result<String, PayloadError> {
+    let end = pos.checked_add(2).ok_or(PayloadError::Malformed)?;
+    if end > bytes.len() {
+        return Err(PayloadError::Malformed);
+    }
+    let len = u16::from_le_bytes([bytes[*pos], bytes[*pos + 1]]) as usize;
+    *pos = end;
+    if len > MAX_NOTE {
+        return Err(PayloadError::Malformed);
+    }
+    let end = pos.checked_add(len).ok_or(PayloadError::Malformed)?;
+    if end > bytes.len() {
+        return Err(PayloadError::Malformed);
+    }
+    let note = core::str::from_utf8(&bytes[*pos..end]).map_err(|_| PayloadError::Malformed)?;
+    *pos = end;
+    Ok(note.to_string())
+}
+
+/// `code:u8 || len:u16 || utf8 note`
+pub fn encode_reject(code: RejectCode, note: &str) -> Result<Vec<u8>, PayloadError> {
+    let mut out = Vec::with_capacity(3 + note.len());
+    out.push(code.to_byte());
+    put_note(&mut out, note)?;
+    Ok(out)
+}
+
+pub fn decode_reject(payload: &[u8]) -> Result<(RejectCode, String), PayloadError> {
+    let code = *payload.first().ok_or(PayloadError::Malformed)?;
+    let code = RejectCode::from_byte(code).ok_or(PayloadError::UnknownCode(code))?;
+    let mut pos = 1;
+    let note = take_note(payload, &mut pos)?;
+    if pos != payload.len() {
+        return Err(PayloadError::Malformed);
+    }
+    Ok((code, note))
+}
+
+/// `status:u8 || txid:32 || len:u16 || utf8 note`, with the transaction id present only on success.
+pub fn encode_result(status: ResultStatus, txid: Option<[u8; 32]>, note: &str) -> Result<Vec<u8>, PayloadError> {
+    match (status, txid.is_some()) {
+        (ResultStatus::Broadcasted, false) | (ResultStatus::Failed, true) => return Err(PayloadError::ResultShape),
+        _ => {}
+    }
+    let mut out = Vec::with_capacity(35 + note.len());
+    out.push(status.to_byte());
+    out.extend_from_slice(&txid.unwrap_or([0u8; 32]));
+    put_note(&mut out, note)?;
+    Ok(out)
+}
+
+pub fn decode_result(payload: &[u8]) -> Result<(ResultStatus, Option<[u8; 32]>, String), PayloadError> {
+    if payload.len() < 35 {
+        return Err(PayloadError::Malformed);
+    }
+    let status = ResultStatus::from_byte(payload[0]).ok_or(PayloadError::UnknownCode(payload[0]))?;
+    let mut txid = [0u8; 32];
+    txid.copy_from_slice(&payload[1..33]);
+    let mut pos = 33;
+    let note = take_note(payload, &mut pos)?;
+    if pos != payload.len() {
+        return Err(PayloadError::Malformed);
+    }
+    let txid = match status {
+        ResultStatus::Broadcasted => Some(txid),
+        ResultStatus::Failed => None,
+    };
+    Ok((status, txid, note))
+}
+
 // ---------------------------------------------------------------------------
 // Message batches
 //

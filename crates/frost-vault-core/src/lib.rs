@@ -34,6 +34,7 @@ pub mod threshold;
 
 pub use custody::{Recovery, SessionGuard, SessionProgress, ShareBackup, ShareIdentity};
 pub use noise::{NoiseChannel, NoiseError};
+pub use protocol::{RejectCode, ResultStatus};
 pub use roster::{RosterError, RosterManifest};
 pub use session::{CoordinatorSession, SessionConfig, SessionError, SignerSession};
 pub use threshold::{DkgOutput, Suite};

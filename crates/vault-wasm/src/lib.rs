@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use frost_vault_core::custody;
 use frost_vault_core::noise;
-use frost_vault_core::protocol::{self, Envelope, MsgType, COORDINATOR_SLOT};
+use frost_vault_core::protocol::{self, Envelope, MsgType, RejectCode, ResultStatus, COORDINATOR_SLOT};
 use frost_vault_core::roster;
 use frost_vault_core::seal;
 use frost_vault_core::session::{CoordinatorSession, SessionConfig, SignerSession};
@@ -177,6 +177,15 @@ impl EnvelopeCodec {
             .ok_or_else(|| JsError::new(&format!("{name} is not a reserved message type")))
     }
 
+    /// The `round` a message type belongs to. Sending a different one gets the message refused.
+    #[wasm_bindgen]
+    pub fn round_of(name: &str) -> Result<u8, JsError> {
+        let msg_type = defined_msg_type(name)
+            .or_else(|| reserved_msg_type(name))
+            .ok_or_else(|| JsError::new(&format!("unknown message type {name}")))?;
+        Ok(msg_type.round())
+    }
+
     /// The type names that have a defined payload.
     #[wasm_bindgen]
     pub fn defined_msg_types() -> js_sys::Array {
@@ -208,6 +217,8 @@ const DEFINED_MSG_TYPES: &[&str] = &[
     "signCommitments",
     "signPayload",
     "signShare",
+    "signReject",
+    "signResult",
 ];
 
 /// Types that appear in the protocol table with no payload format. Named here so the split is
@@ -221,8 +232,6 @@ const RESERVED_MSG_TYPES: &[&str] = &[
     "keysetSetup",
     "dkgFinal",
     "dkgActivate",
-    "signReject",
-    "signResult",
     "sessionAbort",
 ];
 
@@ -236,6 +245,8 @@ fn defined_msg_type(name: &str) -> Option<MsgType> {
         "signCommitments" => MsgType::SignCommitments,
         "signPayload" => MsgType::SignPayload,
         "signShare" => MsgType::SignShare,
+        "signReject" => MsgType::SignReject,
+        "signResult" => MsgType::SignResult,
         _ => return None,
     })
 }
@@ -250,8 +261,6 @@ fn reserved_msg_type(name: &str) -> Option<MsgType> {
         "keysetSetup" => MsgType::KeysetSetup,
         "dkgFinal" => MsgType::DkgFinal,
         "dkgActivate" => MsgType::DkgActivate,
-        "signReject" => MsgType::SignReject,
-        "signResult" => MsgType::SignResult,
         "sessionAbort" => MsgType::SessionAbort,
         _ => return None,
     })
@@ -970,6 +979,31 @@ impl Coordinator {
     pub fn actions(&self) -> usize {
         self.inner.actions()
     }
+
+    /// Accept a signer's refusal. The session ends; one signer out means this selection no longer reaches
+    /// the threshold.
+    pub fn accept_reject(&mut self, envelope: &[u8]) -> Result<js_sys::Array, JsError> {
+        let env = Envelope::decode(envelope).map_err(err)?;
+        let (sender, code, note) = self.inner.on_reject(&env).map_err(err)?;
+        let out = js_sys::Array::new();
+        out.push(&JsValue::from(sender));
+        out.push(&JsValue::from(code.to_byte()));
+        out.push(&JsValue::from(note));
+        Ok(out)
+    }
+
+    /// Report the outcome to every signer after aggregation.
+    ///
+    /// `status`: 0 = broadcasted (then `txid` is required), 1 = failed. Returns `[[slot, envelope], ...]`.
+    pub fn report_result(&mut self, status: u8, txid: Option<Vec<u8>>, note: &str) -> Result<js_sys::Array, JsError> {
+        let status = ResultStatus::from_byte(status).ok_or_else(|| JsError::new("status must be 0 (broadcasted) or 1 (failed)"))?;
+        let txid = match txid {
+            Some(bytes) => Some(<[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| JsError::new("txid must be 32 bytes"))?),
+            None => None,
+        };
+        let envelopes = self.inner.result(status, txid, note).map_err(err)?;
+        Ok(slot_and_bytes(envelopes))
+    }
 }
 
 /// Signer side of a signing session. Holds the key share and the nonces.
@@ -1030,6 +1064,32 @@ impl Signer {
 
     pub fn phase(&self) -> String {
         format!("{:?}", self.inner.phase())
+    }
+
+    /// Refuse to sign, and end the session. `code`: 1 = user declined, 2 = verification failed,
+    /// 3 = malformed payload, 4 = expired.
+    pub fn reject(&mut self, code: u8, note: &str) -> Result<js_sys::Uint8Array, JsError> {
+        let code = RejectCode::from_byte(code).ok_or_else(|| JsError::new("code must be 1..=4"))?;
+        let envelope = self.inner.reject(code, note).map_err(err)?;
+        Ok(to_js_bytes(&envelope.encode()))
+    }
+
+    /// Accept the coordinator's outcome report: `[status, txid | null, note]`.
+    pub fn on_result(&mut self, envelope: &[u8]) -> Result<js_sys::Array, JsError> {
+        let env = Envelope::decode(envelope).map_err(err)?;
+        let (status, txid, note) = self.inner.on_result(&env).map_err(err)?;
+        let out = js_sys::Array::new();
+        out.push(&JsValue::from(status.to_byte()));
+        match txid {
+            Some(bytes) => {
+                out.push(&to_js_bytes(&bytes));
+            }
+            None => {
+                out.push(&JsValue::NULL);
+            }
+        }
+        out.push(&JsValue::from(note));
+        Ok(out)
     }
 
     /// `"committed"` / `"consumed"` per action, so the host can persist the nonce state.
