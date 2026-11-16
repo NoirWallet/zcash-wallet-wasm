@@ -4,8 +4,8 @@
 //! a code table that drifts is a silent misread. They are pinned here on purpose.
 
 use frost_vault_core::protocol::{
-    decode_sign_reject, decode_sign_result, encode_sign_reject, encode_sign_result, read_signing_envelope, signing_envelope, Envelope, RejectCode,
-    ResultStatus, SigningError, COORDINATOR_SLOT, HEADER_LEN,
+    check_relayed, decode_sign_reject, decode_sign_result, encode_sign_reject, encode_sign_result, read_signing_envelope, signing_envelope, Envelope, MsgType,
+    RejectCode, ResultStatus, SigningError, COORDINATOR_SLOT, HEADER_LEN,
 };
 
 const SESSION: [u8; 16] = [0x5a; 16];
@@ -161,4 +161,37 @@ fn trailing_bytes_after_the_payload_are_refused() {
     bytes.push(0xAA);
     // The declared length no longer matches the bytes present.
     assert!(read_signing_envelope(&bytes).is_err());
+}
+
+#[test]
+fn a_relayed_envelope_is_checked_against_the_ceremony_and_the_sender() {
+    // A coordinator relaying one participant's message to another can substitute either field, so both
+    // must be checked against the roster and the session rather than believed from the header.
+    let bytes = encode_sign_reject(SESSION, PHONE, COORDINATOR_SLOT, 1, RejectCode::UserDeclined, "").expect("encode");
+
+    // The honest case.
+    let env = check_relayed(&bytes, SESSION, PHONE, MsgType::SignReject).expect("honest relay passes");
+    assert_eq!(env.payload[0], 1);
+
+    // Another ceremony's message, carrying a valid signature for that ceremony.
+    assert_eq!(check_relayed(&bytes, [0x11; 16], PHONE, MsgType::SignReject), Err(SigningError::WrongSession));
+
+    // A message attributed to the wrong slot.
+    assert_eq!(
+        check_relayed(&bytes, SESSION, 1, MsgType::SignReject),
+        Err(SigningError::WrongSender { expected: 1, got: PHONE })
+    );
+
+    // A round that does not belong to the type.
+    let fabricated = Envelope::new(MsgType::SignShare, 1, PHONE, COORDINATOR_SLOT, 1, SESSION, vec![7])
+        .expect("envelope")
+        .encode();
+    assert_eq!(
+        check_relayed(&fabricated, SESSION, PHONE, MsgType::SignShare),
+        Err(SigningError::WrongRound {
+            msg_type: MsgType::SignShare,
+            expected: 3,
+            got: 1
+        })
+    );
 }

@@ -580,6 +580,13 @@ pub enum SigningError {
     Payload(PayloadError),
     /// The type does not belong to a signing session, so these helpers do not apply.
     NotSigning(MsgType),
+    /// The envelope names another ceremony.
+    WrongSession,
+    /// The envelope names another sender.
+    WrongSender {
+        expected: u8,
+        got: u8,
+    },
     /// The envelope carries a round other than the one its type is fixed to.
     WrongRound {
         msg_type: MsgType,
@@ -594,6 +601,10 @@ impl std::fmt::Display for SigningError {
             Self::Envelope(e) => write!(f, "envelope: {e}"),
             Self::Payload(e) => write!(f, "payload: {e}"),
             Self::NotSigning(msg_type) => write!(f, "{msg_type:?} is not a signing message"),
+            Self::WrongSession => f.write_str("the envelope belongs to another ceremony"),
+            Self::WrongSender { expected, got } => {
+                write!(f, "the envelope is from slot {got}, expected {expected}")
+            }
             Self::WrongRound { msg_type, expected, got } => write!(f, "{msg_type:?} is fixed to round {expected}, got {got}"),
         }
     }
@@ -639,6 +650,38 @@ pub fn read_signing_envelope(bytes: &[u8]) -> Result<Envelope, SigningError> {
     if envelope.round != expected {
         return Err(SigningError::WrongRound {
             msg_type: envelope.msg_type,
+            expected,
+            got: envelope.round,
+        });
+    }
+    Ok(envelope)
+}
+
+/// Check a *relayed* envelope — one this device did not receive directly — against everything the header
+/// can prove: the ceremony, the sender, the type, and the round that type fixes.
+///
+/// Relaying is where a coordinator can substitute one participant's message for another's, so the fields
+/// that say "who said this, in which ceremony" must be checked against the roster and the session rather
+/// than taken from the envelope. Signature verification is deliberately not here: it belongs with the
+/// roster's identity keys, which this crate does not hold.
+pub fn check_relayed(bytes: &[u8], session_id: [u8; 16], sender: u8, msg_type: MsgType) -> Result<Envelope, SigningError> {
+    let envelope = Envelope::decode(bytes)?;
+    if envelope.session_id != session_id {
+        return Err(SigningError::WrongSession);
+    }
+    if envelope.sender != sender {
+        return Err(SigningError::WrongSender {
+            expected: sender,
+            got: envelope.sender,
+        });
+    }
+    if envelope.msg_type != msg_type {
+        return Err(SigningError::NotSigning(envelope.msg_type));
+    }
+    let expected = msg_type.round();
+    if envelope.round != expected {
+        return Err(SigningError::WrongRound {
+            msg_type,
             expected,
             got: envelope.round,
         });
