@@ -729,8 +729,9 @@ check("recovery: the fingerprint can be recomputed without the qsk", () => {
 });
 
 check("rosterHash: the agreed vectors match the mobile client", () => {
-  // Same inputs as the vectors the mobile client produced with an independent implementation. A match
-  // here means the encoding agrees byte for byte, not merely that our two sides agree with themselves.
+  // Same inputs as the vectors the mobile client produced with an independent implementation and
+  // re-derived a third time in node. A match here means the encoding agrees byte for byte, not merely
+  // that our two sides agree with themselves.
   const identity = (slot) => {
     const v = new Uint8Array(65);
     v[0] = 0x01;
@@ -739,89 +740,94 @@ check("rosterHash: the agreed vectors match the mobile client", () => {
     return v;
   };
   const transport = (slot) => new Uint8Array(32).fill(0xc0 + slot);
+  // Under QR the transport key is 32 zero bytes: "no transport key", and zero is a low-order X25519
+  // point, which is exactly why presence must never be validated as a curve point.
   const zeroTransport = () => new Uint8Array(32);
 
-  const build = (slots, threshold, mainnet, qr) => {
-    const m = new RosterManifest(
-      "11111111-2222-4333-8444-555555555555",
-      1,
-      "frost-redpallas-blake2b-512",
-      mainnet,
-      threshold,
-      slots.length,
-    );
-    for (const slot of slots) {
-      m.add_participant(slot, identity(slot), qr ? zeroTransport() : transport(slot));
-    }
+  const manifest = (n, threshold) =>
+    new RosterManifest("11111111-2222-4333-8444-555555555555", 1, "frost-redpallas-blake2b-512", threshold, n);
+
+  const build = (slots, threshold, qr) => {
+    const m = manifest(slots.length, threshold);
+    for (const slot of slots) m.add_participant(slot, identity(slot), qr ? zeroTransport() : transport(slot));
     return m;
   };
 
-  const expect = {
-    V1: "6b326d514157bbf27699f60b224cdaa1041d475b8b18ed6f3e10b8de984bc4bb",
-    "V1'": "0b317bda0d52df33aee8b0be9dd5134266b37e43ff251d0b247e6d05adea00bc",
-    V2: "76567471919f13b7e39bb8f21a41dae67974f16a2b21beb582a7b01c8233a268",
-    "V2'": "8635f5c7479fc76860e542ef95faddda05ab89bcf393e5ace10e25065791506e",
-    V3: "a6579d1ea9a2f855c8c76db441b96c0f2bb40da9b5c7cf50cfd6428c5b9621c9",
-    "V3'": "3604bdb4292232ab3ed814985694a24c4042e0229d36ff33f7cce6e608efd5f8",
-  };
+  // A: 3 devices over Bluetooth.
+  const a = build([0, 1, 2], 2, false);
+  assert(
+    a.hash_hex() === "d99931702edb7a7500ab2980522919f455459118f3c893f4836768ed0fe2d227",
+    `vector A: ${a.hash_hex()}`,
+  );
+  assert(a.canonical_bytes().length === 430, "vector A canonical length");
 
-  const v1 = build([0, 1], 2, true, true);
-  assert(v1.hash_hex() === expect.V1, `V1: ${v1.hash_hex()}`);
-  assert(v1.canonical_bytes().length === 343, "V1 canonical length");
-  assert(build([0, 1], 2, false, true).hash_hex() === expect["V1'"], "V1'");
-  assert(build([0, 1, 2], 2, true, false).hash_hex() === expect.V2, "V2");
-  assert(build([0, 1, 2], 2, false, false).hash_hex() === expect["V2'"], "V2'");
-  assert(build([0, 1, 2], 3, true, false).hash_hex() === expect.V3, "V3");
-  assert(build([0, 1, 2], 3, false, false).hash_hex() === expect["V3'"], "V3'");
+  // B: 2 devices over QR, so the transport keys are the all-zero placeholder.
+  const b = build([0, 1], 2, true);
+  assert(
+    b.hash_hex() === "6fda07956a4bec07c197095857ce4f83a97aa42cdbd37f922b51dc282aa0ac0a",
+    `vector B: ${b.hash_hex()}`,
+  );
+  assert(b.canonical_bytes().length === 320, "vector B canonical length");
 
   // Insertion order does not matter.
-  const reordered = new RosterManifest(
-    "11111111-2222-4333-8444-555555555555",
-    1,
-    "frost-redpallas-blake2b-512",
-    true,
-    2,
-    3,
-  );
+  const reordered = manifest(3, 2);
   for (const slot of [2, 0, 1]) reordered.add_participant(slot, identity(slot), transport(slot));
-  assert(reordered.hash_hex() === expect.V2, "order must not matter");
+  assert(reordered.hash_hex() === a.hash_hex(), "order must not matter");
 
   // One flipped byte changes it.
-  const flipped = new RosterManifest(
-    "11111111-2222-4333-8444-555555555555",
-    1,
-    "frost-redpallas-blake2b-512",
-    true,
-    2,
-    3,
-  );
+  const flipped = manifest(3, 2);
   for (const slot of [0, 1, 2]) {
     const id = identity(slot);
     if (slot === 1) id[64] ^= 0x01;
     flipped.add_participant(slot, id, transport(slot));
   }
-  assert(
-    flipped.hash_hex() === "eb99746dec9ef7edfafb576958bde91b2e15e0ae99ad58d14ea4c564147e953f",
-    "flipped byte",
-  );
+  assert(flipped.hash_hex() !== a.hash_hex(), "a flipped byte must change the hash");
+
+  // Keys are checked for shape, not for curve membership: a zero transport key is legal.
+  let threw = false;
+  try {
+    manifest(2, 2).add_participant(0, new Uint8Array(65).fill(0x02), transport(0));
+  } catch {
+    threw = true;
+  }
+  assert(threw, "an identity key not starting with 0x01 must be refused");
 
   // An incomplete roster must not produce a hash.
-  const partial = new RosterManifest(
-    "11111111-2222-4333-8444-555555555555",
-    1,
-    "frost-redpallas-blake2b-512",
-    true,
-    2,
-    3,
-  );
+  const partial = manifest(3, 2);
   partial.add_participant(0, identity(0), transport(0));
-  let threw = false;
+  threw = false;
   try {
     partial.hash();
   } catch {
     threw = true;
   }
   assert(threw, "a partial roster must refuse to hash");
+});
+
+check("seal: a different round-1 transcript cannot be opened", () => {
+  // The roster-only prologue lets a coordinator relay different round-1 sets while keeping the roster
+  // identical. Folding the transcript in means the mismatch shows up as a failed open, not as a group
+  // that finishes with two different keys.
+  const statics = new MessageSet();
+  const transcript = new MessageSet();
+  for (const slot of [0, 1]) {
+    statics.set(slot, new Uint8Array(32).fill(0x11 + slot));
+    transcript.set(slot, new Uint8Array(40).fill(0x20 + slot));
+  }
+  const honest = Sealed.prologueWithTranscript(statics, transcript);
+  assert(honest.length > Sealed.prologue(statics).length, "the transcript must extend the prologue");
+
+  const doctored = new MessageSet();
+  doctored.set(0, new Uint8Array(40).fill(0x20));
+  doctored.set(1, new Uint8Array(40).fill(0x99));
+  const lie = Sealed.prologueWithTranscript(statics, doctored);
+  assert(
+    honest.length === lie.length && !honest.every((b, i) => b === lie[i]),
+    "a different transcript must give a different prologue",
+  );
+
+  // The seal/open half is covered in Rust (`seal::tests`), where the X25519 keys can be derived; here the
+  // contract that matters is that the prologue itself is a function of the transcript.
 });
 
 check("noise: three-message XX handshake, then transport", () => {

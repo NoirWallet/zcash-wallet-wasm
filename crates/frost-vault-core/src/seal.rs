@@ -118,6 +118,37 @@ pub fn ceremony_prologue(participants: &[(u8, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
+/// The domain separator for the round-1 transcript extension of the prologue.
+const TRANSCRIPT_DOMAIN: &[u8] = b"noir-frost-vault/round1-transcript/v1";
+
+/// The prologue with the round-1 transcript folded in.
+///
+/// [`ceremony_prologue`] binds the roster: devices that disagree about who is present cannot open each
+/// other's round-2 packages. It does **not** bind what the participants *said* in round 1. That leaves
+/// one gap: a coordinator can relay a different round-1 set to different devices while keeping the
+/// roster identical, and nothing fails until the ceremony ends with two different group keys.
+///
+/// Folding the round-1 broadcasts into the prologue closes it at the point of use: each device seals its
+/// round-2 packages under the transcript it was shown, so a device that was shown something else cannot
+/// open them. The disagreement then surfaces as a failed open rather than as a group that looks finished.
+///
+/// The transcript is `(slot, round-1 broadcast bytes)` in slot order, length-prefixed. Both sides must
+/// feed in the same bytes; a device that omitted a broadcast it received produces a different prologue,
+/// which is the intended outcome.
+pub fn ceremony_prologue_with_transcript(participants: &[(u8, Vec<u8>)], round1: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let mut out = ceremony_prologue(participants);
+    out.extend_from_slice(TRANSCRIPT_DOMAIN);
+    let mut sorted = round1.to_vec();
+    sorted.sort_by_key(|(slot, _)| *slot);
+    out.push(sorted.len() as u8);
+    for (slot, bytes) in sorted {
+        out.push(slot);
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(&bytes);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +215,57 @@ mod tests {
         let (_, a) = generate_keypair().unwrap();
         let (_, b) = generate_keypair().unwrap();
         assert_eq!(ceremony_prologue(&[(1, b.clone()), (0, a.clone())]), ceremony_prologue(&[(0, a), (1, b)]));
+    }
+
+    fn round1() -> Vec<(u8, Vec<u8>)> {
+        vec![(0, vec![0x01; 40]), (1, vec![0x02; 40])]
+    }
+
+    #[test]
+    fn the_transcript_extension_is_order_insensitive() {
+        let statics = vec![(0u8, vec![0x11; 32]), (1u8, vec![0x12; 32])];
+        let mut reversed = round1();
+        reversed.reverse();
+        assert_eq!(
+            ceremony_prologue_with_transcript(&statics, &round1()),
+            ceremony_prologue_with_transcript(&statics, &reversed)
+        );
+    }
+
+    #[test]
+    fn a_different_round1_transcript_produces_a_prologue_that_does_not_open() {
+        // The point of the extension: identical roster, different round-1 stories, no interop.
+        let statics = vec![(0u8, vec![0x11; 32]), (1u8, vec![0x12; 32])];
+        let honest = ceremony_prologue_with_transcript(&statics, &round1());
+        let mut doctored = round1();
+        doctored[1].1[0] ^= 0xFF;
+        let lie = ceremony_prologue_with_transcript(&statics, &doctored);
+        assert_ne!(honest, lie);
+
+        let sender_sk = [0x31u8; 32];
+        let sender_pk = {
+            let p = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(sender_sk));
+            p.to_bytes()
+        };
+        let recipient_sk = [0x32u8; 32];
+        let recipient_pk = {
+            let p = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(recipient_sk));
+            p.to_bytes()
+        };
+
+        let sealed = seal(&sender_sk, &recipient_pk, &honest, b"round 2").unwrap();
+        assert_eq!(
+            open(&recipient_sk, &sender_pk, &lie, &sealed),
+            Err(SealError::Open),
+            "a device shown a different round-1 set must not be able to open the package"
+        );
+        assert!(open(&recipient_sk, &sender_pk, &honest, &sealed).is_ok());
+    }
+
+    #[test]
+    fn the_transcript_extension_still_binds_the_roster() {
+        let a = ceremony_prologue_with_transcript(&[(0u8, vec![0x11; 32])], &round1());
+        let b = ceremony_prologue_with_transcript(&[(0u8, vec![0x12; 32])], &round1());
+        assert_ne!(a, b);
     }
 }

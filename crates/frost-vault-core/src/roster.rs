@@ -7,11 +7,10 @@
 //!
 //! ```text
 //! rosterHash = SHA-256(
-//!     "noir-frost-vault/roster/v1"          // raw UTF-8, no length prefix
+//!     "noir/roster/v1"                      // raw UTF-8, no length prefix
 //!   || field(group_id)
 //!   || field(protocol_version as text)
 //!   || field(ciphersuite)
-//!   || field("mainnet" | "testnet")
 //!   || field(threshold as text)
 //!   || field(participant_count as text)
 //!   || for each participant, ascending by slot:
@@ -23,14 +22,25 @@
 //! field(x) = u32 big-endian length || x
 //! ```
 //!
-//! Numbers are decimal **text**, not binary. That is unusual but settled: the canonical form is
-//! "no leading zeros, no sign, no whitespace", and [`RosterManifest`] is the only thing that writes it.
+//! Numbers are decimal **text**, not binary, except the participant slot, which is a single raw byte.
+//! That is unusual but settled: the canonical form is "no leading zeros, no sign, no whitespace", and
+//! [`RosterManifest`] is the only thing that writes it.
+//!
+//! The network is deliberately **not** part of the hash: `group_id` is unique per vault, so two networks
+//! cannot collide in practice, and leaving it out keeps one fewer field to disagree about.
 
 use std::collections::BTreeMap;
 
 /// Domain tag. Concatenated raw, deliberately without a length prefix, so no reader can mistake it for
 /// a field.
-pub const ROSTER_DOMAIN: &[u8] = b"noir-frost-vault/roster/v1";
+pub const ROSTER_DOMAIN: &[u8] = b"noir/roster/v1";
+
+/// Device identity public keys are `0x01 ‖ Ed25519(32) ‖ X25519(32)`.
+pub const IDENTITY_KEY_LEN: usize = 65;
+
+/// Transport public keys are a raw X25519 key. Under QR they are 32 zero bytes standing in for "no
+/// transport key", which is a low-order point — so this must never validate the curve, only the length.
+pub const TRANSPORT_KEY_LEN: usize = 32;
 
 /// Longest field this crate will hash. Real fields are tens of bytes; the cap keeps a hostile length
 /// from forcing a large allocation.
@@ -52,6 +62,10 @@ pub enum RosterError {
     BadThreshold { threshold: u16, participants: u16 },
     /// The manifest was constructed with a participant count of zero.
     EmptyRoster,
+    /// An identity key is not `0x01 ‖ Ed25519(32) ‖ X25519(32)`.
+    BadIdentityKey { len: usize },
+    /// A transport key is not 32 raw bytes. Presence is not validated as a curve point.
+    BadTransportKey { len: usize },
 }
 
 impl core::fmt::Display for RosterError {
@@ -68,6 +82,8 @@ impl core::fmt::Display for RosterError {
             }
             Self::BadThreshold { threshold, participants } => write!(f, "threshold {threshold} is not within 1..={participants}"),
             Self::EmptyRoster => f.write_str("a roster needs at least one participant"),
+            Self::BadIdentityKey { len } => write!(f, "identity key is {len} bytes, expected {IDENTITY_KEY_LEN} starting with 0x01"),
+            Self::BadTransportKey { len } => write!(f, "transport key is {len} bytes, expected {TRANSPORT_KEY_LEN}"),
         }
     }
 }
@@ -90,7 +106,6 @@ pub struct RosterManifest {
     group_id: String,
     protocol_version: u32,
     ciphersuite: String,
-    mainnet: bool,
     threshold: u16,
     participants: u16,
     entries: BTreeMap<u8, RosterEntry>,
@@ -106,7 +121,7 @@ fn field(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), RosterError> {
 }
 
 impl RosterManifest {
-    pub fn new(group_id: &str, protocol_version: u32, ciphersuite: &str, mainnet: bool, threshold: u16, participants: u16) -> Result<Self, RosterError> {
+    pub fn new(group_id: &str, protocol_version: u32, ciphersuite: &str, threshold: u16, participants: u16) -> Result<Self, RosterError> {
         if participants == 0 {
             return Err(RosterError::EmptyRoster);
         }
@@ -117,14 +132,17 @@ impl RosterManifest {
             group_id: group_id.to_string(),
             protocol_version,
             ciphersuite: ciphersuite.to_string(),
-            mainnet,
             threshold,
             participants,
             entries: BTreeMap::new(),
         })
     }
 
-    /// Add a participant. Order of calls does not matter: encoding sorts by slot.
+    /// Add a participant. Order of calls does not matter: the encoding sorts by slot.
+    ///
+    /// The identity key is checked for shape (`0x01 ‖ Ed25519 ‖ X25519`) and the transport key for
+    /// length only. The transport key must **not** be validated as a curve point: under QR it is 32 zero
+    /// bytes standing in for "no transport key", and zero is a low-order X25519 point.
     pub fn add_participant(&mut self, slot: u8, identity_public_key: &[u8], transport_public_key: &[u8]) -> Result<(), RosterError> {
         if slot as u16 >= self.participants {
             return Err(RosterError::BadSlot(slot));
@@ -132,15 +150,14 @@ impl RosterManifest {
         if self.entries.contains_key(&slot) {
             return Err(RosterError::DuplicateSlot(slot));
         }
-        if self.entries.len() >= self.participants as usize {
-            return Err(RosterError::TooManyParticipants {
-                declared: self.participants,
-                added: self.entries.len() + 1,
+        if identity_public_key.len() != IDENTITY_KEY_LEN || identity_public_key[0] != 0x01 {
+            return Err(RosterError::BadIdentityKey {
+                len: identity_public_key.len(),
             });
         }
-        if identity_public_key.len() > MAX_FIELD || transport_public_key.len() > MAX_FIELD {
-            return Err(RosterError::FieldTooLong {
-                len: identity_public_key.len().max(transport_public_key.len()),
+        if transport_public_key.len() != TRANSPORT_KEY_LEN {
+            return Err(RosterError::BadTransportKey {
+                len: transport_public_key.len(),
             });
         }
         self.entries.insert(
@@ -161,12 +178,14 @@ impl RosterManifest {
                 added: self.entries.len(),
             });
         }
+        // `add_participant` refuses slots at or above the declared count and duplicates, so a full
+        // count means the slots are exactly `0..participants`. A gap therefore cannot reach this point:
+        // it shows up as a count mismatch first, which is the error above.
         let mut out = Vec::with_capacity(128 + self.entries.len() * 128);
         out.extend_from_slice(ROSTER_DOMAIN);
         field(&mut out, self.group_id.as_bytes())?;
         field(&mut out, self.protocol_version.to_string().as_bytes())?;
         field(&mut out, self.ciphersuite.as_bytes())?;
-        field(&mut out, if self.mainnet { b"mainnet" } else { b"testnet" })?;
         field(&mut out, self.threshold.to_string().as_bytes())?;
         field(&mut out, self.participants.to_string().as_bytes())?;
         for (slot, entry) in &self.entries {

@@ -501,9 +501,22 @@ pub struct RosterManifest {
 #[wasm_bindgen]
 impl RosterManifest {
     #[wasm_bindgen(constructor)]
-    pub fn new(group_id: &str, protocol_version: u32, ciphersuite: &str, mainnet: bool, threshold: u16, participants: u16) -> Result<RosterManifest, JsError> {
-        Ok(Self {
-            inner: roster::RosterManifest::new(group_id, protocol_version, ciphersuite, mainnet, threshold, participants).map_err(err)?,
+    pub fn new(
+        group_id: &str,
+        protocol_version: u32,
+        ciphersuite: &str,
+        threshold: u16,
+        participants: u16,
+    ) -> Result<RosterManifest, JsError> {
+        Ok(RosterManifest {
+            inner: roster::RosterManifest::new(
+                group_id,
+                protocol_version,
+                ciphersuite,
+                threshold,
+                participants,
+            )
+            .map_err(err)?,
         })
     }
 
@@ -550,6 +563,29 @@ impl Sealed {
             return Err(JsError::new("prologue needs at least one participant"));
         }
         Ok(to_js_bytes(&seal::ceremony_prologue(&pairs)))
+    }
+
+    /// The prologue with the round-1 transcript folded in: the roster plus what each participant said.
+    ///
+    /// Use this instead of `prologue` once round-1 broadcasts exist. A coordinator that relays a different
+    /// round-1 set to different devices then cannot have its round-2 packages opened, because each device
+    /// seals under the transcript it was actually shown.
+    #[wasm_bindgen(js_name = prologueWithTranscript)]
+    pub fn prologue_with_transcript(
+        statics: &MessageSet,
+        round1: &MessageSet,
+    ) -> Result<js_sys::Uint8Array, JsError> {
+        let participants: Vec<(u8, Vec<u8>)> =
+            statics.inner.iter().map(|(slot, key)| (*slot, key.clone())).collect();
+        if participants.is_empty() {
+            return Err(JsError::new("prologue needs at least one participant"));
+        }
+        let transcript: Vec<(u8, Vec<u8>)> =
+            round1.inner.iter().map(|(slot, bytes)| (*slot, bytes.clone())).collect();
+        Ok(to_js_bytes(&seal::ceremony_prologue_with_transcript(
+            &participants,
+            &transcript,
+        )))
     }
 
     /// Seal `plaintext` so only the holder of `recipient_public` can read it.

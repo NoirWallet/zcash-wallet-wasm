@@ -29,7 +29,7 @@ build-frost-wasm:
 build-all-wasm:
 	wasm-pack build --target web --release --out-dir pkg-all --features wasm-parallel,voting,frost-vault -Z build-std=panic_abort,std
 	node tests/check_wasm_imports.mjs pkg-all/zcash_wallet_wasm_bg.wasm
-	@for n in Dkg Coordinator Signer Keyset ShareBackup Canary Deposit Verification MessageSet SessionMarker EnvelopeCodec PcztTools; do \
+	@for n in Dkg Coordinator Signer Keyset ShareBackup Canary Deposit Verification MessageSet SessionMarker EnvelopeCodec PcztTools NoiseXx Sealed RosterManifest; do \
 		grep -q "class $$n" pkg-all/zcash_wallet_wasm.d.ts || { echo "missing vault export: $$n"; exit 1; }; \
 	done
 	@echo "vault exports present in pkg-all"
