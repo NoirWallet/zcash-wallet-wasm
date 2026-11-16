@@ -1129,6 +1129,7 @@ dependencies = [
  "reddsa 0.5.2",
  "sha2 0.10.9",
  "snow",
+ "x25519-dalek",
  "zeroize",
 ]
 

@@ -24,6 +24,7 @@
 //! * [`state`] — the DKG and signing session state machines, plus per-spend nonce lifecycle.
 
 pub mod custody;
+pub mod noise;
 pub mod protocol;
 pub mod roster;
 pub mod seal;
@@ -32,6 +33,7 @@ pub mod state;
 pub mod threshold;
 
 pub use custody::{Recovery, SessionGuard, SessionProgress, ShareBackup, ShareIdentity};
+pub use noise::{NoiseChannel, NoiseError};
 pub use roster::{RosterError, RosterManifest};
 pub use session::{CoordinatorSession, SessionConfig, SessionError, SignerSession};
 pub use threshold::{DkgOutput, Suite};

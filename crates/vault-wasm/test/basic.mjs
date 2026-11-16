@@ -18,6 +18,7 @@ import {
   DkgRelay,
   MessageSet,
   Fixtures,
+  NoiseXx,
   PcztTools,
   RosterManifest,
   Sealed,
@@ -790,6 +791,96 @@ check("rosterHash: the agreed vectors match the mobile client", () => {
     threw = true;
   }
   assert(threw, "a partial roster must refuse to hash");
+});
+
+check("noise: three-message XX handshake, then transport", () => {
+  const prologue = new TextEncoder().encode("noir/pair/v1");
+  // Fixed static keys so a failure is reproducible; the ephemerals are generated inside the wasm.
+  const initSk = new Uint8Array(32).fill(0x11);
+  const respSk = new Uint8Array(32).fill(0x22);
+  const initPk = NoiseXx.static_public_from(initSk);
+  const respPk = NoiseXx.static_public_from(respSk);
+  assert(initPk.length === 32 && respPk.length === 32);
+
+  const initiator = NoiseXx.initiator(initSk, prologue);
+  const responder = NoiseXx.responder(respSk, prologue);
+
+  // Message 1 carries its payload in the clear: 32-byte ephemeral plus the payload verbatim.
+  const m1 = initiator.write_handshake(new Uint8Array(0));
+  assert(m1.length === 32, `msg1 is ${m1.length} bytes, expected 32`);
+  responder.read_handshake(m1);
+
+  const m2 = responder.write_handshake(new Uint8Array([0xaa]));
+  const payload2 = initiator.read_handshake(m2);
+  assert(payload2.length === 1 && payload2[0] === 0xaa, "message 2 is authenticated and carries payload");
+
+  const m3 = initiator.write_handshake(new Uint8Array(0));
+  responder.read_handshake(m3);
+
+  assert(initiator.is_handshake_finished() && responder.is_handshake_finished());
+  const hi = hex(initiator.handshake_hash());
+  const hr = hex(responder.handshake_hash());
+  assert(hi === hr, "both ends must derive the same handshake hash");
+  assert(hi.length === 64);
+
+  // Each side learns the other's static key from the handshake itself.
+  assert(hex(initiator.remote_static()) === hex(respPk), "initiator sees responder key");
+  assert(hex(responder.remote_static()) === hex(initPk), "responder sees initiator key");
+
+  // Transport, both directions, plus nonce advance. Each direction has its own nonce, so messages must
+  // be consumed in the order they were written.
+  const text = (v) => hex(new TextEncoder().encode(v));
+  const c1 = initiator.encrypt(new TextEncoder().encode("commitments"));
+  assert(hex(responder.decrypt(c1)) === text("commitments"));
+  const c2 = responder.encrypt(new TextEncoder().encode("share"));
+  assert(hex(initiator.decrypt(c2)) === text("share"));
+  const c3 = initiator.encrypt(new TextEncoder().encode("commitments"));
+  assert(hex(c3) !== hex(c1), "the same plaintext must not repeat ciphertext");
+  assert(hex(responder.decrypt(c3)) === text("commitments"));
+
+  // Rekey keeps a healthy channel working.
+  initiator.rekey();
+  responder.rekey();
+  const c4 = initiator.encrypt(new TextEncoder().encode("after rekey"));
+  assert(hex(responder.decrypt(c4)) === text("after rekey"));
+
+  // Tampered transport data is refused, and kills the channel: Noise advanced the nonce before checking
+  // the tag, so the two sides can never resynchronise.
+  const bad = new Uint8Array(initiator.encrypt(new TextEncoder().encode("tamper me")));
+  bad[bad.length - 1] ^= 0x01;
+  let threw = false;
+  try {
+    responder.decrypt(bad);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "tampered ciphertext must be refused");
+  assert(responder.is_poisoned(), "a failed decrypt must kill the channel");
+  let refused = false;
+  try {
+    responder.decrypt(initiator.encrypt(new TextEncoder().encode("later")));
+  } catch {
+    refused = true;
+  }
+  assert(refused, "a poisoned channel must refuse everything");
+});
+
+check("noise: a mismatched prologue does not establish a channel", () => {
+  const initSk = new Uint8Array(32).fill(0x33);
+  const respSk = new Uint8Array(32).fill(0x44);
+  const initiator = NoiseXx.initiator(initSk, new TextEncoder().encode("noir/pair/v1"));
+  const responder = NoiseXx.responder(respSk, new TextEncoder().encode("noir/other/v1"));
+
+  const m1 = initiator.write_handshake(new Uint8Array(0));
+  let failed = false;
+  try {
+    responder.read_handshake(m1);
+    const m2 = responder.write_handshake(new Uint8Array(0));
+    initiator.read_handshake(m2);
+  } catch {
+    failed = true;
+  }
+  assert(failed, "different prologues must not produce a channel");
 });
 
 // --- a real PCZT, end to end -------------------------------------------

@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 
 use frost_vault_core::custody;
+use frost_vault_core::noise;
 use frost_vault_core::protocol::{self, Envelope, MsgType, COORDINATOR_SLOT};
 use frost_vault_core::roster;
 use frost_vault_core::seal;
@@ -383,6 +384,97 @@ impl Dkg3 {
     /// else can read.
     pub fn static_secret(&self) -> js_sys::Uint8Array {
         to_js_bytes(&self.inner.static_secret)
+    }
+}
+
+/// The Noise XX channel used under BLE.
+///
+/// WebCrypto has no BLAKE2s, so this cannot be written in the extension: a hand-rolled Noise state
+/// machine in JavaScript would be a third implementation of a security-critical protocol. GATT reads and
+/// writes stay in the host — this only turns plaintext into bytes and back.
+///
+/// XX is three messages: initiator writes, responder replies, initiator finishes. After that both sides
+/// can `encrypt`/`decrypt`.
+///
+/// **Message 1's payload is plaintext.** Noise has no key before the first DH, so nothing that matters may
+/// be carried there; the initiator's static key is only revealed and proved in message 3. Use message 1
+/// for nothing, or for data you would be happy to see forged.
+#[wasm_bindgen]
+pub struct NoiseXx {
+    inner: noise::NoiseChannel,
+}
+
+#[wasm_bindgen]
+impl NoiseXx {
+    /// The X25519 public key belonging to a static private key.
+    #[wasm_bindgen]
+    pub fn static_public_from(private_key: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        let private: [u8; 32] = private_key.try_into().map_err(|_| JsError::new("static private key must be 32 bytes"))?;
+        Ok(to_js_bytes(&noise::static_public_from(&private)))
+    }
+
+    /// Start the channel as the connecting side.
+    #[wasm_bindgen]
+    pub fn initiator(static_private: &[u8], prologue: &[u8]) -> Result<NoiseXx, JsError> {
+        Ok(Self {
+            inner: noise::NoiseChannel::initiator(static_private, prologue).map_err(err)?,
+        })
+    }
+
+    /// Start the channel as the accepting side.
+    #[wasm_bindgen]
+    pub fn responder(static_private: &[u8], prologue: &[u8]) -> Result<NoiseXx, JsError> {
+        Ok(Self {
+            inner: noise::NoiseChannel::responder(static_private, prologue).map_err(err)?,
+        })
+    }
+
+    /// Write the next handshake message for this side.
+    pub fn write_handshake(&mut self, payload: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        self.inner.write_handshake(payload).map(|bytes| to_js_bytes(&bytes)).map_err(err)
+    }
+
+    /// Read a handshake message from the peer, returning its payload.
+    pub fn read_handshake(&mut self, message: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        self.inner.read_handshake(message).map(|bytes| to_js_bytes(&bytes)).map_err(err)
+    }
+
+    pub fn is_handshake_finished(&self) -> bool {
+        self.inner.is_handshake_finished()
+    }
+
+    /// Whether the channel is dead after an authentication failure.
+    ///
+    /// Noise advances the nonce before verifying the tag, so one bad message leaves the two sides out of
+    /// step permanently. When this is true the host must drop the channel and handshake again — every
+    /// later call returns an error.
+    pub fn is_poisoned(&self) -> bool {
+        self.inner.is_poisoned()
+    }
+
+    /// The handshake hash. Both ends must agree; unavailable until the handshake completes.
+    pub fn handshake_hash(&self) -> Result<js_sys::Uint8Array, JsError> {
+        self.inner.handshake_hash().map(|hash| to_js_bytes(&hash)).map_err(err)
+    }
+
+    /// The peer's static public key, once the handshake has revealed it.
+    pub fn remote_static(&self) -> Option<js_sys::Uint8Array> {
+        self.inner.remote_static().map(|key| to_js_bytes(&key))
+    }
+
+    /// Encrypt one payload. Completes the handshake first if it is finished but not yet converted.
+    pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        self.inner.encrypt(plaintext).map(|bytes| to_js_bytes(&bytes)).map_err(err)
+    }
+
+    /// Decrypt one payload from the peer.
+    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        self.inner.decrypt(ciphertext).map(|bytes| to_js_bytes(&bytes)).map_err(err)
+    }
+
+    /// Rotate the sending and receiving keys, as Noise's `rekey` specifies.
+    pub fn rekey(&mut self) -> Result<(), JsError> {
+        self.inner.rekey().map_err(err)
     }
 }
 
