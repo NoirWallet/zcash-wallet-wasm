@@ -52,8 +52,15 @@ struct Transcript {
 
 /// The device identity the phone puts in the handshake payload: `0x01 ‖ Ed25519 ‖ X25519`.
 ///
-/// The X25519 half is the device's Noise static public key, so a receiver can check that the identity and
-/// the key that authenticated the handshake describe the same device.
+/// The payload is **opaque to Noise**: whatever the application puts here is encrypted and mixed into the
+/// handshake hash, and this crate never looks inside it.
+///
+/// This vector fills the X25519 half with the same Noise static key that the handshake uses, purely so the
+/// vector is self-checking. That equality is **not** part of the protocol: the real binding between a
+/// device's identity and its transport key is a separate signature over
+/// `handshake_hash ‖ noise static ‖ role` with context `noir.transport.bind.v1`, which the client performs
+/// (see `tests/noise_vectors.rs` callers and the spec). Two different keys with a valid binding are
+/// equally correct, and an implementation that keeps them separate must not "fix" the mismatch.
 fn identity(ed25519: u8, noise_static_private: &[u8; 32]) -> Vec<u8> {
     let mut out = vec![0x01u8];
     out.extend(std::iter::repeat(ed25519).take(32));

@@ -132,9 +132,14 @@ const TRANSCRIPT_DOMAIN: &[u8] = b"noir-frost-vault/round1-transcript/v1";
 /// round-2 packages under the transcript it was shown, so a device that was shown something else cannot
 /// open them. The disagreement then surfaces as a failed open rather than as a group that looks finished.
 ///
-/// The transcript is `(slot, round-1 broadcast bytes)` in slot order, length-prefixed. Both sides must
-/// feed in the same bytes; a device that omitted a broadcast it received produces a different prologue,
-/// which is the intended outcome.
+/// The transcript is `(slot, round-1 broadcast bytes)` in slot order, length-prefixed, **including this
+/// device's own** broadcast. Both sides must feed in the same bytes; a device that omitted a broadcast it
+/// received produces a different prologue, which is the intended outcome.
+///
+/// **Not wired into the DKG yet.** [`crate::threshold::dkg_part2`] and `dkg_part3` still seal and open
+/// round 2 under [`ceremony_prologue`], so a deployment that switches this on must switch both ends at
+/// the same time: the two prologues do not open each other's packages. It is implemented and tested
+/// ahead of adoption, not in use.
 pub fn ceremony_prologue_with_transcript(participants: &[(u8, Vec<u8>)], round1: &[(u8, Vec<u8>)]) -> Vec<u8> {
     let mut out = ceremony_prologue(participants);
     out.extend_from_slice(TRANSCRIPT_DOMAIN);
