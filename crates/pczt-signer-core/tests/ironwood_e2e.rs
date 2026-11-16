@@ -50,6 +50,14 @@ const PAYMENT_VALUE: u64 = 990_000;
 /// Build an Ironwood PCZT whose spend authority is `ak` (a FROST group key).
 ///
 /// Returns the PCZT together with the FVK's address, so the caller can see where the funds go.
+/// The FVK the fixture builds its notes for: `ak` spliced over an unrelated spending key's `nk`/`rivk`.
+fn fixture_fvk(ak: &[u8; 32]) -> [u8; 96] {
+    let sk = SpendingKey::from_bytes([7u8; 32]).into_option().expect("valid sk");
+    let mut bytes = FullViewingKey::from(&sk).to_bytes();
+    bytes[..32].copy_from_slice(ak);
+    bytes
+}
+
 fn fixture_pczt(ak: &[u8; 32]) -> Pczt {
     let network = Network::TestNetwork;
     let target_height = network.activation_height(NetworkUpgrade::Nu6_3).expect("NU6.3 activation") + 1;
@@ -292,4 +300,93 @@ fn regen_fixture() {
     }
     hexed.push('\n');
     std::fs::write(dir.join("ironwood_1action.hex"), hexed).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Signer-side review: the plaintext fields, checked against the commitments.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn review_pins_every_output_to_its_commitment() {
+    use pczt_signer_core::review::review;
+
+    let mut rng = FrostRng;
+    let dkg = run_dkg(2, 2, &mut rng).expect("dkg");
+    let ak = dkg.group_verifying_key().unwrap();
+
+    let pczt = fixture_pczt(&ak);
+    let reviewed = review(&pczt, &fixture_fvk(&ak)).expect("review");
+
+    assert_eq!(reviewed.outputs.len(), 1);
+    assert_eq!(reviewed.spends.len(), 1);
+
+    // The fixture spends 1_000_000 and pays 990_000 back to itself: change 990_000, fee 10_000.
+    assert_eq!(reviewed.spends[0].value, 1_000_000);
+    assert!(reviewed.spends[0].is_ours);
+    assert_eq!(reviewed.outputs[0].value, 990_000);
+    assert!(reviewed.outputs[0].is_change, "the fixture pays itself");
+    assert_eq!(reviewed.change_total, 990_000);
+    assert_eq!(reviewed.sent_total, 0);
+    assert_eq!(reviewed.fee, 10_000);
+}
+
+#[test]
+fn review_refuses_a_transaction_from_another_vault() {
+    use pczt_signer_core::review::{review, ReviewError};
+
+    // A transaction built for one vault must not be reviewable with another vault's viewing key.
+    let mut rng = FrostRng;
+    let mine = run_dkg(2, 2, &mut rng).expect("dkg");
+    let theirs = run_dkg(2, 2, &mut rng).expect("dkg");
+    let pczt = fixture_pczt(&theirs.group_verifying_key().unwrap());
+
+    let err = review(&pczt, &fixture_fvk(&mine.group_verifying_key().unwrap())).expect_err("the spent note belongs to another vault");
+    assert!(matches!(err, ReviewError::SpendNotOurs { .. }), "{err:?}");
+}
+
+#[test]
+fn review_refuses_a_pczt_that_redacts_what_it_needs() {
+    use pczt::roles::redactor::Redactor;
+    use pczt_signer_core::review::{review, ReviewError};
+
+    // A coordinator that strips the fields the signer needs in order to verify is asking for a blind
+    // signature. Absent data is an error, never a zero.
+    let mut rng = FrostRng;
+    let dkg = run_dkg(2, 2, &mut rng).expect("dkg");
+    let ak = dkg.group_verifying_key().unwrap();
+    let mut qsk = [0u8; 32];
+    qsk[0] = 0x63;
+    qsk[31] = 0x01;
+    let _ = qsk;
+    let fvk = fixture_fvk(&ak);
+
+    let cases: Vec<(&'static str, pczt::Pczt)> = vec![
+        (
+            "output value",
+            Redactor::new(fixture_pczt(&ak))
+                .redact_ironwood_with(|mut bundle| bundle.redact_action(0, |mut a| a.clear_output_value()))
+                .finish(),
+        ),
+        (
+            "output rseed",
+            Redactor::new(fixture_pczt(&ak))
+                .redact_ironwood_with(|mut bundle| bundle.redact_action(0, |mut a| a.clear_output_rseed()))
+                .finish(),
+        ),
+        (
+            "output cmx",
+            Redactor::new(fixture_pczt(&ak))
+                .redact_ironwood_with(|mut bundle| bundle.redact_action(0, |mut a| a.clear_cmx()))
+                .finish(),
+        ),
+    ];
+
+    for (expected_field, pczt) in cases {
+        match review(&pczt, &fvk) {
+            Err(ReviewError::MissingField { field, .. }) => {
+                assert_eq!(field, expected_field, "redacted {expected_field} reported as {field}");
+            }
+            other => panic!("redacting {expected_field} must be refused, got {other:?}"),
+        }
+    }
 }

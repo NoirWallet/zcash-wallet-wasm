@@ -586,6 +586,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "f4jumble"
+version = "0.1.2"
+dependencies = [
+ "blake2b_simd",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -693,6 +700,7 @@ dependencies = [
  "reddsa 0.5.2",
  "sha2 0.10.9",
  "snow",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -1226,6 +1234,7 @@ dependencies = [
  "pczt",
  "rand 0.10.3",
  "rand 0.8.8",
+ "vault-keyset",
  "zcash_primitives",
  "zcash_protocol",
 ]
@@ -1862,6 +1871,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vault-keyset"
+version = "0.1.0"
+dependencies = [
+ "orchard",
+ "sha2 0.10.9",
+ "zcash_address",
+ "zcash_protocol",
+ "zeroize",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1953,6 +1973,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "zcash_address"
+version = "0.14.0"
+dependencies = [
+ "bech32",
+ "bs58",
+ "corez",
+ "f4jumble",
+ "zcash_encoding",
+ "zcash_protocol",
+]
+
+[[package]]
 name = "zcash_encoding"
 version = "0.5.0"
 dependencies = [
@@ -2005,7 +2047,9 @@ name = "zcash_protocol"
 version = "0.11.0"
 dependencies = [
  "corez",
+ "document-features",
  "hex",
+ "memuse",
  "zcash_encoding",
 ]
 

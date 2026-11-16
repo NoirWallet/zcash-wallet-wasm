@@ -21,6 +21,7 @@ orchard = { version = "0.16", default-features = false, features = ["std"] }
 ff = "0.14"
 
 [dev-dependencies]
+vault-keyset = { path = "../vault-keyset" }
 # Test-only: build one real Ironwood PCZT to run the flow end to end. These features stay out of
 # the library build.
 # Two RNG lines on purpose: librustzcash in this tree is on rand_core 0.10, while FROST
