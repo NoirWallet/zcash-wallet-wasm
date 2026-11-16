@@ -562,21 +562,6 @@ impl SessionGuard {
     }
 }
 
-fn decode_marker<E>(bytes: &[u8]) -> Result<([u8; 16], SessionProgress), GuardError<E>> {
-    if bytes.len() != 18 || bytes[0] != 1 {
-        return Err(GuardError::Malformed);
-    }
-    let mut session_id = [0u8; 16];
-    session_id.copy_from_slice(&bytes[1..17]);
-    let progress = match bytes[17] {
-        0 => SessionProgress::Created,
-        1 => SessionProgress::Committed,
-        2 => SessionProgress::Consumed,
-        _ => return Err(GuardError::Malformed),
-    };
-    Ok((session_id, progress))
-}
-
 /// A fresh random session id. Randomness, not a counter: an id that repeats across restarts would
 /// make a stale marker look like the current session.
 pub fn new_session_id<R: CryptoRng + RngCore>(rng: &mut R) -> [u8; 16] {

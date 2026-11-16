@@ -25,11 +25,13 @@
 
 pub mod custody;
 pub mod protocol;
+pub mod roster;
 pub mod seal;
 pub mod session;
 pub mod state;
 pub mod threshold;
 
 pub use custody::{Recovery, SessionGuard, SessionProgress, ShareBackup, ShareIdentity};
+pub use roster::{RosterError, RosterManifest};
 pub use session::{CoordinatorSession, SessionConfig, SessionError, SignerSession};
 pub use threshold::{DkgOutput, Suite};

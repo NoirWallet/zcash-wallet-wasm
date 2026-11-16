@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 use frost_vault_core::custody;
 use frost_vault_core::protocol::{self, Envelope, MsgType, COORDINATOR_SLOT};
+use frost_vault_core::roster;
 use frost_vault_core::seal;
 use frost_vault_core::session::{CoordinatorSession, SessionConfig, SignerSession};
 use frost_vault_core::state::{NonceState, SignPhase};
@@ -382,6 +383,47 @@ impl Dkg3 {
     /// else can read.
     pub fn static_secret(&self) -> js_sys::Uint8Array {
         to_js_bytes(&self.inner.static_secret)
+    }
+}
+
+/// The roster hash, computed here so no other language keeps its own copy of the encoding.
+///
+/// The wire format is fixed by agreement with the mobile client; the domain tag is concatenated raw,
+/// every field carries a 4-byte big-endian length, and numbers are canonical decimal text. A different
+/// encoding produces a different hash, and two devices that disagree on the roster hash will refuse to
+/// proceed — which is the point, but makes a silent drift expensive to debug.
+#[wasm_bindgen]
+pub struct RosterManifest {
+    inner: roster::RosterManifest,
+}
+
+#[wasm_bindgen]
+impl RosterManifest {
+    #[wasm_bindgen(constructor)]
+    pub fn new(group_id: &str, protocol_version: u32, ciphersuite: &str, mainnet: bool, threshold: u16, participants: u16) -> Result<RosterManifest, JsError> {
+        Ok(Self {
+            inner: roster::RosterManifest::new(group_id, protocol_version, ciphersuite, mainnet, threshold, participants).map_err(err)?,
+        })
+    }
+
+    /// Add a participant. Call order does not matter: the encoding sorts by slot.
+    pub fn add_participant(&mut self, slot: u8, identity_public_key: &[u8], transport_public_key: &[u8]) -> Result<(), JsError> {
+        self.inner.add_participant(slot, identity_public_key, transport_public_key).map_err(err)
+    }
+
+    /// The exact bytes that are hashed. For test vectors and debugging.
+    pub fn canonical_bytes(&self) -> Result<js_sys::Uint8Array, JsError> {
+        Ok(to_js_bytes(&self.inner.canonical_bytes().map_err(err)?))
+    }
+
+    /// `SHA-256(canonical_bytes)`.
+    pub fn hash(&self) -> Result<js_sys::Uint8Array, JsError> {
+        Ok(to_js_bytes(&self.inner.hash().map_err(err)?))
+    }
+
+    /// Lowercase hex of the hash, for comparing against the agreed vectors.
+    pub fn hash_hex(&self) -> Result<String, JsError> {
+        self.inner.hash_hex().map_err(err)
     }
 }
 
