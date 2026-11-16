@@ -35,11 +35,12 @@ pub struct ReviewedOutput {
 /// One spend, as verified from the PCZT itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewedSpend {
+    /// The identifier the transaction will be judged by, recomputed from the note rather than trusted.
+    ///
+    /// This is the handle to look up in the wallet's own note set: a nullifier that is not in it means the
+    /// transaction spends a note this device has never seen, whatever the plaintext fields say.
     pub nullifier: [u8; 32],
     pub value: u64,
-    /// Whether the spent note belongs to this vault. Anything else means the transaction touches notes
-    /// this signer cannot account for.
-    pub is_ours: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +63,8 @@ pub enum ReviewError {
     Malformed { action_index: u32, field: &'static str },
     /// The spend's note does not belong to this vault.
     SpendNotOurs { action_index: u32 },
+    /// The declared nullifier is not the one the note the PCZT describes produces.
+    NullifierMismatch { action_index: u32 },
     /// The output's `(recipient, value)` does not match the commitment the signature covers.
     OutputMismatch { action_index: u32 },
     /// The declared values do not balance against the bundle's value balance.
@@ -79,6 +82,7 @@ impl core::fmt::Display for ReviewError {
             Self::SpendNotOurs { action_index } => {
                 write!(f, "action {action_index}: the spent note is not in this vault")
             }
+            Self::NullifierMismatch { action_index } => write!(f, "action {action_index}: the declared nullifier is not the one this note produces"),
             Self::OutputMismatch { action_index } => write!(f, "action {action_index}: the displayed recipient and amount do not match the commitment"),
             Self::BalanceMismatch { declared, committed } => write!(f, "declared values balance to {declared}, the bundle's value balance is {committed}"),
             Self::Impossible { reason } => write!(f, "{reason}"),
@@ -93,12 +97,9 @@ struct SpendFacts {
     nullifier: [u8; 32],
     value: u64,
     recipient: [u8; 43],
+    rho: Rho,
+    rseed: RandomSeed,
     /// The plaintext version of the note being spent, as the PCZT states it.
-    ///
-    /// Nothing here consumes it yet: reconstructing a version-3 note's nullifier from the PCZT's spend
-    /// fields does not reproduce the declared value with the public Orchard API in the pinned version, so
-    /// the binding that would need it is not implemented. It is retained as the input that check will use.
-    #[allow(dead_code)]
     spend_version: NoteVersion,
     /// The plaintext version of the note being created.
     output_version: NoteVersion,
@@ -118,7 +119,7 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
             for (index, action) in bundle.actions().iter().enumerate() {
                 let index = index as u32;
                 let spend = action.spend();
-                let (Some(value), Some(recipient), Some(_rho), Some(_rseed)) = (spend.value(), spend.recipient(), spend.rho(), spend.rseed()) else {
+                let (Some(value), Some(recipient), Some(rho), Some(rseed)) = (spend.value(), spend.recipient(), spend.rho(), spend.rseed()) else {
                     spend_error = Some(ReviewError::MissingField {
                         action_index: index,
                         field: "spend note fields",
@@ -129,6 +130,8 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
                     nullifier: spend.nullifier().to_bytes(),
                     value: value.inner(),
                     recipient: recipient.to_raw_address_bytes(),
+                    rho: *rho,
+                    rseed: *rseed,
                     spend_version: *spend.note_version(),
                     output_version: *action.output().note_version(),
                 });
@@ -156,22 +159,33 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
     for (index, (action, facts)) in bundle.actions().iter().zip(spend_facts).enumerate() {
         let index = index as u32;
 
-        // The spend must reveal the address it spends from, and that address must be ours. This does not
-        // yet prove the nullifier is the one this note produces: reconstructing a version-3 note's
-        // nullifier from the PCZT's spend fields does not reproduce the declared value with the public
-        // Orchard API in the pinned version, so the cross-check is deliberately absent rather than
-        // silently approximated. The output checks below and the balance check are what carry the weight.
         let spend_address = Option::<Address>::from(Address::from_raw_address_bytes(&facts.recipient)).ok_or(ReviewError::Malformed {
             action_index: index,
             field: "spend recipient",
         })?;
+        // A cheap pre-filter: an address outside our viewing scope cannot be a note we can spend.
         if fvk.scope_for_address(&spend_address).is_none() {
             return Err(ReviewError::SpendNotOurs { action_index: index });
+        }
+
+        // The nullifier is what consensus checks against the chain, and it is derived from the note's own
+        // commitment — which covers the amount and the recipient. Rebuilding the note and recomputing the
+        // nullifier therefore ties the plaintext fields we are about to display to the identifier the
+        // transaction will be judged by: a PCZT that showed one note in its fields and spent another
+        // cannot pass both.
+        let spend_note = Note::from_parts(spend_address, NoteValue::from_raw(facts.value), facts.rho, facts.rseed, facts.spend_version)
+            .into_option()
+            .ok_or(ReviewError::Malformed {
+                action_index: index,
+                field: "spend note",
+            })?;
+        let recomputed = spend_note.nullifier(&fvk).to_bytes();
+        if recomputed != facts.nullifier {
+            return Err(ReviewError::NullifierMismatch { action_index: index });
         }
         spends.push(ReviewedSpend {
             nullifier: facts.nullifier,
             value: facts.value,
-            is_ours: true,
         });
 
         // Rebuild the output note. Its rho is the spend's nullifier, which is how Orchard derives it, so

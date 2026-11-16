@@ -58,6 +58,20 @@ fn fixture_fvk(ak: &[u8; 32]) -> [u8; 96] {
     bytes
 }
 
+/// postcard's varint encoding of an integer, so a test can find a value inside a serialized PCZT.
+fn varint(mut value: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
 fn fixture_pczt(ak: &[u8; 32]) -> Pczt {
     let network = Network::TestNetwork;
     let target_height = network.activation_height(NetworkUpgrade::Nu6_3).expect("NU6.3 activation") + 1;
@@ -322,12 +336,47 @@ fn review_pins_every_output_to_its_commitment() {
 
     // The fixture spends 1_000_000 and pays 990_000 back to itself: change 990_000, fee 10_000.
     assert_eq!(reviewed.spends[0].value, 1_000_000);
-    assert!(reviewed.spends[0].is_ours);
+    assert_ne!(reviewed.spends[0].nullifier, [0u8; 32], "the nullifier is the lookup key");
     assert_eq!(reviewed.outputs[0].value, 990_000);
     assert!(reviewed.outputs[0].is_change, "the fixture pays itself");
     assert_eq!(reviewed.change_total, 990_000);
     assert_eq!(reviewed.sent_total, 0);
     assert_eq!(reviewed.fee, 10_000);
+}
+
+#[test]
+fn review_refuses_a_spend_whose_nullifier_does_not_follow_from_its_fields() {
+    use pczt_signer_core::review::{review, ReviewError};
+
+    let mut rng = FrostRng;
+    let dkg = run_dkg(2, 2, &mut rng).expect("dkg");
+    let ak = dkg.group_verifying_key().unwrap();
+    let pczt = fixture_pczt(&ak);
+
+    // The spend's amount is one of the inputs to the note commitment, which is one of the inputs to the
+    // nullifier. Changing the amount and leaving the nullifier alone therefore makes the PCZT contradict
+    // itself — and that is exactly the shape of "show a small amount, spend a big note".
+    let mut bytes = pczt.clone().serialize().expect("serialize");
+    // postcard writes integers as varints, so the amount is not its 8-byte little-endian form.
+    let needle = varint(SPEND_VALUE);
+    let hits: Vec<usize> = bytes
+        .windows(needle.len())
+        .enumerate()
+        .filter(|(_, w)| *w == needle.as_slice())
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(hits.len(), 1, "the spend amount must appear exactly once ({hits:?})");
+    let at = hits[0];
+    let doctored_value = varint(SPEND_VALUE - 1);
+    assert_eq!(doctored_value.len(), needle.len(), "same varint width");
+    bytes[at..at + needle.len()].copy_from_slice(&doctored_value);
+
+    let doctored = Pczt::parse(&bytes).expect("the doctored PCZT is still structurally valid");
+    let err = review(&doctored, &fixture_fvk(&ak)).expect_err("the nullifier no longer follows");
+    assert!(matches!(err, ReviewError::NullifierMismatch { action_index: 0 }), "{err:?}");
+
+    // And the undoctored one still passes, so the check is not simply always failing.
+    assert!(review(&pczt, &fixture_fvk(&ak)).is_ok());
 }
 
 #[test]
