@@ -7,6 +7,9 @@
 
 use std::collections::BTreeMap;
 
+/// One ceremony id shared by every participant in these tests.
+const SESSION: [u8; 16] = [0x42; 16];
+
 use frost_vault_core::threshold::{
     self, aggregate_with_alpha, aggregate_with_randomizer_seed, commit, randomized_verifying_key, run_dkg, sign_with_alpha, sign_with_randomizer_seed,
     verify_with_group_key_and_alpha, DkgOutput, PublicKeyPackage, SigningCommitments, SUPPORTED_MODES,
@@ -231,7 +234,7 @@ fn per_round_dkg_once(participants: u16, threshold: u16) {
     let mut secrets = BTreeMap::new();
     let mut broadcasts = BTreeMap::new();
     for slot in 0..participants {
-        let r = dkg_part1(participants, threshold, slot as u8, &mut rng).expect("part1");
+        let r = dkg_part1(SESSION, participants, threshold, slot as u8, &mut rng).expect("part1");
         secrets.insert(slot as u8, r.secret);
         broadcasts.insert(slot as u8, r.broadcast);
     }
@@ -330,8 +333,8 @@ fn per_round_dkg_once(participants: u16, threshold: u16) {
 #[test]
 fn per_round_dkg_rejects_an_unsupported_mode() {
     let mut rng = OsRng;
-    assert!(frost_vault_core::threshold::dkg_part1(3, 5, 0, &mut rng).is_err());
-    assert!(frost_vault_core::threshold::dkg_part1(2, 2, 3, &mut rng).is_err());
+    assert!(frost_vault_core::threshold::dkg_part1(SESSION, 3, 5, 0, &mut rng).is_err());
+    assert!(frost_vault_core::threshold::dkg_part1(SESSION, 2, 2, 3, &mut rng).is_err());
 }
 
 #[test]
@@ -347,7 +350,7 @@ fn round_two_packages_are_sealed_and_the_relay_cannot_read_them() {
     let mut secrets = BTreeMap::new();
     let mut broadcasts = BTreeMap::new();
     for slot in 0..participants {
-        let r = dkg_part1(participants, threshold, slot as u8, &mut rng).expect("part1");
+        let r = dkg_part1(SESSION, participants, threshold, slot as u8, &mut rng).expect("part1");
         secrets.insert(slot as u8, r.secret);
         broadcasts.insert(slot as u8, r.broadcast);
     }
@@ -393,4 +396,30 @@ fn round_two_packages_are_sealed_and_the_relay_cannot_read_them() {
     );
 
     assert!(!final1.key_package.is_empty());
+}
+
+#[test]
+fn a_round1_secret_is_refused_in_a_second_ceremony() {
+    use frost_vault_core::threshold::{dkg_part1, dkg_part2, ThresholdError};
+
+    let mut rng = OsRng;
+    // Two ceremonies, so two session ids. The same device takes part in both.
+    let first = [0x11u8; 16];
+    let second = [0x22u8; 16];
+
+    let mine = dkg_part1(first, 2, 2, 0, &mut rng).expect("part1 for the first ceremony");
+    let peer = dkg_part1(first, 2, 2, 1, &mut rng).expect("the peer's part1");
+
+    // Reusing the first ceremony's secret against the second ceremony's broadcast is refused: evaluating
+    // one polynomial in two ceremonies hands a coordinator two evaluations, and two points are enough to
+    // recover the constant term — this device's contribution to the group key.
+    let peer_in_second = dkg_part1(second, 2, 2, 1, &mut rng).expect("the peer's part1, second ceremony");
+    let mut broadcasts = BTreeMap::new();
+    broadcasts.insert(1u8, peer_in_second.broadcast.clone());
+    assert!(matches!(dkg_part2(&mine.secret, &broadcasts), Err(ThresholdError::WrongSession)));
+
+    // The same secret against its own ceremony's broadcast is accepted, so the check is not simply failing.
+    let mut same = BTreeMap::new();
+    same.insert(1u8, peer.broadcast.clone());
+    assert!(dkg_part2(&mine.secret, &same).is_ok());
 }

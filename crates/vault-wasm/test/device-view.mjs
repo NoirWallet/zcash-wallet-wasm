@@ -55,7 +55,7 @@ class Device {
     this.#threshold = threshold;
     this.#slot = slot;
     this.#sessionId = sessionId;
-    this.#dkg = new Dkg(participants, threshold, slot);
+    this.#dkg = new Dkg(participants, threshold, slot, sessionId);
   }
 
   slot() {

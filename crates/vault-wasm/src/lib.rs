@@ -142,6 +142,22 @@ impl EnvelopeCodec {
         Ok(to_js_bytes(&bytes))
     }
 
+    /// Read a signing-session envelope, refusing a type outside the signing set and a round that disagrees
+    /// with its type. Returns the same shape as `decode`.
+    #[wasm_bindgen(js_name = readSigning)]
+    pub fn read_signing(bytes: &[u8]) -> Result<js_sys::Array, JsError> {
+        let env = protocol::read_signing_envelope(bytes).map_err(err)?;
+        let out = js_sys::Array::new();
+        out.push(&JsValue::from(env.msg_type.to_byte()));
+        out.push(&JsValue::from(env.round));
+        out.push(&JsValue::from(env.sender));
+        out.push(&JsValue::from(env.recipient));
+        out.push(&JsValue::from(env.sequence));
+        out.push(&to_js_bytes(&env.session_id));
+        out.push(&to_js_bytes(&env.payload));
+        Ok(out)
+    }
+
     /// Build a `SIGN_REJECT` envelope. `code`: 1 user declined, 2 verification failed, 3 malformed, 4 expired.
     #[wasm_bindgen(js_name = buildSignReject)]
     pub fn build_sign_reject(session_id: &[u8], sender: u8, recipient: u8, sequence: u32, code: u8, note: &str) -> Result<js_sys::Uint8Array, JsError> {
@@ -262,7 +278,12 @@ impl EnvelopeCodec {
             .ok_or_else(|| JsError::new(&format!("{name} is not a reserved message type")))
     }
 
-    /// The `round` a message type belongs to. Sending a different one gets the message refused.
+    /// The `round` a message type belongs to, per the spec's message table.
+    ///
+    /// The value is enforced only inside a session: `readSigning` and the signing sessions refuse an
+    /// envelope whose round disagrees with its type. Nothing checks the DKG rounds, so this is a lookup
+    /// for callers that fill the field themselves — a wrong value produces a message the peer refuses,
+    /// not a local error.
     #[wasm_bindgen]
     pub fn round_of(name: &str) -> Result<u8, JsError> {
         let msg_type = defined_msg_type(name)
@@ -673,17 +694,24 @@ pub struct Dkg {
     participants: u16,
     threshold: u16,
     slot: u8,
+    session_id: [u8; 16],
 }
 
 #[wasm_bindgen]
 impl Dkg {
     #[wasm_bindgen(constructor)]
-    pub fn new(participants: u16, threshold: u16, slot: u8) -> Result<Dkg, JsError> {
+    pub fn new(participants: u16, threshold: u16, slot: u8, session_id: &[u8]) -> Result<Dkg, JsError> {
         if slot as u16 >= participants {
             return Err(JsError::new("slot is outside the roster"));
         }
         threshold::slot_identifier(slot).map_err(err)?;
-        Ok(Self { participants, threshold, slot })
+        let session_id: [u8; 16] = session_id.try_into().map_err(|_| JsError::new("session_id must be 16 bytes"))?;
+        Ok(Self {
+            participants,
+            threshold,
+            slot,
+            session_id,
+        })
     }
 
     pub fn slot(&self) -> u8 {
@@ -691,8 +719,11 @@ impl Dkg {
     }
 
     /// Round 1: generate this device's contribution.
+    ///
+    /// The contribution is bound to this ceremony's session id: a later round refuses a broadcast that
+    /// names a different one, so a round-1 secret cannot be carried into a second ceremony.
     pub fn part1(&self) -> Result<Dkg1, JsError> {
-        let inner = threshold::dkg_part1(self.participants, self.threshold, self.slot, &mut rng()).map_err(err)?;
+        let inner = threshold::dkg_part1(self.session_id, self.participants, self.threshold, self.slot, &mut rng()).map_err(err)?;
         Ok(Dkg1 { inner })
     }
 

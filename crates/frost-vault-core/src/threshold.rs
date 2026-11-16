@@ -42,9 +42,14 @@ pub type SpendAuthSignature = [u8; 64];
 
 #[derive(Debug)]
 pub enum ThresholdError {
-    UnsupportedMode { participants: u16, threshold: u16 },
+    UnsupportedMode {
+        participants: u16,
+        threshold: u16,
+    },
     Frost(String),
     BadSignatureLength(usize),
+    /// A round-1 broadcast belongs to a different ceremony than this device's round-1 secret.
+    WrongSession,
 }
 
 impl std::fmt::Display for ThresholdError {
@@ -56,6 +61,7 @@ impl std::fmt::Display for ThresholdError {
             ),
             Self::Frost(e) => write!(f, "frost: {e}"),
             Self::BadSignatureLength(n) => write!(f, "signature must be 64 bytes, got {n}"),
+            Self::WrongSession => f.write_str("this round-1 secret belongs to another ceremony: a round-1 secret must never be reused"),
         }
     }
 }
@@ -212,7 +218,10 @@ pub fn slot_identifier(slot: u8) -> Result<Identifier, ThresholdError> {
 //   round-1 broadcast: 1 || static_pk(32) || frost_round1_package
 //   round-2 secret:  1 || my_slot(1) || static_sk(32) || static_pk(32) || len(u16) || frost_secret
 //   round-2 package: sealed with Noise (self-framing)
-const DKG_WIRE_VERSION: u8 = 1;
+/// Bumped when the secret or broadcast layout changed, so a stale blob is refused rather than misread.
+/// Version 2 added the ceremony's session id to both, which is what makes a round-1 secret unusable in a
+/// different ceremony.
+const DKG_WIRE_VERSION: u8 = 2;
 
 fn put_len(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ThresholdError> {
     let len = u16::try_from(bytes.len()).map_err(|_| ThresholdError::Frost("DKG blob too large".into()))?;
@@ -238,25 +247,39 @@ fn take_len<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<&'a [u8], ThresholdE
 }
 
 struct SecretEnvelope {
+    /// The ceremony this secret belongs to. Every round-2/3 step checks it, so a secret cannot be carried
+    /// into a different ceremony by accident.
+    session_id: [u8; 16],
     slot: u8,
     static_sk: Vec<u8>,
     static_pk: Vec<u8>,
     frost: Vec<u8>,
 }
 
+/// Refuse a round-1 broadcast that names a different ceremony than this device's secret does.
+fn check_session(mine: &SecretEnvelope, theirs: &[u8; 16]) -> Result<(), ThresholdError> {
+    if mine.session_id != *theirs {
+        return Err(ThresholdError::WrongSession);
+    }
+    Ok(())
+}
+
 fn unpack_secret(bytes: &[u8]) -> Result<SecretEnvelope, ThresholdError> {
-    if bytes.len() < 67 || bytes[0] != DKG_WIRE_VERSION {
+    if bytes.len() < 83 || bytes[0] != DKG_WIRE_VERSION {
         return Err(ThresholdError::Frost("unsupported DKG secret format".into()));
     }
     let slot = bytes[1];
-    let static_sk = bytes[2..34].to_vec();
-    let static_pk = bytes[34..66].to_vec();
-    let mut pos = 66;
+    let mut session_id = [0u8; 16];
+    session_id.copy_from_slice(&bytes[2..18]);
+    let static_sk = bytes[18..50].to_vec();
+    let static_pk = bytes[50..82].to_vec();
+    let mut pos = 82;
     let frost = take_len(bytes, &mut pos)?.to_vec();
     if pos != bytes.len() {
         return Err(ThresholdError::Frost("trailing bytes in DKG secret".into()));
     }
     Ok(SecretEnvelope {
+        session_id,
         slot,
         static_sk,
         static_pk,
@@ -264,10 +287,11 @@ fn unpack_secret(bytes: &[u8]) -> Result<SecretEnvelope, ThresholdError> {
     })
 }
 
-fn pack_secret(slot: u8, static_sk: &[u8], static_pk: &[u8], frost: &[u8]) -> Result<Vec<u8>, ThresholdError> {
-    let mut out = Vec::with_capacity(68 + frost.len());
+fn pack_secret(session_id: &[u8; 16], slot: u8, static_sk: &[u8], static_pk: &[u8], frost: &[u8]) -> Result<Vec<u8>, ThresholdError> {
+    let mut out = Vec::with_capacity(84 + frost.len());
     out.push(DKG_WIRE_VERSION);
     out.push(slot);
+    out.extend_from_slice(session_id);
     out.extend_from_slice(static_sk);
     out.extend_from_slice(static_pk);
     put_len(&mut out, frost)?;
@@ -280,20 +304,24 @@ fn pack_secret(slot: u8, static_sk: &[u8], static_pk: &[u8], frost: &[u8]) -> Re
 /// bytes and needs the peer's key to seal later ceremony messages to it. Going through this function
 /// keeps the framing inside the crate.
 pub fn static_public_of_broadcast(broadcast: &[u8]) -> Result<Vec<u8>, ThresholdError> {
-    Ok(unpack_broadcast(broadcast)?.0)
+    let (_, static_pk, _) = unpack_broadcast(broadcast)?;
+    Ok(static_pk)
 }
 
 /// A peer's round-1 broadcast: its static key plus the FROST package.
-fn unpack_broadcast(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ThresholdError> {
-    if bytes.len() < 33 || bytes[0] != DKG_WIRE_VERSION {
+fn unpack_broadcast(bytes: &[u8]) -> Result<([u8; 16], Vec<u8>, Vec<u8>), ThresholdError> {
+    if bytes.len() < 49 || bytes[0] != DKG_WIRE_VERSION {
         return Err(ThresholdError::Frost("unsupported DKG broadcast format".into()));
     }
-    Ok((bytes[1..33].to_vec(), bytes[33..].to_vec()))
+    let mut session_id = [0u8; 16];
+    session_id.copy_from_slice(&bytes[1..17]);
+    Ok((session_id, bytes[17..49].to_vec(), bytes[49..].to_vec()))
 }
 
-fn pack_broadcast(static_pk: &[u8], frost: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(33 + frost.len());
+fn pack_broadcast(session_id: &[u8; 16], static_pk: &[u8], frost: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(49 + frost.len());
     out.push(DKG_WIRE_VERSION);
+    out.extend_from_slice(session_id);
     out.extend_from_slice(static_pk);
     out.extend_from_slice(frost);
     out
@@ -335,7 +363,7 @@ pub struct DkgFinal {
 }
 
 /// Round 1 of the DKG for one device.
-pub fn dkg_part1<R>(participants: u16, threshold: u16, slot: u8, rng: &mut R) -> Result<DkgRound1, ThresholdError>
+pub fn dkg_part1<R>(session_id: [u8; 16], participants: u16, threshold: u16, slot: u8, rng: &mut R) -> Result<DkgRound1, ThresholdError>
 where
     R: CryptoRng + RngCore,
 {
@@ -349,8 +377,8 @@ where
     // carried forward into round 2.
     let (static_sk, static_pk) = crate::seal::generate_keypair()?;
     Ok(DkgRound1 {
-        secret: pack_secret(slot, &static_sk, &static_pk, &secret.serialize().map_err(frost)?)?,
-        broadcast: pack_broadcast(&static_pk, &package.serialize().map_err(frost)?),
+        secret: pack_secret(&session_id, slot, &static_sk, &static_pk, &secret.serialize().map_err(frost)?)?,
+        broadcast: pack_broadcast(&session_id, &static_pk, &package.serialize().map_err(frost)?),
         static_public: static_pk,
     })
 }
@@ -365,7 +393,8 @@ pub fn dkg_part2(secret: &[u8], peer_broadcasts: &BTreeMap<u8, Vec<u8>>) -> Resu
     let mut peers = BTreeMap::new();
     let mut statics = vec![(mine.slot, mine.static_pk.clone())];
     for (slot, bytes) in peer_broadcasts {
-        let (static_pk, frost_bytes) = unpack_broadcast(bytes)?;
+        let (session_id, static_pk, frost_bytes) = unpack_broadcast(bytes)?;
+        check_session(&mine, &session_id)?;
         let package = frost_core::keys::dkg::round1::Package::<Suite>::deserialize(&frost_bytes).map_err(frost)?;
         peers.insert(slot_identifier(*slot)?, package);
         statics.push((*slot, static_pk));
@@ -390,7 +419,13 @@ pub fn dkg_part2(secret: &[u8], peer_broadcasts: &BTreeMap<u8, Vec<u8>>) -> Resu
     }
 
     Ok(DkgRound2 {
-        secret: pack_secret(mine.slot, &mine.static_sk, &mine.static_pk, &round2_secret.serialize().map_err(frost)?)?,
+        secret: pack_secret(
+            &mine.session_id,
+            mine.slot,
+            &mine.static_sk,
+            &mine.static_pk,
+            &round2_secret.serialize().map_err(frost)?,
+        )?,
         outgoing: by_slot,
         statics: statics_by_slot,
     })
@@ -404,7 +439,12 @@ pub fn dkg_part3(secret: &[u8], peer_broadcasts: &BTreeMap<u8, Vec<u8>>, incomin
     let mut broadcasts = BTreeMap::new();
     let mut statics = vec![(mine.slot, mine.static_pk.clone())];
     for (slot, bytes) in peer_broadcasts {
-        let (static_pk, frost_bytes) = unpack_broadcast(bytes)?;
+        let (session_id, static_pk, frost_bytes) = unpack_broadcast(bytes)?;
+        // Every participant must name the same ceremony, and it must be this device's own. Reusing a
+        // round-1 secret in a second ceremony evaluates the same polynomial at different identifiers,
+        // which is enough for a coordinator that holds both evaluations to recover the constant term —
+        // that is, this device's contribution to the group key.
+        check_session(&mine, &session_id)?;
         let package = frost_core::keys::dkg::round1::Package::<Suite>::deserialize(&frost_bytes).map_err(frost)?;
         broadcasts.insert(slot_identifier(*slot)?, package);
         statics.push((*slot, static_pk));

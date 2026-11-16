@@ -56,6 +56,37 @@ fn a_result_whose_shape_disagrees_with_its_status_is_refused() {
 }
 
 #[test]
+fn the_round_table_matches_the_spec() {
+    // Four of these were wrong here until a counterparty read the table and compared it with the spec's
+    // message list. Pinning every row means the next drift is a failing test rather than a peer refusing
+    // a message in the middle of a ceremony.
+    use frost_vault_core::protocol::MsgType::*;
+    for (msg_type, round) in [
+        (PairInvite, 0u8),
+        (PairResponse, 0),
+        (RosterLock, 0),
+        (DkgR1, 1),
+        (DkgR1Bundle, 1),
+        (DkgR1Echo, 1),
+        (DkgR1Cert, 1),
+        (DkgR2Batch, 2),
+        (DkgR2Inbox, 2),
+        (KeysetSetup, 3),
+        (DkgFinal, 3),
+        (DkgActivate, 3),
+        (SignInit, 1),
+        (SignCommitments, 1),
+        (SignPayload, 3),
+        (SignShare, 3),
+        (SignReject, 3),
+        (SignResult, 3),
+        (SessionAbort, 3),
+    ] {
+        assert_eq!(msg_type.round(), round, "{msg_type:?}");
+    }
+}
+
+#[test]
 fn the_round_comes_from_the_message_type_and_cannot_be_passed_in_wrong() {
     // There is no `round` argument anywhere in the signing constructors, so the table cannot be violated
     // by a caller. This test documents the resulting values.

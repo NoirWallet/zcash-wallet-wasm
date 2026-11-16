@@ -20,6 +20,27 @@ const RESP_STATIC: [u8; 32] = [0x22; 32];
 const INIT_EPHEMERAL: [u8; 32] = [0x33; 32];
 const RESP_EPHEMERAL: [u8; 32] = [0x44; 32];
 
+/// The published vectors, written out rather than compared against a second run of this build.
+///
+/// A determinism-only test passes after a `snow` upgrade changes every byte, which is exactly when it
+/// must fail: the peer's implementation would no longer interoperate and nothing would say so.
+///
+/// The two sets differ only in the msg2/msg3 payloads, and that is enough to change the messages *and* the
+/// handshake hash — Noise mixes every handshake message into it.
+const EMPTY_PAYLOADS: (&str, &str, &str, &str) = (
+    "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+    "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6be4b2ed560b9e34baa5e6b14cf3867fb15797dcfc422f9fd1cc48da4363ae2805dc9eead879e14b5242925c8b9368db182ce37c186a61eefc94102e20486c0627",
+    "e96c1d31e3e3342fd97aaa674b61e3ecd778cfa8814c6b65dceca56e8b154edc5669683dc77c683f2b42ccdaad41a30e8838d27c5d777f34849644b5a7d7e905",
+    "1cf33b992be421257ba9213c0b5a2d1015611f4203cea5355601c5ed1bc5a55a",
+);
+
+const IDENTITY_PAYLOADS: (&str, &str, &str, &str) = (
+    "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+    "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6be4b2ed560b9e34baa5e6b14cf3867fb15797dcfc422f9fd1cc48da4363ae2805dc9eead879e14b5242925c8b9368db18098c92d6f07567432d61cba339f42b3a4ef9b449826e3e55a9b3b39204d00f6b434cb38d7c4f2be6b36b8f23780db9f388de6e17360590ecdab1791042ba70e474964f36d3223056f5885936de0c23a72a",
+    "e96c1d31e3e3342fd97aaa674b61e3ecd778cfa8814c6b65dceca56e8b154edc74e86c79cf6c804b5a7716526fd8affcd6835378012d8fbe371ad32aa96f964f49c2183f7f625ed84cee4b3f7d2796988d1867de46594d2e8d8265f688477d54a79e3efbd91b273ad30d39310203655247a7ecdf1a99036b12da111d37e618439e",
+    "bb3bf8bedc1a90ac0d5dfe2066e5e32f804de5ad6dd20f75f9754fc0faf8a9fe",
+);
+
 struct Transcript {
     msg1: Vec<u8>,
     msg2: Vec<u8>,
@@ -94,6 +115,11 @@ fn the_handshake_is_a_pure_function_of_its_inputs() {
     for with_identity in [false, true] {
         let a = run_with(with_identity);
         let b = run_with(with_identity);
+        let expected = if with_identity { IDENTITY_PAYLOADS } else { EMPTY_PAYLOADS };
+        assert_eq!(hex(&a.msg1), expected.0, "msg1 (payloads: {with_identity})");
+        assert_eq!(hex(&a.msg2), expected.1, "msg2 (payloads: {with_identity})");
+        assert_eq!(hex(&a.msg3), expected.2, "msg3 (payloads: {with_identity})");
+        assert_eq!(hex(&a.hash), expected.3, "handshake_hash (payloads: {with_identity})");
         assert_eq!(a.msg1, b.msg1);
         assert_eq!(a.msg2, b.msg2);
         assert_eq!(a.msg3, b.msg3);

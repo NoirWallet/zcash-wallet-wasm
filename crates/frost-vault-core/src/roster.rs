@@ -1,9 +1,12 @@
 //! The roster manifest and its hash.
 //!
 //! Three implementations of this encoding would drift apart the first time someone typed a length
-//! prefix in the wrong endianness, so it lives here — in the crate both the wasm module and the native
-//! signer link — and nowhere else. The wire format below is fixed by agreement with the mobile client;
-//! treat it as a protocol constant, not as an implementation detail.
+//! prefix in the wrong endianness, so it lives here and in the wasm wrapper, and nowhere else. The wire
+//! format below is fixed by the spec's roster section; treat it as a protocol constant, not as an
+//! implementation detail.
+//!
+//! Whether the native client links this crate is a separate question and not one this module can answer;
+//! the pinned vectors are what actually keeps two implementations honest.
 //!
 //! ```text
 //! rosterHash = SHA-256(

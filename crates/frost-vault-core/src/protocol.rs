@@ -353,11 +353,13 @@ impl MsgType {
             DkgR2Batch | DkgR2Inbox => 2,
             // Pairing and roster happen before any round.
             PairInvite | PairResponse | RosterLock => 0,
-            KeysetSetup | DkgFinal | DkgActivate => 2,
+            // Finalisation messages belong to the ceremony's last round. These four values were wrong here
+            // for a while (2, 2, 2 and 0), which only mattered once `round_of` exposed the table to callers
+            // that fill the field themselves; the spec's message table (6.1) is the authority.
+            KeysetSetup | DkgFinal | DkgActivate | SessionAbort => 3,
             // Signing.
             SignInit | SignCommitments => 1,
             SignPayload | SignShare | SignReject | SignResult => 3,
-            SessionAbort => 0,
         }
     }
 }

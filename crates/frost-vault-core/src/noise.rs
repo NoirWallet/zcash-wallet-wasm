@@ -184,8 +184,9 @@ impl NoiseChannel {
         }
     }
 
-    /// The peer's static public key, once the handshake has revealed it: after message 1 for the
-    /// responder, after message 2 for the initiator.
+    /// The peer's static public key, once the handshake has revealed it: after message 3 for the
+    /// responder (the initiator's static key is encrypted into message 3), after message 2 for the
+    /// initiator (the responder's).
     pub fn remote_static(&self) -> Option<Vec<u8>> {
         match &self.state {
             State::Handshake(hs) => hs.get_remote_static().map(|k| k.to_vec()),
@@ -317,5 +318,27 @@ impl NoiseChannel {
 
     pub fn responder_with_ephemeral(static_private: &[u8], prologue: &[u8], ephemeral_private: &[u8]) -> Result<Self, NoiseError> {
         Self::build_with_ephemeral(static_private, prologue, false, Some(ephemeral_private))
+    }
+}
+
+/// The timing above is behaviour, not commentary: message 1 carries no static key at all.
+#[cfg(all(test, feature = "test-vectors"))]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn the_responder_learns_the_initiator_static_only_after_message_3() {
+        let mut initiator = NoiseChannel::initiator_with_ephemeral(&[0x11; 32], b"noir/pair/v1", &[0x33; 32]).unwrap();
+        let mut responder = NoiseChannel::responder_with_ephemeral(&[0x22; 32], b"noir/pair/v1", &[0x44; 32]).unwrap();
+        let msg1 = initiator.write_handshake(b"").unwrap();
+        responder.read_handshake(&msg1).unwrap();
+        assert!(responder.remote_static().is_none(), "message 1 carries no static key");
+        let msg2 = responder.write_handshake(b"").unwrap();
+        initiator.read_handshake(&msg2).unwrap();
+        assert!(initiator.remote_static().is_some(), "the initiator learns it from message 2");
+        assert!(responder.remote_static().is_none(), "still unknown to the responder");
+        let msg3 = initiator.write_handshake(b"").unwrap();
+        responder.read_handshake(&msg3).unwrap();
+        assert!(responder.remote_static().is_some(), "message 3 reveals it");
     }
 }

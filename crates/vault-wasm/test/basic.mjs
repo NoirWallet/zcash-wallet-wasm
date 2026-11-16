@@ -122,7 +122,7 @@ const sessionId = new Uint8Array(16).fill(0x5a);
 
 const devices = [];
 for (let slot = 0; slot < PARTICIPANTS; slot += 1) {
-  devices.push(new Dkg(PARTICIPANTS, THRESHOLD, slot));
+  devices.push(new Dkg(PARTICIPANTS, THRESHOLD, slot, sessionId));
 }
 
 // Round 1
@@ -323,7 +323,8 @@ check("qsk: generated, canonical, and it drives the keyset", () => {
 
 function runCeremony(participants, threshold) {
   const ds = [];
-  for (let slot = 0; slot < participants; slot += 1) ds.push(new Dkg(participants, threshold, slot));
+  const dkgSession = new Uint8Array(16).fill(0x5a);
+  for (let slot = 0; slot < participants; slot += 1) ds.push(new Dkg(participants, threshold, slot, dkgSession));
 
   const r1 = [];
   const bc = new MessageSet();
@@ -476,7 +477,8 @@ check("dkg over envelopes: the relay binds, forwards, and rejects replays", () =
   const threshold = 2;
   const sid = EnvelopeCodec.new_session_id();
   const ds = [];
-  for (let slot = 0; slot < participants; slot += 1) ds.push(new Dkg(participants, threshold, slot));
+  const dkgSession = new Uint8Array(16).fill(0x5a);
+  for (let slot = 0; slot < participants; slot += 1) ds.push(new Dkg(participants, threshold, slot, dkgSession));
   const relay = new DkgRelay(sid, participants);
 
   // Round 1: each device sends an envelope to the relay; the relay validates and collects.
@@ -503,7 +505,7 @@ check("dkg over envelopes: the relay binds, forwards, and rejects replays", () =
   assert(threw, "a replayed round-1 envelope must be refused");
 
   // An envelope from outside the roster must be refused.
-  const outsider = new Dkg(participants, threshold, 2);
+  const outsider = new Dkg(participants, threshold, 2, new Uint8Array(16).fill(0x5a));
   const outsiderEnv = outsider.part1().broadcast_envelope(sid, 9, 2);
   const narrow = new DkgRelay(sid, 2); // roster of two, sender 2 is outside it
   let refused = false;
