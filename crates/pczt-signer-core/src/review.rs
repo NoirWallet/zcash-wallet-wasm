@@ -158,35 +158,51 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
 
     for (index, (action, facts)) in bundle.actions().iter().zip(spend_facts).enumerate() {
         let index = index as u32;
+        // Set when this action's spend is filler rather than a note of ours.
+        let mut padding = false;
 
         let spend_address = Option::<Address>::from(Address::from_raw_address_bytes(&facts.recipient)).ok_or(ReviewError::Malformed {
             action_index: index,
             field: "spend recipient",
         })?;
-        // A cheap pre-filter: an address outside our viewing scope cannot be a note we can spend.
-        if fvk.scope_for_address(&spend_address).is_none() {
-            return Err(ReviewError::SpendNotOurs { action_index: index });
+        // A spend outside our viewing scope is normally a rejection: a transaction that touches notes this
+        // signer cannot account for is exactly what the review exists to refuse.
+        //
+        // The exception is padding. An Orchard bundle has one spend and one output per action, so a
+        // transaction that pays two addresses needs a filler spend with zero value. Those are not ours and
+        // never will be. Skipping them is safe because a zero-value spend moves nothing: it cannot shift the
+        // balance, and the action's output is still checked against its own commitment below.
+        let ours = fvk.scope_for_address(&spend_address).is_some();
+        if !ours {
+            if facts.value != 0 {
+                return Err(ReviewError::SpendNotOurs { action_index: index });
+            }
+            padding = true;
         }
 
-        // The nullifier is what consensus checks against the chain, and it is derived from the note's own
-        // commitment — which covers the amount and the recipient. Rebuilding the note and recomputing the
-        // nullifier therefore ties the plaintext fields we are about to display to the identifier the
-        // transaction will be judged by: a PCZT that showed one note in its fields and spent another
-        // cannot pass both.
-        let spend_note = Note::from_parts(spend_address, NoteValue::from_raw(facts.value), facts.rho, facts.rseed, facts.spend_version)
-            .into_option()
-            .ok_or(ReviewError::Malformed {
-                action_index: index,
-                field: "spend note",
-            })?;
-        let recomputed = spend_note.nullifier(&fvk).to_bytes();
-        if recomputed != facts.nullifier {
-            return Err(ReviewError::NullifierMismatch { action_index: index });
+        if !padding {
+            // The nullifier is what consensus checks against the chain, and it is derived from the note's own
+            // commitment — which covers the amount and the recipient. Rebuilding the note and recomputing the
+            // nullifier therefore ties the plaintext fields we are about to display to the identifier the
+            // transaction will be judged by: a PCZT that showed one note in its fields and spent another
+            // cannot pass both.
+            let spend_note = Note::from_parts(spend_address, NoteValue::from_raw(facts.value), facts.rho, facts.rseed, facts.spend_version)
+                .into_option()
+                .ok_or(ReviewError::Malformed {
+                    action_index: index,
+                    field: "spend note",
+                })?;
+            let recomputed = spend_note.nullifier(&fvk).to_bytes();
+            if recomputed != facts.nullifier {
+                return Err(ReviewError::NullifierMismatch { action_index: index });
+            }
         }
-        spends.push(ReviewedSpend {
-            nullifier: facts.nullifier,
-            value: facts.value,
-        });
+        if !padding {
+            spends.push(ReviewedSpend {
+                nullifier: facts.nullifier,
+                value: facts.value,
+            });
+        }
 
         // Rebuild the output note. Its rho is the spend's nullifier, which is how Orchard derives it, so
         // the reconstruction needs nothing beyond the PCZT.
@@ -246,7 +262,11 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
             is_change,
             memo: None,
         });
-        declared_net += facts.value as i128 - out_value as i128;
+        // A padding spend contributes nothing; counting it would break the balance for no reason.
+        if !padding {
+            declared_net += facts.value as i128;
+        }
+        declared_net -= out_value as i128;
     }
 
     if outputs.is_empty() {
