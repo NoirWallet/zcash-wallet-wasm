@@ -136,8 +136,12 @@ fn the_spent_note_is_not_ours_under_the_fake_key_so_the_review_refuses() {
     assert_eq!(view.change_total, CHANGE);
     assert_eq!(view.fee, FEE);
 
-    // The fake key cannot review it at all.
-    assert_eq!(review(&pczt, &fake.to_bytes()), Err(ReviewError::SpendNotOurs { action_index: 1 }));
+    // The fake key cannot review it at all. The index is not pinned: the builder shuffles outputs.
+    assert!(
+        matches!(review(&pczt, &fake.to_bytes()), Err(ReviewError::SpendNotOurs { .. })),
+        "{:?}",
+        review(&pczt, &fake.to_bytes())
+    );
 }
 
 #[test]
@@ -155,7 +159,13 @@ fn changing_only_nk_also_changes_dk_so_the_same_check_catches_it() {
     );
 
     let pczt = build_pczt(&ak, &honest, &swapped_nk.address_at(0u32, Scope::External));
-    assert_eq!(review(&pczt, &swapped_nk.to_bytes()), Err(ReviewError::SpendNotOurs { action_index: 1 }));
+    // The action index is not pinned: the builder shuffles outputs, so the real spend is not always in the
+    // same slot.
+    assert!(
+        matches!(review(&pczt, &swapped_nk.to_bytes()), Err(ReviewError::SpendNotOurs { .. })),
+        "{:?}",
+        review(&pczt, &swapped_nk.to_bytes())
+    );
 }
 
 #[test]
