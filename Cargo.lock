@@ -4088,6 +4088,7 @@ dependencies = [
  "pczt-signer-core",
  "rand 0.10.3",
  "rand_core 0.6.4",
+ "sha2 0.10.9",
  "vault-deposit",
  "vault-keyset",
  "wasm-bindgen",

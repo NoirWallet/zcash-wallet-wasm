@@ -1,6 +1,7 @@
 //! Keyset setup, PCZT tooling, verification, deposit and canary helpers.
 
 use super::*;
+use sha2::Digest;
 
 /// Keyset setup: `ak` plus the recovery key to a receiving address.
 #[wasm_bindgen]
@@ -198,6 +199,62 @@ impl PcztTools {
             m.verify_rk(&ak).map_err(err)?;
         }
         Ok(())
+    }
+
+    /// The signer's own reading of the transaction: every output (recipient, amount, change, memo) and
+    /// every spend, with the totals and the fee.
+    ///
+    /// Returns `[reviewedPcztSha256, outputs, spends, sentTotal, changeTotal, fee]` where:
+    ///
+    /// * `reviewedPcztSha256` — SHA-256 of **the bytes passed in**, so a caller can persist "this is the
+    ///   transaction I reviewed" and compare it later. Compute it on the PCZT the user was shown, not on a
+    ///   later, proved copy: proving changes the bytes.
+    /// * `outputs` — array of `[recipient(43), value, isChange, memoOrNull]`. `memoOrNull` is either the
+    ///   exact 512-byte memo (ZIP-302 marker and padding included) or `null` for "could not verify"; the
+    ///   two must never be conflated, so a caller that needs a memo must reject `null`.
+    /// * `spends` — array of `[nullifier(32), value]`, one per spend that belongs to this viewing key.
+    /// * `sentTotal` / `changeTotal` / `fee` — in zats. `sentTotal + changeTotal + fee` is the spent value.
+    ///
+    /// Fails wholesale if any check fails: there is no "partially reviewed" result to approve.
+    #[wasm_bindgen]
+    pub fn review(bytes: &[u8], fvk: &[u8]) -> Result<js_sys::Array, JsError> {
+        let fvk: [u8; 96] = fvk.try_into().map_err(|_| JsError::new("fvk must be 96 bytes"))?;
+        let pczt = pczt::Pczt::parse(bytes).map_err(err)?;
+        let reviewed = pczt_signer_core::review::review(&pczt, &fvk).map_err(err)?;
+
+        let mut digest = sha2::Sha256::new();
+        digest.update(bytes);
+        let reviewed_pczt_sha256 = digest.finalize();
+
+        let outputs = js_sys::Array::new();
+        for output in &reviewed.outputs {
+            let row = js_sys::Array::new();
+            row.push(&to_js_bytes(&output.recipient));
+            row.push(&JsValue::from_f64(output.value as f64));
+            row.push(&JsValue::from_bool(output.is_change));
+            row.push(&match &output.memo {
+                pczt_signer_core::review::MemoReview::Read(memo) => to_js_bytes(memo).into(),
+                pczt_signer_core::review::MemoReview::NotReadable => JsValue::NULL,
+            });
+            outputs.push(&row);
+        }
+
+        let spends = js_sys::Array::new();
+        for spend in &reviewed.spends {
+            let row = js_sys::Array::new();
+            row.push(&to_js_bytes(&spend.nullifier));
+            row.push(&JsValue::from_f64(spend.value as f64));
+            spends.push(&row);
+        }
+
+        let out = js_sys::Array::new();
+        out.push(&to_js_bytes(&reviewed_pczt_sha256));
+        out.push(&outputs);
+        out.push(&spends);
+        out.push(&JsValue::from_f64(reviewed.sent_total as f64));
+        out.push(&JsValue::from_f64(reviewed.change_total as f64));
+        out.push(&JsValue::from_f64(reviewed.fee as f64));
+        Ok(out)
     }
 
     /// Write signatures back. `signatures` is 64 bytes per action, positionally matching `indices`.

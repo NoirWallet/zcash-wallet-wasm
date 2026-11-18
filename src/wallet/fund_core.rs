@@ -6,6 +6,7 @@
 //! `use fund_core::*;` re-exported by the parent module.
 
 use super::*;
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------- fee / policy helpers
 
@@ -1419,6 +1420,22 @@ where
         Ok(txid)
     }
 
+    /// Prove-less variant of `pczt_store` that also returns the transaction bytes and their digest.
+    ///
+    /// The transaction is stored exactly once; this only reads it back and hashes it, so a caller that wants
+    /// "the txid, the bytes and a digest" does not have to round-trip through `get_stored_transaction_bytes`.
+    pub async fn pczt_store_detailed(&self, pczt: Pczt) -> Result<StoredPcztTransaction, Error> {
+        let txid = self.pczt_store(pczt).await?;
+        let raw = self
+            .stored_transaction_bytes(txid)
+            .await?
+            .ok_or_else(|| Error::Generic("the transaction was not readable back after storing it".to_string()))?;
+        let mut digest = Sha256::new();
+        digest.update(&raw);
+        let raw_sha256_hex = hex::encode(digest.finalize());
+        Ok(StoredPcztTransaction { txid, raw, raw_sha256_hex })
+    }
+
     /// Submit a transaction that is already stored, by txid.
     ///
     /// The transaction bytes come from the wallet database, not from the caller, so this cannot submit a
@@ -1501,4 +1518,15 @@ pub(crate) fn usk_from_seed_str(seed: &str, passphrase: &str, account_id: u32, n
     let seed_fingerprint = SeedFingerprint::from_seed(seed.expose_secret()).ok_or(Error::SeedFingerprint)?;
     let usk = UnifiedSpendingKey::from_seed(network, seed.expose_secret(), account_id.try_into()?)?;
     Ok((usk, seed_fingerprint))
+}
+
+/// What `pczt_store_detailed` produced, in the form a caller needs to persist before submitting.
+#[derive(Clone, Debug)]
+pub struct StoredPcztTransaction {
+    pub txid: TxId,
+    /// The exact bytes of the transaction as stored, for the caller's own record.
+    pub raw: Vec<u8>,
+    /// `SHA-256(raw)`, lowercase hex. This identifies *the bytes you have*, not "the transaction": a second
+    /// finalization of the same PCZT produces the same txid and different bytes.
+    pub raw_sha256_hex: String,
 }

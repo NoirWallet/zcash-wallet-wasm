@@ -284,6 +284,102 @@ fn the_finalized_transaction_verifies_as_a_real_transaction() {
     assert_eq!(again, bytes);
 }
 
+/// Finalize and extract the same signed PCZT twice and compare.
+///
+/// The extension needs to know whether "prepare" is repeatable: after a crash it wants to either reuse the
+/// stored transaction or redo the work and land on the same one. Those are two different questions — the
+/// txid follows the transaction's *effects*, while the bytes also carry authorization data — so they are
+/// measured separately here rather than inferred from each other.
+///
+/// Observed on this tree: the **txid is stable** and the **bytes are not**. Extraction takes an RNG, and the
+/// second run produces a valid transaction with the same effects and different authorization data. The
+/// consequence for the extension is that `rawTxSha256` identifies *the bytes you stored*, not "the
+/// transaction" — re-deriving will produce the same txid but a different digest.
+#[test]
+fn finalizing_the_same_signed_pczt_twice_keeps_the_txid() {
+    let signed = signed_pczt();
+    let first = extract(&signed.clone());
+    let second = extract(&signed);
+
+    assert_eq!(first.0, second.0, "the txid follows the transaction's effects, not its signatures");
+    println!(
+        "txid stable; bytes {} ({} vs {} bytes)",
+        if first.1 == second.1 { "identical" } else { "differ" },
+        first.1.len(),
+        second.1.len()
+    );
+
+    // Whatever the bytes, both are the same transaction: each parses back to the same txid.
+    for (txid, bytes) in [first, second] {
+        let parsed = zcash_primitives::transaction::Transaction::read(
+            bytes.as_slice(),
+            zcash_protocol::consensus::BranchId::Nu6_3,
+        )
+        .expect("the extracted transaction parses back");
+        assert_eq!(parsed.txid(), txid, "a parsed transaction reports the txid we stored");
+    }
+}
+
+/// Extract a signed PCZT into `(txid, bytes)`.
+fn extract(signed: &Pczt) -> (zcash_protocol::TxId, Vec<u8>) {
+    let finalized = pczt::roles::spend_finalizer::SpendFinalizer::new(signed.clone())
+        .finalize_spends()
+        .expect("finalize spends");
+    let tx = pczt::roles::tx_extractor::TransactionExtractor::new(finalized)
+        .extract(UnwrapErr(SysRng))
+        .expect("extract");
+    let txid = tx.txid();
+    let mut bytes = Vec::new();
+    tx.write(&mut bytes).expect("serialize");
+    (txid, bytes)
+}
+
+/// Run the whole ceremony and return the signed (not finalized) PCZT.
+fn signed_pczt() -> Pczt {
+    let (dkg, keyset, prepared) = coordinator_side_with_ak(2, 2);
+    let ak = &keyset.group_verifying_key;
+    let by_slot = roster(&dkg.identifiers);
+
+    let transport = Pczt::parse(&prepared.transport).expect("transport parses");
+    let material = bind_alphas(&ironwood_action_rks(&transport).expect("rks"), &prepared.alphas).expect("bind");
+    material[0].verify_rk(ak).expect("rk");
+
+    let config = SessionConfig {
+        session_id: SESSION,
+        participants: 2,
+        threshold: 2,
+        signers: vec![0, 1],
+        identifiers: by_slot.clone(),
+    };
+    let mut coordinator = CoordinatorSession::new(config, dkg.pubkeys.clone(), 1).expect("coordinator");
+    let mut signers: BTreeMap<u8, SignerSession> = [0u8, 1]
+        .iter()
+        .map(|slot| (*slot, SignerSession::new(SESSION, *slot, by_slot.clone())))
+        .collect();
+
+    let mut rng = FrostRng;
+    for env in coordinator.init().expect("init") {
+        let slot = env.recipient;
+        let commitments = signers
+            .get_mut(&slot)
+            .unwrap()
+            .on_init(&env, &dkg.key_packages[&by_slot[&slot]], &mut rng)
+            .expect("commitments");
+        coordinator.on_commitments(&commitments).expect("collect");
+    }
+    coordinator.prepare_payload(prepared.sighash, prepared.alphas.clone()).expect("prepare");
+    for env in coordinator.payloads().expect("payloads") {
+        let slot = env.recipient;
+        let signer = signers.get_mut(&slot).unwrap();
+        signer.on_payload(&env).expect("payload");
+        signer.approve().expect("approve");
+        let share = signer.share(&dkg.key_packages[&by_slot[&slot]]).expect("share");
+        coordinator.on_share(&share).expect("collect");
+    }
+    let signatures = coordinator.aggregate().expect("aggregate");
+    apply_material(prepared.kept, &material, &signatures).expect("apply")
+}
+
 fn coordinator_side_with_ak(participants: u16, threshold: u16) -> (DkgOut, VaultKeyset, Prepared) {
     coordinator_side(participants, threshold)
 }

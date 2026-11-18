@@ -921,6 +921,39 @@ impl WebWallet {
         Ok(self.inner.stored_transaction_bytes(txid).await?)
     }
 
+    /// Finalize a proved PCZT, store it, and return everything a caller must persist before submitting.
+    ///
+    /// Returns `{ txId, rawTxSha256, rawTxLen, network }`:
+    ///
+    /// * `txId` — display-order lowercase hex, the same id explorers show.
+    /// * `rawTxSha256` — SHA-256 of the stored transaction bytes, lowercase hex. It identifies *the bytes you
+    ///   stored*: finalizing the same PCZT twice yields the same `txId` and different bytes, so this digest
+    ///   cannot be compared across two separate finalizations.
+    /// * `rawTxLen` — byte length of the stored transaction.
+    /// * `network` — the wallet's configured network (`"mainnet"` / `"testnet"`). This is configuration, not a
+    ///   proof read out of the transaction.
+    ///
+    /// The account id is deliberately absent: the PCZT's proposal metadata that records it is private to the
+    /// wallet backend, so we cannot read it back. A caller that needs the binding must keep its own record.
+    pub async fn pczt_store_detailed(&self, pczt: WasmPczt) -> Result<JsValue, Error> {
+        let stored = self.inner.pczt_store_detailed(pczt.into()).await?;
+        let out = js_sys::Object::new();
+        let set = |key: &str, value: JsValue| {
+            js_sys::Reflect::set(&out, &JsValue::from_str(key), &value).expect("setting a fresh object key");
+        };
+        set("txId", JsValue::from_str(&stored.txid.to_string()));
+        set("rawTxSha256", JsValue::from_str(&stored.raw_sha256_hex));
+        set("rawTxLen", JsValue::from_f64(stored.raw.len() as f64));
+        set(
+            "network",
+            JsValue::from_str(match self.inner.network {
+                crate::network::Network::MainNetwork => "mainnet",
+                crate::network::Network::TestNetwork => "testnet",
+            }),
+        );
+        Ok(out.into())
+    }
+
     /// Prove and broadcast an externally signed PCZT (hardware wallet flow).
     ///
     /// Hardware-wallet accounts never hold Sapling notes (Keystone supports

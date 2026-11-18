@@ -50,7 +50,15 @@ fn build_pczt(ak: &[u8; 32], honest: &FullViewingKey, thief_address: &orchard::A
     build_pczt_with_memo(ak, honest, thief_address, b"")
 }
 
+fn build_pczt_with_ovk(ak: &[u8; 32], honest: &FullViewingKey, thief_address: &orchard::Address, memo: &[u8]) -> pczt::Pczt {
+    build_pczt_inner(ak, honest, thief_address, memo, true)
+}
+
 fn build_pczt_with_memo(ak: &[u8; 32], honest: &FullViewingKey, thief_address: &orchard::Address, memo: &[u8]) -> pczt::Pczt {
+    build_pczt_inner(ak, honest, thief_address, memo, false)
+}
+
+fn build_pczt_inner(ak: &[u8; 32], honest: &FullViewingKey, thief_address: &orchard::Address, memo: &[u8], sender_ovk_on_payment: bool) -> pczt::Pczt {
     let _ = ak;
     let network = Network::TestNetwork;
     let target_height = network.activation_height(NetworkUpgrade::Nu6_3).expect("NU6_3") + 1;
@@ -84,7 +92,7 @@ fn build_pczt_with_memo(ak: &[u8; 32], honest: &FullViewingKey, thief_address: &
     // The output the user never meant to make, paid to an address the *fake* key considers its own.
     builder
         .add_ironwood_output::<zip317::FeeRule>(
-            None,
+            if sender_ovk_on_payment { Some(honest.to_ovk(Scope::External)) } else { None },
             *thief_address,
             Zatoshis::const_from_u64(STOLEN),
             MemoBytes::from_bytes(memo).expect("memo fits"),
@@ -221,4 +229,39 @@ fn a_text_memo_is_recovered_verbatim() {
         }
         other => panic!("expected a recovered memo, got {other:?}"),
     }
+}
+
+#[test]
+fn the_senders_ovk_recovers_a_payment_outputs_memo() {
+    // The extension asked for this to be checked rather than argued: an output paid to a *third party* is
+    // encrypted to the sender's outgoing view key as well, so the wallet can recover what it sent. This is
+    // independent of the note-rebuilding route `review` uses, and it is the route the wallet's own builder
+    // takes (`OvkPolicy::Sender` hands `external_ovk` to the output constructor).
+    let ak = [0x11u8; 32];
+    let honest = fvk_for(&ak, 7);
+    let fake = fvk_for(&ak, 0x22);
+    let pczt = build_pczt_with_ovk(&ak, &honest, &fake.address_at(0u32, Scope::External), b"invoice 7");
+
+    let ovk = honest.to_ovk(Scope::External);
+    let seen: std::cell::RefCell<Vec<Option<Vec<u8>>>> = std::cell::RefCell::new(Vec::new());
+    let _ = pczt::roles::verifier::Verifier::new(pczt)
+        .with_ironwood::<(), _>(|bundle| {
+            for action in bundle.actions() {
+                let domain = orchard::note_encryption::IronwoodDomain::for_pczt_action(action);
+                let out_ciphertext: &[u8; 80] = &action.output().encrypted_note().out_ciphertext;
+                let recovered = zcash_note_encryption::try_output_recovery_with_ovk(&domain, &ovk, action, action.cv_net(), out_ciphertext)
+                    .map(|(_, _, memo)| memo.to_vec());
+                seen.borrow_mut().push(recovered);
+            }
+            Ok::<(), pczt::roles::verifier::OrchardError<()>>(())
+        })
+        .unwrap();
+
+    let memos = seen.into_inner();
+    let recovered = memos
+        .iter()
+        .flatten()
+        .find(|memo| memo.starts_with(b"invoice 7"))
+        .expect("the payment output is recoverable with the sender's ovk");
+    assert_eq!(&recovered[..b"invoice 7".len()], b"invoice 7");
 }
