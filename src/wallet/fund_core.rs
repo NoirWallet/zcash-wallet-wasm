@@ -1384,14 +1384,24 @@ where
         Ok(pczt)
     }
 
-    pub async fn pczt_send(&self, pczt: Pczt) -> Result<String, Error> {
+    /// Finalize a proved PCZT and store the transaction **without broadcasting it**.
+    ///
+    /// This is the stage a caller needs when it must be able to persist a stable transaction id and the
+    /// transaction itself before anything reaches the network. It runs `SpendFinalizer`, extracts the
+    /// transaction, verifies it, and writes it to the wallet database as "to be sent" — the same work
+    /// `pczt_send` used to do before submitting, with the submission removed.
+    ///
+    /// After it returns, the transaction is retrievable from the database by its txid, so a caller that is
+    /// killed between this call and submission can submit that txid later (see
+    /// `send_authorized_transactions`).
+    pub async fn pczt_store(&self, pczt: Pczt) -> Result<TxId, Error> {
         let prover = get_prover();
         let (spend_vk, output_vk) = prover.verifying_keys();
         let orchard_circuit_version = orchard_circuit_version_for_pczt(&pczt)?;
         let mut db = self.db.write().await;
 
         let orchard_verifying_key = get_orchard_verifying_key(orchard_circuit_version);
-        tracing::info!("📤 Extracting and storing transaction from PCZT...");
+        tracing::info!("📤 Extracting and storing transaction from PCZT (no broadcast)...");
         let start_time = js_sys::Date::now();
         let txid = extract_and_store_transaction_from_pczt::<_, ()>(
             &mut *db,
@@ -1402,11 +1412,37 @@ where
             Some(orchard_verifying_key),
         )
         .map_err(|e| Error::PcztSend(format!("Failed to extract and store transaction from PCZT: {e:?}")))?;
-        let end_time = js_sys::Date::now();
-        let elapsed_seconds = (end_time - start_time) / 1000.0;
+        let elapsed_seconds = (js_sys::Date::now() - start_time) / 1000.0;
         tracing::info!("⏱️ extract_and_store_transaction_from_pczt completed in {:.2} seconds", elapsed_seconds);
         tracing::info!("✅ Transaction stored with txid: {:?}", txid);
         drop(db);
+        Ok(txid)
+    }
+
+    /// Submit a transaction that is already stored, by txid.
+    ///
+    /// The transaction bytes come from the wallet database, not from the caller, so this cannot submit a
+    /// different transaction than the one that was stored under this id.
+    pub async fn submit_stored(&self, txid: TxId) -> Result<TransferResult, Error> {
+        self.send_authorized_transactions(&NonEmpty::new(txid)).await
+    }
+
+    /// The raw bytes of a transaction the wallet has stored, or `None` if it has no record of it.
+    ///
+    /// Exposed so a caller can persist the exact transaction alongside its own intent record, instead of
+    /// relying on the wallet database surviving a worker restart.
+    pub async fn stored_transaction_bytes(&self, txid: TxId) -> Result<Option<Vec<u8>>, Error> {
+        let db = self.db.read().await;
+        let Some(tx) = db.get_transaction(txid)? else {
+            return Ok(None);
+        };
+        let mut raw_tx = service::RawTransaction::default();
+        tx.write(&mut raw_tx.data)?;
+        Ok(Some(raw_tx.data))
+    }
+
+    pub async fn pczt_send(&self, pczt: Pczt) -> Result<String, Error> {
+        let txid = self.pczt_store(pczt).await?;
 
         tracing::info!("📡 Broadcasting transaction to network...");
         let submission = self.send_authorized_transactions(&NonEmpty::new(txid)).await?;

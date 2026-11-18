@@ -883,6 +883,44 @@ impl WebWallet {
             .await
     }
 
+    /// Prove an externally signed PCZT **without sending it**.
+    ///
+    /// Hardware-wallet and vault accounts never hold Sapling notes, so no Sapling proof generation key is
+    /// needed.
+    ///
+    /// # Returns
+    /// The proved PCZT, ready for `pczt_store`
+    pub async fn pczt_prove(&self, pczt: WasmPczt) -> Result<WasmPczt, Error> {
+        let proved = self.inner.pczt_prove(pczt.into(), None).await?;
+        Ok(proved.into())
+    }
+
+    /// Finalize a proved PCZT and store the transaction, **without broadcasting**.
+    ///
+    /// This is the point where a caller can obtain a stable transaction id and the transaction itself
+    /// before anything reaches the network. After it returns, the transaction is in the wallet database
+    /// and can be submitted later by txid with `send_authorized_transactions` — including after a restart,
+    /// if the database itself survived.
+    ///
+    /// # Returns
+    /// Transaction ID string (lowercase hex, display order — the same order as `txid` on explorers)
+    pub async fn pczt_store(&self, pczt: WasmPczt) -> Result<String, Error> {
+        let txid = self.inner.pczt_store(pczt.into()).await?;
+        Ok(txid.to_string())
+    }
+
+    /// The raw bytes of a stored transaction, or `undefined` when the wallet has no record of it.
+    ///
+    /// Lets a caller persist the exact transaction next to its own intent record rather than depending on
+    /// the wallet database alone.
+    pub async fn get_stored_transaction_bytes(&self, txid: String) -> Result<Option<Vec<u8>>, Error> {
+        // `TxId`'s canonical hex is byte-reversed relative to its internal bytes, which is the order
+        // explorers and node RPCs use. Parsing with `from_bytes` here would silently look up a
+        // different transaction.
+        let txid = TxId::from_hex(txid.trim()).ok_or(Error::TxIdParse)?;
+        Ok(self.inner.stored_transaction_bytes(txid).await?)
+    }
+
     /// Prove and broadcast an externally signed PCZT (hardware wallet flow).
     ///
     /// Hardware-wallet accounts never hold Sapling notes (Keystone supports
