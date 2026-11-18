@@ -17,21 +17,24 @@ use orchard::keys::{FullViewingKey, Scope};
 use orchard::note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho};
 use orchard::value::NoteValue;
 use orchard::{Address, Note};
-use pczt::orchard::EncCiphertext;
 use pczt::roles::verifier::Verifier;
 use pczt::Pczt;
 
 /// What this signer could learn about an output's memo.
 ///
-/// A signer usually **cannot** read a payment's memo: by the time a PCZT reaches it, the memo is encrypted
-/// to the recipient, and only the recipient's incoming view key opens it. `NotReadable` therefore means
-/// "could not verify", never "there is none" — an output with a memo the signer cannot see must not be
-/// presented as having no memo.
+/// A memo is not confined to the recipient. Every shielded output is encrypted to the recipient's incoming
+/// view key *and* to the sender's outgoing view key, and a signer that holds the output's note plaintext can
+/// additionally derive the ephemeral secret and decrypt it directly. This review takes the last route,
+/// because it already rebuilds each output note to check its commitment.
+///
+/// `NotReadable` therefore means "could not verify" — never "there is none". An output whose memo cannot be
+/// recovered must not be presented as having no memo.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MemoReview {
-    /// The PCZT still carried the memo as plaintext, so these are the exact bytes.
+    /// The exact 512-byte memo, with trailing zero padding as the protocol defines it. An all-zero memo is
+    /// confirmed empty; anything else is the bytes the recipient will see.
     Read(Vec<u8>),
-    /// The memo was already encrypted, or was not present as plaintext.
+    /// The memo could not be recovered: the output note could not be rebuilt, or decryption failed.
     NotReadable,
 }
 
@@ -128,10 +131,12 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
     // Spends are read through the Verifier role because that is the only public path to the Orchard
     // protocol types carrying the note fields. It is the same oracle the coordinator uses for `alpha`.
     let mut spend_facts: Vec<SpendFacts> = Vec::new();
+    let mut memos: Vec<MemoReview> = vec![MemoReview::NotReadable; pczt.ironwood().actions().len()];
     let mut spend_error: Option<ReviewError> = None;
     Verifier::new(pczt.clone())
         .with_ironwood::<(), _>(|bundle| {
             for (index, action) in bundle.actions().iter().enumerate() {
+                memos[index] = recover_memo(action);
                 let index = index as u32;
                 let spend = action.spend();
                 let (Some(value), Some(recipient), Some(rho), Some(rseed)) = (spend.value(), spend.recipient(), spend.rho(), spend.rseed()) else {
@@ -276,10 +281,7 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
             value: out_value,
             is_change,
             // The memo reaches a signer already encrypted to the recipient; see `MemoReview`.
-            memo: match out.enc_ciphertext() {
-                EncCiphertext::MemoPlaintext(memo) => MemoReview::Read(memo.as_stripped_bytes().to_vec()),
-                EncCiphertext::Encrypted(_) => MemoReview::NotReadable,
-            },
+            memo: memos.get(index as usize).cloned().unwrap_or(MemoReview::NotReadable),
         });
         // A padding spend contributes nothing; counting it would break the balance for no reason.
         if !padding {
@@ -340,6 +342,44 @@ pub fn scope_of(fvk_bytes: &[u8; 96], recipient: &[u8; 43]) -> Option<Scope> {
     let fvk = FullViewingKey::from_bytes(fvk_bytes)?;
     let address = Option::<Address>::from(Address::from_raw_address_bytes(recipient))?;
     fvk.scope_for_address(&address)
+}
+
+/// Decrypt an output's memo from the parsed action.
+///
+/// Every shielded output is encrypted twice: to the recipient's incoming view key and to the sender's
+/// outgoing view key. Holding the note plaintext — which this review has, because it rebuilds the note to
+/// check the commitment — gives a third route that needs no viewing key at all: re-derive the ephemeral
+/// secret and decrypt directly. If the fields needed for that are absent, or decryption fails, the memo is
+/// reported as unreadable rather than assumed empty.
+fn recover_memo(action: &orchard::pczt::Action) -> MemoReview {
+    use orchard::note_encryption::IronwoodDomain;
+    use zcash_note_encryption::{try_output_recovery_with_pkd_esk, Domain};
+
+    let Some(note) = output_note(action) else {
+        return MemoReview::NotReadable;
+    };
+    let domain = IronwoodDomain::for_pczt_action(action);
+    let pk_d = IronwoodDomain::get_pk_d(&note);
+    let Some(esk) = IronwoodDomain::derive_esk(&note) else {
+        return MemoReview::NotReadable;
+    };
+    match try_output_recovery_with_pkd_esk(&domain, pk_d, esk, action) {
+        Some((_, _, memo)) => MemoReview::Read(memo.to_vec()),
+        None => MemoReview::NotReadable,
+    }
+}
+
+/// Rebuild an output note from the action's own fields.
+///
+/// The parsed action exposes the protocol types directly, so unlike the PCZT-format fields this needs no
+/// re-encoding: `recipient` is already an `Address`, `rseed` a `RandomSeed`.
+fn output_note(action: &orchard::pczt::Action) -> Option<Note> {
+    let out = action.output();
+    let recipient = *out.recipient().as_ref()?;
+    let rho = Rho::from_bytes(&action.spend().nullifier().to_bytes()).into_option()?;
+    let rseed = *out.rseed().as_ref()?;
+    let value = *out.value().as_ref()?;
+    Note::from_parts(recipient, value, rho, rseed, *out.note_version()).into_option()
 }
 
 #[cfg(test)]

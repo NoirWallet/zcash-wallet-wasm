@@ -2341,6 +2341,7 @@ dependencies = [
  "frost-vault-core",
  "orchard",
  "pczt",
+ "zcash_note_encryption",
  "zcash_protocol",
 ]
 

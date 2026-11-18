@@ -1235,6 +1235,7 @@ dependencies = [
  "rand 0.10.3",
  "rand 0.8.8",
  "vault-keyset",
+ "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
 ]

@@ -18,6 +18,8 @@ pczt = { path = "../../librustzcash/pczt", default-features = false, features = 
 zcash_protocol = { path = "../../librustzcash/components/zcash_protocol", default-features = false }
 # Needed only to name `orchard::ValuePool` when building a `SpendAuthSignature`; still no circuit.
 orchard = { version = "0.16", default-features = false, features = ["std"] }
+# Memo recovery: the note-encryption primitives an output's memo is decrypted with.
+zcash_note_encryption = { version = "0.5", default-features = false }
 ff = "0.14"
 
 [dev-dependencies]

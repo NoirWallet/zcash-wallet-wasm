@@ -47,6 +47,10 @@ fn fvk_for(ak: &[u8; 32], sk: u8) -> FullViewingKey {
 }
 
 fn build_pczt(ak: &[u8; 32], honest: &FullViewingKey, thief_address: &orchard::Address) -> pczt::Pczt {
+    build_pczt_with_memo(ak, honest, thief_address, b"")
+}
+
+fn build_pczt_with_memo(ak: &[u8; 32], honest: &FullViewingKey, thief_address: &orchard::Address, memo: &[u8]) -> pczt::Pczt {
     let _ = ak;
     let network = Network::TestNetwork;
     let target_height = network.activation_height(NetworkUpgrade::Nu6_3).expect("NU6_3") + 1;
@@ -79,7 +83,12 @@ fn build_pczt(ak: &[u8; 32], honest: &FullViewingKey, thief_address: &orchard::A
     builder.add_ironwood_spend::<zip317::FeeRule>(honest.clone(), note, merkle_path).expect("spend");
     // The output the user never meant to make, paid to an address the *fake* key considers its own.
     builder
-        .add_ironwood_output::<zip317::FeeRule>(None, *thief_address, Zatoshis::const_from_u64(STOLEN), MemoBytes::empty())
+        .add_ironwood_output::<zip317::FeeRule>(
+            None,
+            *thief_address,
+            Zatoshis::const_from_u64(STOLEN),
+            MemoBytes::from_bytes(memo).expect("memo fits"),
+        )
         .expect("thief output");
     builder
         .add_ironwood_output::<zip317::FeeRule>(
@@ -188,4 +197,28 @@ fn the_ak_check_and_a_self_computed_fingerprint_are_not_a_defence() {
         fake_fp,
         "but recomputing it from the fake key always agrees with itself"
     );
+}
+
+#[test]
+fn a_text_memo_is_recovered_verbatim() {
+    // The memo is encrypted to the recipient, but a signer that rebuilds the output note can also decrypt
+    // it: it re-derives the ephemeral secret instead of needing either viewing key. This is the case the
+    // extension needs, because "unverified" must not be shown as "no memo".
+    let ak = [0x11u8; 32];
+    let honest = fvk_for(&ak, 7);
+    let fake = fvk_for(&ak, 0x22);
+    let pczt = build_pczt_with_memo(&ak, &honest, &fake.address_at(0u32, Scope::External), b"invoice 7");
+
+    let view = review(&pczt, &honest.to_bytes()).expect("review");
+    let paid = view.outputs.iter().find(|o| o.value == STOLEN).expect("payment output");
+    match &paid.memo {
+        pczt_signer_core::review::MemoReview::Read(bytes) => {
+            // Verbatim bytes as the sender wrote them: this review does not re-encode or strip ZIP-302
+            // markers, so the caller sees exactly what the recipient will see.
+            assert_eq!(bytes.len(), 512);
+            assert_eq!(&bytes[..b"invoice 7".len()], b"invoice 7");
+            assert!(bytes[b"invoice 7".len()..].iter().all(|b| *b == 0));
+        }
+        other => panic!("expected a recovered memo, got {other:?}"),
+    }
 }

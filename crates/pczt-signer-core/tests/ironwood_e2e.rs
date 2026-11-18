@@ -339,9 +339,16 @@ fn review_pins_every_output_to_its_commitment() {
     assert_ne!(reviewed.spends[0].nullifier, [0u8; 32], "the nullifier is the lookup key");
     assert_eq!(reviewed.outputs[0].value, 990_000);
     assert!(reviewed.outputs[0].is_change, "the fixture pays itself");
-    // The memo is encrypted by the time a signer sees the PCZT, so the honest answer is "not readable",
-    // not "none". Anything else would present an unverified memo as an absent one.
-    assert_eq!(reviewed.outputs[0].memo, pczt_signer_core::review::MemoReview::NotReadable);
+    // The memo is recovered even though the PCZT only carries it encrypted: holding the output note (which
+    // this review rebuilds anyway) is enough to derive the ephemeral secret and decrypt.
+    match &reviewed.outputs[0].memo {
+        pczt_signer_core::review::MemoReview::Read(bytes) => {
+            assert_eq!(bytes.len(), 512, "the full memo, with its padding");
+            // `MemoBytes::empty()` is ZIP-302 empty text: marker byte then a zero length.
+            assert_eq!(&bytes[..2], &[0xF6, 0x00]);
+        }
+        other => panic!("expected a recovered memo, got {other:?}"),
+    }
     assert_eq!(reviewed.change_total, 990_000);
     assert_eq!(reviewed.sent_total, 0);
     assert_eq!(reviewed.fee, 10_000);
