@@ -182,6 +182,27 @@ impl PcztTools {
         Ok(to_js_bytes(&flat))
     }
 
+    /// The action indices this signer must produce signatures for, in bundle order.
+    ///
+    /// A bundle has one spend and one output per action, so a transaction that pays two addresses carries a
+    /// zero-value filler spend that belongs to nobody. Those actions must be excluded from signing — their
+    /// `rk` is not the group key — while their original `action_index` values are what signature write-back
+    /// needs. Signing the position in this array instead of the index is the bug this returns indices to
+    /// prevent.
+    ///
+    /// Fails if an action is neither ours nor a valid filler: a non-zero spend whose `rk` is not
+    /// `ak + alpha·G`, or a zero-value one that arrives unsigned.
+    #[wasm_bindgen(js_name = signingSet)]
+    pub fn signing_set(bytes: &[u8], group_verifying_key: &[u8]) -> Result<js_sys::Uint8Array, JsError> {
+        let ak: [u8; 32] = group_verifying_key
+            .try_into()
+            .map_err(|_| JsError::new("group_verifying_key must be 32 bytes"))?;
+        let pczt = pczt::Pczt::parse(bytes).map_err(err)?;
+        let set = pczt_signer_core::material::select_signing_set(&pczt, &ak).map_err(err)?;
+        let indices: Vec<u8> = set.real_indices().into_iter().map(|i| i as u8).collect();
+        Ok(to_js_bytes(&indices))
+    }
+
     /// Whether every action's `rk` equals `ak + alpha·G`. Run this on the signer before approving.
     #[wasm_bindgen]
     pub fn check_action_bindings(bytes: &[u8], group_verifying_key: &[u8], alphas: &[u8]) -> Result<(), JsError> {
@@ -192,11 +213,29 @@ impl PcztTools {
             return Err(JsError::new("alphas must be a multiple of 32 bytes"));
         }
         let pczt = pczt::Pczt::parse(bytes).map_err(err)?;
-        let rks = pczt_signer_core::material::ironwood_action_rks(&pczt).map_err(err)?;
-        let alphas: Vec<[u8; 32]> = alphas.chunks_exact(32).map(|c| c.try_into().expect("chunk size checked")).collect();
-        let material = pczt_signer_core::material::bind_alphas(&rks, &alphas).map_err(err)?;
-        for m in &material {
-            m.verify_rk(&ak).map_err(err)?;
+        // Check only the actions this group must sign. Filler spends have their own key by construction and
+        // would fail here on every legitimate two-output transaction.
+        let set = pczt_signer_core::material::select_signing_set(&pczt, &ak).map_err(err)?;
+        // `alphas` stays indexed by action, like `action_alphas` returns it: the filler action's slot is
+        // present but unused. Anything else would force the caller to know which actions are ours.
+        let signable = pczt.ironwood().actions().len();
+        if alphas.len() != signable * 32 {
+            return Err(JsError::new(&format!(
+                "expected {signable} alpha value(s), one per action, got {}",
+                alphas.len() / 32
+            )));
+        }
+        for material in &set.real {
+            let at = material.action_index as usize * 32;
+            let supplied: [u8; 32] = alphas[at..at + 32].try_into().expect("slice size checked");
+            // The coordinator's alpha must be the one this action was built with.
+            if supplied != material.alpha {
+                return Err(JsError::new(&format!(
+                    "action {}: the supplied alpha is not the one the transaction was built with",
+                    material.action_index
+                )));
+            }
+            material.verify_rk(&ak).map_err(err)?;
         }
         Ok(())
     }
@@ -204,7 +243,7 @@ impl PcztTools {
     /// The signer's own reading of the transaction: every output (recipient, amount, change, memo) and
     /// every spend, with the totals and the fee.
     ///
-    /// Returns `[reviewedPcztSha256, outputs, spends, sentTotal, changeTotal, fee]` where:
+    /// Returns `[reviewedPcztSha256, outputs, spends, sentTotal, changeTotal, fee, header]` where:
     ///
     /// * `reviewedPcztSha256` — SHA-256 of **the bytes passed in**, so a caller can persist "this is the
     ///   transaction I reviewed" and compare it later. Compute it on the PCZT the user was shown, not on a
@@ -212,8 +251,15 @@ impl PcztTools {
     /// * `outputs` — array of `[recipient(43), value, isChange, memoOrNull]`. `memoOrNull` is either the
     ///   exact 512-byte memo (ZIP-302 marker and padding included) or `null` for "could not verify"; the
     ///   two must never be conflated, so a caller that needs a memo must reject `null`.
-    /// * `spends` — array of `[nullifier(32), value]`, one per spend that belongs to this viewing key.
-    /// * `sentTotal` / `changeTotal` / `fee` — in zats. `sentTotal + changeTotal + fee` is the spent value.
+    /// * `spends` — array of `[actionIndex, nullifier(32), value]`, one per spend that belongs to this
+    ///   viewing key. The first element is the position **inside the bundle**, which is what signature
+    ///   write-back needs; filler actions shift it, so it is not the position in this array.
+    /// * `sentTotal` / `changeTotal` / `fee` — in zats, as JS `Number`s. ZEC has 8 decimals, so every valid
+    ///   amount (≤ 21e6 ZEC = 2.1e15 zats) is well inside `Number.MAX_SAFE_INTEGER`; callers should still
+    ///   reject anything above that rather than trust the conversion.
+    /// * `header` — `{ txVersion, versionGroupId, consensusBranchId, expiryHeight, coinType }`, read from the
+    ///   PCZT's global section. `coinType` is the builder's claim (0 mainnet, 1 testnet), not a proof of
+    ///   network; compare it with the wallet's configuration.
     ///
     /// Fails wholesale if any check fails: there is no "partially reviewed" result to approve.
     #[wasm_bindgen]
@@ -242,10 +288,21 @@ impl PcztTools {
         let spends = js_sys::Array::new();
         for spend in &reviewed.spends {
             let row = js_sys::Array::new();
+            row.push(&JsValue::from_f64(spend.action_index as f64));
             row.push(&to_js_bytes(&spend.nullifier));
             row.push(&JsValue::from_f64(spend.value as f64));
             spends.push(&row);
         }
+
+        let header = js_sys::Object::new();
+        let set = |key: &str, value: JsValue| {
+            js_sys::Reflect::set(&header, &JsValue::from_str(key), &value).expect("setting a fresh object key");
+        };
+        set("txVersion", JsValue::from_f64(reviewed.header.tx_version as f64));
+        set("versionGroupId", JsValue::from_f64(reviewed.header.version_group_id as f64));
+        set("consensusBranchId", JsValue::from_f64(reviewed.header.consensus_branch_id as f64));
+        set("expiryHeight", JsValue::from_f64(reviewed.header.expiry_height as f64));
+        set("coinType", JsValue::from_f64(reviewed.header.coin_type as f64));
 
         let out = js_sys::Array::new();
         out.push(&to_js_bytes(&reviewed_pczt_sha256));
@@ -254,6 +311,7 @@ impl PcztTools {
         out.push(&JsValue::from_f64(reviewed.sent_total as f64));
         out.push(&JsValue::from_f64(reviewed.change_total as f64));
         out.push(&JsValue::from_f64(reviewed.fee as f64));
+        out.push(&header.into());
         Ok(out)
     }
 

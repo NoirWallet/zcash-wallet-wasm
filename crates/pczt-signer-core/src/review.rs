@@ -58,6 +58,9 @@ pub struct ReviewedOutput {
 /// One spend, as verified from the PCZT itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewedSpend {
+    /// Position of this spend inside the Ironwood bundle. Signing must use this index, not the position in
+    /// `Review::spends`, because filler actions shift it.
+    pub action_index: u32,
     /// The identifier the transaction will be judged by, recomputed from the note rather than trusted.
     ///
     /// This is the handle to look up in the wallet's own note set: a nullifier that is not in it means the
@@ -66,8 +69,24 @@ pub struct ReviewedSpend {
     pub value: u64,
 }
 
+/// Transaction-level facts a caller needs to decide whether this is the transaction it meant to approve.
+///
+/// These are read from the PCZT's global section, so they describe what the transaction *claims*; they are not
+/// a proof about the network. The consensus branch id is the one the signature commits to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReviewHeader {
+    pub tx_version: u32,
+    pub version_group_id: u32,
+    pub consensus_branch_id: u32,
+    pub expiry_height: u32,
+    /// SLIP-44 coin type: `0` mainnet, `1` testnet. A claim by the builder, to be compared against the
+    /// wallet's configured network.
+    pub coin_type: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Review {
+    pub header: ReviewHeader,
     pub outputs: Vec<ReviewedOutput>,
     pub spends: Vec<ReviewedSpend>,
     pub sent_total: u64,
@@ -184,6 +203,15 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
         });
     }
 
+    let global = pczt.global();
+    let header = ReviewHeader {
+        tx_version: *global.tx_version(),
+        version_group_id: *global.version_group_id(),
+        consensus_branch_id: *global.consensus_branch_id(),
+        expiry_height: *global.expiry_height(),
+        coin_type: *global.coin_type(),
+    };
+
     let mut outputs = Vec::with_capacity(spend_facts.len());
     let mut spends = Vec::with_capacity(spend_facts.len());
     let mut declared_net: i128 = 0;
@@ -231,6 +259,7 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
         }
         if !padding {
             spends.push(ReviewedSpend {
+                action_index: index,
                 nullifier: facts.nullifier,
                 value: facts.value,
             });
@@ -336,6 +365,7 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
     let sent_total = outputs.iter().filter(|o| !o.is_change).fold(0u64, |acc, o| acc.saturating_add(o.value));
 
     Ok(Review {
+        header,
         outputs,
         spends,
         sent_total,

@@ -46,6 +46,12 @@ pub enum MaterialError {
     MissingRk { action_index: u32 },
     /// The PCZT could not be read by the verifier role.
     Unreadable,
+    /// An action is neither ours nor a valid filler: a non-zero spend whose `rk` is not our group key.
+    ForeignSpend { action_index: u32 },
+    /// An action's filler spend carries no signature, so someone must produce one — but its key is not ours.
+    UnsignedFiller { action_index: u32 },
+    /// No action spends a note of this group, so there is nothing for this signer to sign.
+    NoRealSpends,
 }
 
 impl core::fmt::Display for MaterialError {
@@ -55,6 +61,9 @@ impl core::fmt::Display for MaterialError {
             Self::AlphaCount { actions, alphas } => write!(f, "{alphas} alpha value(s) supplied for {actions} ironwood action(s)"),
             Self::MissingRk { action_index } => write!(f, "action {action_index}: no rk present"),
             Self::Unreadable => f.write_str("PCZT could not be read by the verifier role"),
+            Self::ForeignSpend { action_index } => write!(f, "action {action_index}: the spend is not ours and is not a zero-value filler"),
+            Self::UnsignedFiller { action_index } => write!(f, "action {action_index}: a zero-value spend that is not ours carries no signature"),
+            Self::NoRealSpends => f.write_str("no action spends a note of this group"),
         }
     }
 }
@@ -77,6 +86,107 @@ impl SpendMaterial {
         }
         Ok(())
     }
+}
+
+/// The actions this signer must produce signatures for, and the ones it must leave alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SigningSet {
+    /// Actions whose `rk` is this group key randomized by the action's own `alpha`, in bundle order, each
+    /// keeping its original `action_index`. Signature shares, nonces, commitments, aggregation and write-back
+    /// all use exactly this list.
+    pub real: Vec<SpendMaterial>,
+    /// Filler actions: zero value, not our key, already signed. They keep the signature the builder gave them
+    /// and must never be re-signed with the group key.
+    pub padding: Vec<u32>,
+}
+
+impl SigningSet {
+    pub fn real_indices(&self) -> Vec<u32> {
+        self.real.iter().map(|m| m.action_index).collect()
+    }
+}
+
+/// Decide which actions need this group's signatures.
+///
+/// An Ironwood bundle has one spend and one output per action, so a transaction that pays two addresses
+/// needs a filler spend that belongs to nobody. The rule cannot be "value is zero": a foreign non-zero spend
+/// hides value, and a zero-value spend with no signature cannot be broadcast. So an action counts as ours
+/// only when its `rk` really is `ak + alpha·G`; anything else has to prove it is inert — zero value *and*
+/// already signed.
+pub fn select_signing_set(pczt: &Pczt, group_verifying_key: &[u8; 32]) -> Result<SigningSet, MaterialError> {
+    use ff::PrimeField;
+    use pczt::roles::verifier::Verifier;
+
+    struct Facts {
+        index: u32,
+        alpha: [u8; 32],
+        rk: [u8; 32],
+        value: u64,
+        signed: bool,
+    }
+
+    // `rk` is read from the PCZT-format bundle: the verifier role hands back the parsed protocol type, whose
+    // verification key does not expose the original bytes.
+    let rks: Vec<[u8; 32]> = pczt.ironwood().actions().iter().map(|action| *action.spend().rk()).collect();
+
+    let mut facts: Vec<Facts> = Vec::new();
+    let mut read_error = false;
+    Verifier::new(pczt.clone())
+        .with_ironwood::<(), _>(|bundle| {
+            for (index, action) in bundle.actions().iter().enumerate() {
+                let spend = action.spend();
+                let (Some(alpha), Some(value)) = (spend.alpha(), spend.value()) else {
+                    read_error = true;
+                    return Ok(());
+                };
+                let Some(rk_bytes) = rks.get(index).copied() else {
+                    read_error = true;
+                    return Ok(());
+                };
+                let mut alpha_bytes = [0u8; 32];
+                alpha_bytes.copy_from_slice(&alpha.to_repr());
+                facts.push(Facts {
+                    index: index as u32,
+                    alpha: alpha_bytes,
+                    rk: rk_bytes,
+                    value: value.inner(),
+                    signed: spend.spend_auth_sig().is_some(),
+                });
+            }
+            Ok(())
+        })
+        .map_err(|_| MaterialError::Unreadable)?;
+    if read_error {
+        return Err(MaterialError::Unreadable);
+    }
+
+    let mut set = SigningSet {
+        real: Vec::new(),
+        padding: Vec::new(),
+    };
+    for fact in facts {
+        let expected = randomized_verifying_key(group_verifying_key, &fact.alpha).map_err(|_| MaterialError::RkMismatch { action_index: fact.index })?;
+        if expected == fact.rk {
+            set.real.push(SpendMaterial {
+                action_index: fact.index,
+                alpha: fact.alpha,
+                rk: fact.rk,
+            });
+            continue;
+        }
+        // Not ours. It may only be an inert filler: no value moved, and already signed by whoever built it.
+        if fact.value != 0 {
+            return Err(MaterialError::ForeignSpend { action_index: fact.index });
+        }
+        if !fact.signed {
+            return Err(MaterialError::UnsignedFiller { action_index: fact.index });
+        }
+        set.padding.push(fact.index);
+    }
+    if set.real.is_empty() {
+        return Err(MaterialError::NoRealSpends);
+    }
+    Ok(set)
 }
 
 /// Read every Ironwood action's `rk` from a PCZT.

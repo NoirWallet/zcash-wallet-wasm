@@ -303,3 +303,48 @@ fn a_tampered_memo_ciphertext_cannot_be_approved() {
     // And the untampered copy still approves, so the check is not simply always failing.
     assert!(review(&pczt, &honest.to_bytes()).is_ok());
 }
+
+#[test]
+fn the_signing_set_excludes_the_filler_spend_and_keeps_it_signed() {
+    // The bug this pins: a payment plus change needs two actions, one of which is a zero-value filler. The
+    // previous flow verified every action's `rk` against the group key, so a perfectly ordinary transaction
+    // was refused — the filler's key is not ours and never will be.
+    let ak = [0x11u8; 32];
+    let honest = fvk_for(&ak, 7);
+    let fake = fvk_for(&ak, 0x22);
+    let pczt = build_pczt_with_ovk(&ak, &honest, &fake.address_at(0u32, Scope::External), b"invoice 7");
+
+    let set = pczt_signer_core::material::select_signing_set(&pczt, &ak).expect("a payment plus change is signable");
+
+    assert_eq!(set.real.len(), 1, "one note of ours is being spent");
+    assert_eq!(set.padding.len(), 1, "and one filler");
+    assert!(!set.padding.contains(&set.real[0].action_index), "an action cannot be both");
+    // The real spend keeps its original bundle position, whatever that is.
+    let action_index = set.real[0].action_index;
+    assert!((action_index as usize) < pczt.ironwood().actions().len());
+
+    // Every real action passes the group-key check the old code applied to all of them.
+    set.real[0].verify_rk(&ak).expect("the real spend is ours");
+
+    // And the filler already carries a signature, so nothing expects us to produce one.
+    let signed = pczt.ironwood().actions()[set.padding[0] as usize].spend().spend_auth_sig().is_some();
+    assert!(signed, "the filler arrives signed by whoever built it");
+}
+
+#[test]
+fn a_foreign_non_zero_spend_is_not_excused_as_padding() {
+    // Checked with the wrong group key, the real spend's `rk` no longer matches. Value alone must not excuse
+    // it: a non-zero spend that is not ours is a spend the signer cannot account for.
+    let ak = [0x11u8; 32];
+    // A *valid* point that is simply not this group's key — a malformed key would fail earlier, at
+    // randomization, and would not test the padding rule.
+    let mut wrong = [0u8; 32];
+    let unrelated = SpendingKey::from_bytes([0x22; 32]).into_option().expect("valid sk");
+    wrong.copy_from_slice(&FullViewingKey::from(&unrelated).to_bytes()[..32]);
+    let honest = fvk_for(&ak, 7);
+    let fake = fvk_for(&ak, 0x22);
+    let pczt = build_pczt_with_ovk(&ak, &honest, &fake.address_at(0u32, Scope::External), b"invoice 7");
+
+    let err = pczt_signer_core::material::select_signing_set(&pczt, &wrong).expect_err("with another group key nothing is ours");
+    assert!(matches!(err, pczt_signer_core::material::MaterialError::ForeignSpend { .. }), "{err:?}");
+}

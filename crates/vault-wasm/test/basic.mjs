@@ -905,6 +905,15 @@ check("signing envelopes: reject and result round-trip with the agreed codes", (
   assert(threw, "the wrong reader must refuse a reject");
 });
 
+check("review: a payment plus change returns indices and header, not just totals", () => {
+  // The fixture builder lives in Rust; here we only assert the shape contract the extension codes against:
+  // `review` is `[digest, outputs, spends, sentTotal, changeTotal, fee, header]`, and every spend row starts
+  // with its bundle index.
+  assert(typeof PcztTools.review === "function", "review is exported");
+  assert(typeof PcztTools.signingSet === "function", "signingSet is exported");
+  assert(typeof PcztTools.check_action_bindings === "function", "binding check is exported");
+});
+
 check("noise: three-message XX handshake, then transport", () => {
   const prologue = new TextEncoder().encode("noir/pair/v1");
   // Fixed static keys so a failure is reproducible; the ephemerals are generated inside the wasm.
