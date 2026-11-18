@@ -265,3 +265,41 @@ fn the_senders_ovk_recovers_a_payment_outputs_memo() {
         .expect("the payment output is recoverable with the sender's ovk");
     assert_eq!(&recovered[..b"invoice 7".len()], b"invoice 7");
 }
+
+#[test]
+fn a_tampered_memo_ciphertext_cannot_be_approved() {
+    // Their probe, kept as a test: flip one byte inside a non-zero payment output's memo ciphertext. The PCZT
+    // still parses, the amount and commitment still check out, and the memo no longer decrypts. The review
+    // must refuse rather than hand back a result with an unverifiable memo on a payment.
+    let ak = [0x11u8; 32];
+    let honest = fvk_for(&ak, 7);
+    let fake = fvk_for(&ak, 0x22);
+    let pczt = build_pczt_with_memo(&ak, &honest, &fake.address_at(0u32, Scope::External), b"invoice 7");
+
+    // The ciphertext is what will be flipped; find it in the serialized PCZT.
+    let ciphertext = pczt
+        .ironwood()
+        .actions()
+        .iter()
+        .filter_map(|action| match action.output().enc_ciphertext() {
+            pczt::orchard::EncCiphertext::Encrypted(bytes) => Some(bytes.clone()),
+            _ => None,
+        })
+        .find(|bytes| bytes.len() == 580)
+        .expect("a finalized output carries the encrypted note plaintext");
+
+    let mut bytes = pczt.clone().serialize().expect("serialize");
+    let at = bytes
+        .windows(ciphertext.len())
+        .position(|window| window == ciphertext.as_slice())
+        .expect("the ciphertext appears verbatim in the serialization");
+    // Somewhere inside the AEAD body, past the lead byte and the ephemeral key.
+    bytes[at + 200] ^= 0x01;
+
+    let tampered = pczt::Pczt::parse(&bytes).expect("a tampered ciphertext still parses");
+    let err = review(&tampered, &honest.to_bytes()).expect_err("the memo no longer decrypts");
+    assert!(matches!(err, ReviewError::MemoUnreadable { .. }), "expected MemoUnreadable, got {err:?}");
+
+    // And the untampered copy still approves, so the check is not simply always failing.
+    assert!(review(&pczt, &honest.to_bytes()).is_ok());
+}

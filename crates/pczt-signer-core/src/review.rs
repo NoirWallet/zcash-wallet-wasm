@@ -31,8 +31,13 @@ use pczt::Pczt;
 /// recovered must not be presented as having no memo.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MemoReview {
-    /// The exact 512-byte memo, with trailing zero padding as the protocol defines it. An all-zero memo is
-    /// confirmed empty; anything else is the bytes the recipient will see.
+    /// The exact 512 bytes the recipient will read, uninterpreted.
+    ///
+    /// ZIP-302 decides what they mean, and the cases are not interchangeable: `0xF6` followed by all zeros is
+    /// [`Memo::Empty`](zcash_protocol::memo::Memo::Empty); a first byte of `0x00`–`0xF4` that parses as UTF-8
+    /// is text padded with zeros; `0xFF` is arbitrary bytes; anything else is a future memo type. An all-zero
+    /// buffer is *not* `0xF6`-style empty, and neither is the same thing as "no memo at all" — the caller must
+    /// keep raw-byte comparison and UI text rendering separate.
     Read(Vec<u8>),
     /// The memo could not be recovered: the output note could not be rebuilt, or decryption failed.
     NotReadable,
@@ -83,6 +88,12 @@ pub enum ReviewError {
     SpendNotOurs { action_index: u32 },
     /// The declared nullifier is not the one the note the PCZT describes produces.
     NullifierMismatch { action_index: u32 },
+    /// A non-zero output's memo could not be recovered.
+    ///
+    /// The review cannot show what the recipient will read, so it is not a result anyone can approve. Padding
+    /// outputs (`value == 0`) are exempt: they carry no funds, so an unreadable memo there cannot hide a
+    /// payment.
+    MemoUnreadable { action_index: u32 },
     /// The output's `(recipient, value)` does not match the commitment the signature covers.
     OutputMismatch { action_index: u32 },
     /// The declared values do not balance against the bundle's value balance.
@@ -101,6 +112,7 @@ impl core::fmt::Display for ReviewError {
                 write!(f, "action {action_index}: the spent note is not in this vault")
             }
             Self::NullifierMismatch { action_index } => write!(f, "action {action_index}: the declared nullifier is not the one this note produces"),
+            Self::MemoUnreadable { action_index } => write!(f, "action {action_index}: the output's memo could not be recovered, so it cannot be approved"),
             Self::OutputMismatch { action_index } => write!(f, "action {action_index}: the displayed recipient and amount do not match the commitment"),
             Self::BalanceMismatch { declared, committed } => write!(f, "declared values balance to {declared}, the bundle's value balance is {committed}"),
             Self::Impossible { reason } => write!(f, "{reason}"),
@@ -276,6 +288,13 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
         }
 
         let is_change = fvk.scope_for_address(&out_address).is_some();
+        let memo = memos.get(index as usize).cloned().unwrap_or(MemoReview::NotReadable);
+        // A payment whose memo cannot be read is not something a user can approve: they would be shown an
+        // output stripped of text the recipient will see. Zero-value padding is exempt because it moves no
+        // funds — an unreadable memo there cannot conceal a payment.
+        if matches!(memo, MemoReview::NotReadable) && out_value != 0 {
+            return Err(ReviewError::MemoUnreadable { action_index: index });
+        }
         outputs.push(ReviewedOutput {
             recipient: out_recipient,
             value: out_value,

@@ -344,8 +344,10 @@ fn review_pins_every_output_to_its_commitment() {
     match &reviewed.outputs[0].memo {
         pczt_signer_core::review::MemoReview::Read(bytes) => {
             assert_eq!(bytes.len(), 512, "the full memo, with its padding");
-            // `MemoBytes::empty()` is ZIP-302 empty text: marker byte then a zero length.
-            assert_eq!(&bytes[..2], &[0xF6, 0x00]);
+            // `MemoBytes::empty()` serializes as ZIP-302 `Memo::Empty`: `0xF6` followed by zero padding.
+            // That is a marker, not a length prefix — text memos are raw UTF-8 with zero padding.
+            assert_eq!(bytes[0], 0xF6);
+            assert!(bytes[1..].iter().all(|b| *b == 0));
         }
         other => panic!("expected a recovered memo, got {other:?}"),
     }
