@@ -26,5 +26,5 @@ pub mod sighash;
 pub use apply::{apply_all, apply_ironwood_signature, apply_material, ApplyError};
 pub use gate::{check, PcztShape, Refusal};
 pub use material::{bind_alphas, ironwood_action_rks, ActionRk, MaterialError, SpendMaterial};
-pub use review::{review, Review, ReviewError, ReviewedOutput, ReviewedSpend};
+pub use review::{review, MemoReview, Review, ReviewError, ReviewedOutput, ReviewedSpend};
 pub use sighash::{shielded_sighash, verify_shielded_sighash, SighashError};

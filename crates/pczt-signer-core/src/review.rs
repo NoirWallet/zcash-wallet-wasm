@@ -17,8 +17,23 @@ use orchard::keys::{FullViewingKey, Scope};
 use orchard::note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho};
 use orchard::value::NoteValue;
 use orchard::{Address, Note};
+use pczt::orchard::EncCiphertext;
 use pczt::roles::verifier::Verifier;
 use pczt::Pczt;
+
+/// What this signer could learn about an output's memo.
+///
+/// A signer usually **cannot** read a payment's memo: by the time a PCZT reaches it, the memo is encrypted
+/// to the recipient, and only the recipient's incoming view key opens it. `NotReadable` therefore means
+/// "could not verify", never "there is none" — an output with a memo the signer cannot see must not be
+/// presented as having no memo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoReview {
+    /// The PCZT still carried the memo as plaintext, so these are the exact bytes.
+    Read(Vec<u8>),
+    /// The memo was already encrypted, or was not present as plaintext.
+    NotReadable,
+}
 
 /// One output, as verified from the PCZT itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,8 +43,8 @@ pub struct ReviewedOutput {
     pub value: u64,
     /// Whether the recipient is in this vault's scope, i.e. change rather than a payment.
     pub is_change: bool,
-    /// Memo bytes, if the output carries one.
-    pub memo: Option<Vec<u8>>,
+    /// The memo, as far as this signer could check it.
+    pub memo: MemoReview,
 }
 
 /// One spend, as verified from the PCZT itself.
@@ -260,7 +275,11 @@ pub fn review(pczt: &Pczt, fvk_bytes: &[u8; 96]) -> Result<Review, ReviewError> 
             recipient: out_recipient,
             value: out_value,
             is_change,
-            memo: None,
+            // The memo reaches a signer already encrypted to the recipient; see `MemoReview`.
+            memo: match out.enc_ciphertext() {
+                EncCiphertext::MemoPlaintext(memo) => MemoReview::Read(memo.as_stripped_bytes().to_vec()),
+                EncCiphertext::Encrypted(_) => MemoReview::NotReadable,
+            },
         });
         // A padding spend contributes nothing; counting it would break the balance for no reason.
         if !padding {

@@ -339,6 +339,9 @@ fn review_pins_every_output_to_its_commitment() {
     assert_ne!(reviewed.spends[0].nullifier, [0u8; 32], "the nullifier is the lookup key");
     assert_eq!(reviewed.outputs[0].value, 990_000);
     assert!(reviewed.outputs[0].is_change, "the fixture pays itself");
+    // The memo is encrypted by the time a signer sees the PCZT, so the honest answer is "not readable",
+    // not "none". Anything else would present an unverified memo as an absent one.
+    assert_eq!(reviewed.outputs[0].memo, pczt_signer_core::review::MemoReview::NotReadable);
     assert_eq!(reviewed.change_total, 990_000);
     assert_eq!(reviewed.sent_total, 0);
     assert_eq!(reviewed.fee, 10_000);
