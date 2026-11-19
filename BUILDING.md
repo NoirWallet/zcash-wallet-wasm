@@ -1,8 +1,17 @@
 # Rebuilding the wallet WASM
 
-The wallet uses the `wasm-parallel,voting` release package built by
-`make build-voting-wasm`. `Dockerfile.wasm` builds the same Rust feature set and
-exports `pkg/` with its SHA-256 manifest. It does not build the browser extension.
+Two packages are built here, and they are not interchangeable:
+
+| Docker target | Make target | Features | Used by |
+| --- | --- | --- | --- |
+| `wasm-package` | `make build-voting-wasm` | `wasm-parallel,voting` | the shipping wallet |
+| `wasm-package-all` | `make build-all-wasm` | `wasm-parallel,voting,frost-vault` | the multisig extension (wallet + FROST vault) |
+
+`Dockerfile.wasm` builds one of them and exports `pkg/` with its SHA-256 manifest.
+It does not build the browser extension. The vault is an optional feature, so a
+package built for the shipping wallet has no `Dkg`, `Signer`, `PcztTools` or the
+rest of the vault exports; a frontend that needs them must take
+`wasm-package-all`.
 
 ## Requirements
 
@@ -43,7 +52,9 @@ docker run --rm --platform linux/amd64 \
 ```
 
 The output is in `wasm-dist/pkg/`, which is ignored by Git; the full build log
-is `wasm-dist/build.log`. The container creates and verifies
+is `wasm-dist/build.log`. For the multisig package, use `--target
+wasm-package-all` instead of `wasm-package`; everything else in this section is
+identical. The container creates and verifies
 `wasm-dist/SHA256SUMS` using its own Linux tools, and the last command verifies
 the exported files again. The host does not need `sha256sum` or GNU `sort`.
 Save the complete source SHA, Dockerfile revision,
