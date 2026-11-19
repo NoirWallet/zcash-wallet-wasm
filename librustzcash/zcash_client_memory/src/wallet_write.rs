@@ -1593,6 +1593,24 @@ Instead derive the ufvk in the calling code and import it using `import_account_
         use zcash_keys::keys::AddressGenerationError;
         // TODO: We need to implement first_unsafe_index to make sure we dont violate gap invarient
 
+        // Transaction construction reserves ephemeral addresses unconditionally, including for proposals
+        // that have no ephemeral outputs. Nothing needs reserving in that case, and asking an account that
+        // has no transparent key (an Orchard-only imported account, such as a FROST vault) how many it has
+        // already reserved would underflow into a "corrupted data" report.
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+
+        // An account with no transparent key can never store an ephemeral address, so a request for any is
+        // a caller error rather than corrupted state. Saying so here keeps the shared transaction builder's
+        // `assert_eq!` from being the thing that reports it.
+        let account = self.accounts.get(account_id).ok_or(Error::AccountUnknown(account_id))?;
+        if account.ephemeral_ivk()?.is_none() {
+            return Err(Error::BadAccountData(
+                "the account has no transparent key, so it cannot have ephemeral outputs".to_owned(),
+            ));
+        }
+
         use transparent::keys::NonHardenedChildIndex;
         let first_unsafe = self.first_unsafe_index(account_id)?;
         if let Some(account) = self.accounts.get_mut(account_id) {
@@ -1799,6 +1817,59 @@ mod tests {
     use zcash_protocol::consensus::{Parameters, TxIndex};
 
     use super::*;
+
+    #[test]
+    fn an_orchard_only_account_reserves_no_ephemeral_addresses() {
+        // Regression: a transaction with no ephemeral outputs still asks for zero reservations, and an
+        // account without a transparent key has no ephemeral address book at all. That used to underflow the
+        // gap-limit arithmetic and surface as "ephemeral_addresses corrupted", which made every vault
+        // transfer fail at PCZT construction.
+        use zcash_address::unified::{Encoding, Fvk, Revision, Uitem, Ufvk};
+        use zcash_keys::keys::UnifiedFullViewingKey;
+
+        let params = consensus::Network::TestNetwork;
+
+        // An Orchard-only UFVK is what a vault imports: a FROST group key spliced into an Orchard FVK, with
+        // no transparent component and therefore no P2PKH key for ephemeral addresses.
+        let sk = orchard::keys::SpendingKey::from_bytes([7u8; 32])
+            .into_option()
+            .expect("a valid spending key");
+        let orchard_fvk = orchard::keys::FullViewingKey::from(&sk).to_bytes();
+        let ufvk = Ufvk::try_from_items(Revision::R0, vec![Uitem::Data(Fvk::Orchard(orchard_fvk))])
+            .expect("an Orchard-only UFVK is representable");
+        let encoded = ufvk.encode(&params.network_type());
+        let ufvk = UnifiedFullViewingKey::decode(&params, &encoded).expect("round-trips");
+        assert!(
+            ufvk.p2pkh().is_none(),
+            "the fixture must have no transparent key, or it does not model a vault"
+        );
+
+        let mut wallet = MemoryWalletDb::new(params, 100);
+        let birthday = AccountBirthday::from_sapling_activation(
+            &params,
+            zcash_primitives::block::BlockHash::from_slice(&[0; 32]),
+        );
+        let account = wallet
+            .import_account_ufvk(
+                "vault",
+                &ufvk,
+                &birthday,
+                AccountPurpose::Spending { derivation: None },
+                None,
+            )
+            .expect("importing an Orchard-only account");
+        let account_id = account.account_id();
+
+        // Zero requested: nothing to reserve, and no reason to consult the address book.
+        assert_eq!(
+            wallet.reserve_next_n_ephemeral_addresses(account_id, 0).unwrap(),
+            Vec::new()
+        );
+
+        // More than zero: the account cannot have ephemeral outputs, so it says so instead of letting the
+        // shared builder's assertion be the thing that reports it.
+        assert!(wallet.reserve_next_n_ephemeral_addresses(account_id, 1).is_err());
+    }
 
     #[test]
     fn queue_rescan_reopens_scanned_range_without_touching_neighbors() {
