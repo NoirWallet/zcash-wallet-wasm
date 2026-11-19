@@ -58,7 +58,10 @@ RUN bash -o pipefail -c 'find pkg -type f -print0 | LC_ALL=C sort -z | xargs -0 
 FROM build AS build-all
 RUN CARGO_NET_OFFLINE=true make build-all-wasm
 RUN node tests/check_wasm_release.mjs pkg-all
-RUN bash -o pipefail -c 'find pkg-all -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS' \
+# The manifest must name the files as the exporter lays them out (`pkg/`), or the frontend's
+# `sha256sum -c` fails on paths even though the bytes are right.
+RUN rm -rf pkg && mv pkg-all pkg
+RUN bash -o pipefail -c 'find pkg -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS' \
     && sha256sum --check SHA256SUMS
 
 FROM scratch AS wasm-package
@@ -67,5 +70,5 @@ COPY --from=build /src/SHA256SUMS /SHA256SUMS
 
 # Wallet + FROST vault: what the multisig extension loads.
 FROM scratch AS wasm-package-all
-COPY --from=build-all /src/pkg-all /pkg
+COPY --from=build-all /src/pkg /pkg
 COPY --from=build-all /src/SHA256SUMS /SHA256SUMS
